@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schemastore.azurewebsites.net/schemas/json/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2019",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "inlineSourceMap": true,
+    "inlineSources": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "experimentalDecorators": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  }
+}

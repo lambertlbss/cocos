@@ -1,0 +1,106 @@
+{
+  "package_version": 2,
+  "name": "figma-importer-cocos",
+  "title": "Figma Importer",
+  "version": "1.0.0",
+  "description": "Figma UI importer for Cocos Creator 3.8.7",
+  "main": "./dist/main.js",
+  "author": "Figma Importer contributors",
+  "license": "MIT",
+  "engines": {
+    "creator": ">=3.8.7 <3.9.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "test": "npm run build && node --test tests/*.test.js",
+    "check": "npm run test"
+  },
+  "devDependencies": {
+    "@cocos/creator-types": "3.8.7",
+    "@types/node": "^16.18.126",
+    "typescript": "^5.2.2"
+  },
+  "panels": {
+    "default": {
+      "title": "Figma Importer",
+      "type": "dockable",
+      "main": "dist/panels/default",
+      "size": {
+        "min-width": 420,
+        "min-height": 560,
+        "width": 650,
+        "height": 820
+      }
+    }
+  },
+  "contributions": {
+    "menu": [
+      {
+        "path": "i18n:menu.panel/figma-importer-cocos",
+        "label": "i18n:figma-importer-cocos.open_panel",
+        "message": "open-panel"
+      }
+    ],
+    "scene": {
+      "script": "./dist/scene.js"
+    },
+    "messages": {
+      "open-panel": {
+        "methods": [
+          "openPanel"
+        ]
+      },
+      "get-state": {
+        "methods": [
+          "getState"
+        ]
+      },
+      "set-token": {
+        "methods": [
+          "setToken"
+        ]
+      },
+      "clear-token": {
+        "methods": [
+          "clearToken"
+        ]
+      },
+      "verify-token": {
+        "methods": [
+          "verifyToken"
+        ]
+      },
+      "save-settings": {
+        "methods": [
+          "saveSettings"
+        ]
+      },
+      "fetch-document": {
+        "methods": [
+          "fetchDocument"
+        ]
+      },
+      "get-preview": {
+        "methods": [
+          "getPreview"
+        ]
+      },
+      "import-selection": {
+        "methods": [
+          "importSelection"
+        ]
+      },
+      "cancel-import": {
+        "methods": [
+          "cancelImport"
+        ]
+      },
+      "progress": {
+        "methods": [
+          "default.onProgress"
+        ]
+      }
+    }
+  }
+}

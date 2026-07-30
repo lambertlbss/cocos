@@ -1,0 +1,171 @@
+<main id="app" class="shell" aria-label="Figma Importer" tabindex="0">
+    <header class="hero">
+        <div class="mark" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <div class="hero-copy">
+            <p class="eyebrow">Cocos Creator 3.8.7</p>
+            <h1>Figma Importer</h1>
+            <p>将设计系统带进可编辑的 Cocos UI 节点树。</p>
+        </div>
+        <div id="connection-pill" class="connection-pill is-offline">
+            <span class="status-dot"></span>
+            <span id="connection-label">未连接</span>
+        </div>
+    </header>
+
+    <section class="card security-card" aria-labelledby="security-title">
+        <div class="section-heading">
+            <div>
+                <span class="step">01</span>
+                <h2 id="security-title">安全连接</h2>
+            </div>
+            <span id="vault-badge" class="badge">会话存储</span>
+        </div>
+        <div class="token-row">
+            <label class="field grow">
+                <span>Figma Personal Access Token</span>
+                <input id="token-input" type="password" autocomplete="new-password"
+                    placeholder="粘贴后加密保存，不会回显" spellcheck="false">
+            </label>
+            <button id="save-token" class="button primary compact" type="button">保存</button>
+        </div>
+        <div class="inline-actions">
+            <button id="verify-token" class="text-button" type="button">验证连接</button>
+            <button id="clear-token" class="text-button danger" type="button">清除凭据</button>
+            <span id="vault-note" class="microcopy">Token 不写入项目文件</span>
+        </div>
+    </section>
+
+    <section class="card" aria-labelledby="source-title">
+        <div class="section-heading">
+            <div>
+                <span class="step">02</span>
+                <h2 id="source-title">设计来源</h2>
+            </div>
+            <span id="file-name" class="badge subtle">等待读取</span>
+        </div>
+        <label class="field">
+            <span>Figma 文件或节点链接</span>
+            <div class="input-action">
+                <input id="source-url" type="url" placeholder="https://www.figma.com/design/…?node-id=…"
+                    spellcheck="false">
+                <button id="fetch-document" class="button primary" type="button">读取设计</button>
+            </div>
+        </label>
+        <div class="source-options">
+            <label class="field">
+                <span>导入倍率</span>
+                <div class="number-input">
+                    <input id="scale" type="number" min="0.25" max="4" step="0.25" value="1">
+                    <span>×</span>
+                </div>
+            </label>
+            <label class="field grow">
+                <span>资源目录（assets 下）</span>
+                <input id="asset-folder" type="text" value="figma-importer" spellcheck="false">
+            </label>
+        </div>
+    </section>
+
+    <section id="progress-region" class="progress-region" aria-live="polite">
+        <div class="progress-copy">
+            <span id="progress-icon" class="pulse-dot"></span>
+            <span id="progress-label">准备就绪</span>
+            <span id="progress-percent">0%</span>
+        </div>
+        <div class="progress-track"><span id="progress-bar"></span></div>
+    </section>
+
+    <section class="card workspace-card" aria-labelledby="nodes-title">
+        <div class="section-heading">
+            <div>
+                <span class="step">03</span>
+                <h2 id="nodes-title">节点策略</h2>
+            </div>
+            <span id="node-count" class="badge subtle">0 节点</span>
+        </div>
+        <div class="toolbar">
+            <label class="search-field">
+                <span aria-hidden="true">⌕</span>
+                <input id="tree-search" type="search" placeholder="搜索名称、类型或 ID">
+            </label>
+            <div class="preset-group" aria-label="导入预设">
+                <button class="chip active" data-preset="smart" type="button">智能</button>
+                <button class="chip" data-preset="editable" type="button">可编辑</button>
+                <button class="chip" data-preset="visual" type="button">视觉优先</button>
+            </div>
+        </div>
+        <div class="workspace-grid">
+            <div id="tree" class="tree" role="tree" aria-label="Figma 节点">
+                <div class="empty-state">
+                    <span class="empty-glyph">↳</span>
+                    <strong>还没有节点</strong>
+                    <p>读取 Figma 链接后，可逐层选择生成、渲染、SVG 或更新。</p>
+                </div>
+            </div>
+            <aside class="preview-pane">
+                <div class="preview-head">
+                    <span>实时预览</span>
+                    <span id="preview-meta">未选择</span>
+                </div>
+                <div id="preview-stage" class="preview-stage">
+                    <div class="preview-placeholder">
+                        <span>◫</span>
+                        <p>选择节点查看渲染预览</p>
+                    </div>
+                    <img id="preview-image" alt="Figma 节点预览">
+                    <div id="preview-loading" class="preview-loading">生成预览…</div>
+                </div>
+            </aside>
+        </div>
+    </section>
+
+    <details class="card settings-card">
+        <summary>
+            <span><span class="step">04</span> 导入设置</span>
+            <span class="summary-hint">更新、缓存、字体</span>
+        </summary>
+        <div class="settings-grid">
+            <label class="toggle-row">
+                <input id="update-existing" type="checkbox" checked>
+                <span class="toggle"></span>
+                <span><strong>更新已有节点</strong><small>通过 UUID 映射保留节点引用</small></span>
+            </label>
+            <label class="toggle-row">
+                <input id="use-selection" type="checkbox" checked>
+                <span class="toggle"></span>
+                <span><strong>导入到当前选中节点</strong><small>未选中时自动放入 Canvas</small></span>
+            </label>
+            <label class="toggle-row">
+                <input id="refresh-assets" type="checkbox">
+                <span class="toggle"></span>
+                <span><strong>强制刷新资源</strong><small>忽略已有 PNG / SVG 缓存</small></span>
+            </label>
+            <label class="toggle-row">
+                <input id="auto-save" type="checkbox">
+                <span class="toggle"></span>
+                <span><strong>完成后保存场景</strong><small>关闭时仅创建可撤销快照</small></span>
+            </label>
+        </div>
+        <label class="field">
+            <span>字体映射（JSON：Figma 字体 → Cocos db:// 资源）</span>
+            <textarea id="font-map" rows="4" spellcheck="false"
+                placeholder='{"Inter": "db://assets/fonts/Inter.ttf"}'></textarea>
+            <small id="font-hint">当前文件尚未发现字体。</small>
+        </label>
+    </details>
+
+    <footer class="action-bar">
+        <div>
+            <strong id="selection-summary">等待设计数据</strong>
+            <span id="action-note">导入操作会创建一条可撤销快照</span>
+        </div>
+        <button id="cancel-import" class="button ghost is-hidden" type="button">取消</button>
+        <button id="import-button" class="button import" type="button" disabled>
+            <span>导入到场景</span><span aria-hidden="true">→</span>
+        </button>
+    </footer>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</main>
