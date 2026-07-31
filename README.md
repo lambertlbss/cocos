@@ -24,7 +24,11 @@
 5. 选择场景中的目标节点；未选择时会自动导入到 Canvas。
 6. 点击“导入到场景”。
 
-导入资源默认位于 `assets/figma-importer/file-<hash>`。再次导入同一文件时，扩展会使用项目级 UUID 映射更新原节点；节点名称不会附加 Figma ID。
+“导入到当前选中节点”只针对当前已经打开的场景或预制体编辑模式中的 Node。若要修改某个预制体，需要先双击该预制体进入预制体编辑模式，再选择预制体根节点或目标子节点；仅在资源管理器中选中 `.prefab` 文件不会直接修改它。
+
+资源输出目录用于存放最终导入 Cocos 的 PNG / SVG，可在面板中选择项目 `assets` 下的子目录，不再追加文件级子目录。资源直接使用 Figma 节点名，只替换文件系统不允许的字符；同名节点复用首次导入的资源，不再生成哈希或倍率后缀。
+
+“本地同名资源目录”是可选的素材来源，不是输出目录。启用后会递归查找与 Figma 节点同名的 PNG / SVG：文件位于当前项目 `assets` 内时直接绑定原 SpriteFrame，外部文件或需要独立九宫格元数据时复制到资源输出目录；未命中时才从 Figma 下载。不同子目录存在多个同名文件时，优先使用目录根部的文件，否则按路径排序使用第一个。下载缓存由插件在项目临时目录中自动维护，不需要手动配置。
 
 ## 节点策略
 
@@ -36,7 +40,11 @@
 - 九宫格：把识别到的三宫/九宫节点导入为 `Sprite.Type.SLICED`，切片边界写入 SpriteFrame 元数据。
 - 忽略：不创建当前节点；其未被抑制的子节点仍可独立导入。
 
-Figma Auto Layout 会映射为 Cocos `Layout`，裁剪和溢出映射为 `Mask` / `ScrollView`，Constraints 映射为 `Widget`。多个 Figma 页面会在同一导入根节点下横向排列，避免页面重叠。
+节点类型使用 Cocos 组件语义：`Node`、`Sprite`、`Label`、`Button`、`ScrollView`、`Layout`。滚动节点使用 `ScrollView → view（Mask）→ content（Layout）` 标准结构。
+
+“智能”和“分层高保真”都会保留容器层级；后者只把叶子节点渲染为 PNG / SVG。只有手动把带子节点的容器设为“PNG 整层”或“合并子树”时，子节点才不会单独生成。
+
+可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪映射为 `Mask`，明确的溢出或 `list_` / `scroll_` 命名映射为 `ScrollView`，Constraints 映射为 `Widget`。
 
 ## Token 安全
 
@@ -45,8 +53,7 @@ Figma Auto Layout 会映射为 Cocos `Layout`，裁剪和溢出映射为 `Mask` 
 - Windows 使用 DPAPI；macOS 使用系统钥匙串；Linux 检测到 `basic_text` 后端时拒绝持久化。
 - 系统加密不可用时，Token 仅保留在当前编辑器会话。
 - Token、明文或解密结果不会写入项目目录、资源、日志或节点数据。
-
-旧 Godot 版本曾在 `resources/settings.tres` 中保存明文 Token。该文件已从项目移除；若该 Token 曾提交或共享，请立即在 Figma 中撤销并创建新 Token。
+- 内部图片缓存只保存 PNG / SVG 字节，文件夹和文件名都使用哈希键，不包含 Token、Figma fileKey 或 nodeId 明文。
 
 ## 字体映射
 
@@ -54,12 +61,12 @@ Figma Auto Layout 会映射为 Cocos `Layout`，裁剪和溢出映射为 `Mask` 
 
 ```json
 {
-  "Inter": "db://assets/fonts/Inter.ttf",
-  "Noto Sans SC": "db://assets/fonts/NotoSansSC.ttf"
+  "JBHGY4": "db://assets/bundles/fonts/Font_CuYuan.ttf",
+  "Noto Sans SC": "db://assets/bundles/fonts/NotoSansSC.ttf"
 }
 ```
 
-未映射字体使用 Cocos 默认字体，不会阻塞导入。
+键是 Figma 的 `fontFamily`，值是 Cocos Asset Database URL，不建议填写操作系统绝对路径。未映射字体使用 Cocos 默认字体，不会阻塞导入。
 
 ## 开发与验证
 
@@ -68,4 +75,4 @@ npm run build
 npm test
 ```
 
-测试覆盖 Figma URL、全页面解析、缺失边界保护、动作分析、九宫格候选检测和渐变 SVG 生成。
+测试覆盖 Figma URL、全页面解析、缺失边界保护、Cocos 节点类型分析、安全 Auto Layout 降级、真实尺寸三/九宫边界、本地同名资源、内部缓存、Token 安全和渐变 SVG。

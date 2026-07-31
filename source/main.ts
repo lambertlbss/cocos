@@ -1,11 +1,14 @@
-import { createHash } from 'crypto';
+import { isAbsolute, join, relative, resolve } from 'path';
 import packageJSON from '../package.json';
 import { FigmaClient, CancelledError } from './figma/client';
-import { inferAction, inferKind } from './figma/analyzer';
+import { inferAction, inferCocosLayoutMode, inferKind } from './figma/analyzer';
 import { parseDocument } from './figma/parser';
+import { analyzeSliceGrid } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
 import { AssetWriter, resolveAssetUuid } from './importer/assets';
-import { gradientSvg } from './importer/svg';
+import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
+import { LocalResourceLibrary } from './importer/local-resources';
+import { gradientPng } from './importer/svg';
 import { TokenVault } from './security/token-vault';
 import {
     DEFAULT_SETTINGS,
@@ -34,6 +37,7 @@ interface Decision {
 }
 
 interface SceneImportPayload {
+    packageName: string;
     fileKey: string;
     rootName: string;
     rootFrame: Rect;
@@ -55,8 +59,14 @@ function emitProgress(progress: ProgressEvent): void {
     Editor.Message.send(packageJSON.name, 'progress', progress);
 }
 
+function defaultCacheFolder(): string {
+    return join(Editor.Project.tmpDir, packageJSON.name, 'asset-cache');
+}
+
 function safeSettings(value: unknown): ImportSettings {
-    const input = value && typeof value === 'object' ? value as Partial<ImportSettings> : {};
+    const input = value && typeof value === 'object'
+        ? value as Partial<ImportSettings>
+        : {};
     const scale = typeof input.scale === 'number' && Number.isFinite(input.scale)
         ? Math.max(0.25, Math.min(4, input.scale))
         : DEFAULT_SETTINGS.scale;
@@ -70,6 +80,9 @@ function safeSettings(value: unknown): ImportSettings {
         assetFolder: typeof input.assetFolder === 'string' && input.assetFolder.trim()
             ? input.assetFolder.trim()
             : DEFAULT_SETTINGS.assetFolder,
+        localResourceFolder: typeof input.localResourceFolder === 'string'
+            ? input.localResourceFolder.trim()
+            : '',
         scale,
         updateExisting: input.updateExisting !== false,
         refreshAssets: input.refreshAssets === true,
@@ -105,6 +118,78 @@ function beginOperation(): void {
 
 function finishOperation(): void {
     activeController = null;
+}
+
+function relativeAssetFolder(selectedPath: string): string {
+    const assetsRoot = resolve(Editor.Project.path, 'assets');
+    const selected = resolve(selectedPath);
+    const folder = relative(assetsRoot, selected);
+    if (!folder || folder === '.' || folder.startsWith('..') || isAbsolute(folder)) {
+        throw new Error('资源输出目录必须是项目 assets 下的子文件夹。');
+    }
+    return folder.replace(/\\/g, '/');
+}
+
+function assetDatabaseUrl(filePath: string): string | null {
+    const assetsRoot = resolve(Editor.Project.path, 'assets');
+    const selected = resolve(filePath);
+    const path = relative(assetsRoot, selected);
+    const outside = path === '..'
+        || path.startsWith('../')
+        || path.startsWith('..\\')
+        || isAbsolute(path);
+    if (!path || path === '.' || outside) {
+        return null;
+    }
+    return `db://assets/${path.replace(/\\/g, '/')}`;
+}
+
+async function pickAssetFolder(current: unknown): Promise<{
+    folder: string;
+    absolutePath: string;
+} | null> {
+    const assetsRoot = resolve(Editor.Project.path, 'assets');
+    const currentFolder = typeof current === 'string'
+        ? current.trim().replace(/\\/g, '/').replace(/^assets\/+/, '')
+        : '';
+    const initialPath = currentFolder && !currentFolder.startsWith('..')
+        ? resolve(assetsRoot, currentFolder)
+        : assetsRoot;
+    const result = await Editor.Dialog.select({
+        title: '选择 Figma 导入资源目录',
+        path: initialPath,
+        type: 'directory',
+        button: '选择目录',
+    });
+    const selected = result.filePaths[0];
+    if (result.canceled || !selected) {
+        return null;
+    }
+    return {
+        folder: relativeAssetFolder(selected),
+        absolutePath: resolve(selected),
+    };
+}
+
+async function pickLocalResourceFolder(current: unknown): Promise<{
+    folder: string;
+} | null> {
+    const currentFolder = typeof current === 'string' ? current.trim() : '';
+    const initialPath = currentFolder && isAbsolute(currentFolder)
+        ? currentFolder
+        : resolve(Editor.Project.path, 'assets');
+    const result = await Editor.Dialog.select({
+        title: '选择本地同名资源目录',
+        path: initialPath,
+        type: 'directory',
+        button: '选择目录',
+    });
+    const selected = result.filePaths[0];
+    if (result.canceled || !selected) {
+        return null;
+    }
+    const library = new LocalResourceLibrary(selected);
+    return { folder: library.root };
 }
 
 function unionFrame(nodes: FigmaNode[]): Rect {
@@ -156,9 +241,8 @@ function decisionMap(overrides: ImportOverride[]): Map<string, Decision> {
 function collectAssetRequests(
     roots: FigmaNode[],
     decisions: Map<string, Decision>,
-): { png: FigmaNode[]; svg: FigmaNode[]; gradients: FigmaNode[] } {
+): { png: FigmaNode[]; gradients: FigmaNode[] } {
     const png: FigmaNode[] = [];
-    const svg: FigmaNode[] = [];
     const gradients: FigmaNode[] = [];
     const visit = (node: FigmaNode) => {
         const decision = decisions.get(node.id) ?? defaultDecision(node);
@@ -171,46 +255,23 @@ function collectAssetRequests(
             return;
         }
         if (decision.action === 'svg') {
-            svg.push(node);
+            png.push(node);
             return;
         }
         if (decision.action === 'generate') {
             const fill = node.fills.find((item) => item.visible !== false && item.type.startsWith('GRADIENT_'));
             if (fill) {
-                gradients.push(node);
+                if (node.children.length) {
+                    gradients.push(node);
+                } else {
+                    png.push(node);
+                }
             }
         }
         node.children.forEach(visit);
     };
     roots.forEach(visit);
-    return { png, svg, gradients };
-}
-
-function patchBorders(node: FigmaNode, scale: number): {
-    left: number;
-    right: number;
-    top: number;
-    bottom: number;
-} | undefined {
-    const parent = node.absoluteBoundingBox;
-    const children = node.children.filter((child) => child.absoluteBoundingBox);
-    if (!parent || (children.length !== 3 && children.length !== 9)) {
-        return undefined;
-    }
-    const xs = children.map((child) => child.absoluteBoundingBox!).sort((left, right) => left.x - right.x);
-    const ys = children.map((child) => child.absoluteBoundingBox!).sort((top, bottom) => top.y - bottom.y);
-    const horizontal = children.length === 9 || Math.abs(xs[0].y - xs[1].y) < 2;
-    const vertical = children.length === 9 || !horizontal;
-    return {
-        left: horizontal ? Math.max(1, (xs[0].x + xs[0].width - parent.x) * scale) : 0,
-        right: horizontal
-            ? Math.max(1, (parent.x + parent.width - xs[xs.length - 1].x) * scale)
-            : 0,
-        top: vertical ? Math.max(1, (ys[0].y + ys[0].height - parent.y) * scale) : 0,
-        bottom: vertical
-            ? Math.max(1, (parent.y + parent.height - ys[ys.length - 1].y) * scale)
-            : 0,
-    };
+    return { png, gradients };
 }
 
 async function buildAssets(
@@ -218,60 +279,187 @@ async function buildAssets(
     decisions: Map<string, Decision>,
     importSettings: ImportSettings,
 ): Promise<Map<string, SpriteAssetSpec>> {
-    const fileFolder = `file-${createHash('sha1').update(session.fileKey).digest('hex').slice(0, 10)}`;
-    const writer = new AssetWriter(`${importSettings.assetFolder}/${fileFolder}`);
+    const writer = new AssetWriter(importSettings.assetFolder);
     await writer.initialize();
+    const cache = new LocalAssetCache(defaultCacheFolder());
+    await cache.initialize();
+    const localResources = importSettings.localResourceFolder
+        ? new LocalResourceLibrary(importSettings.localResourceFolder)
+        : null;
+    await localResources?.initialize();
     const requests = collectAssetRequests(session.roots, decisions);
-    const api = await client();
     const assets = new Map<string, SpriteAssetSpec>();
-    const total = requests.png.length + requests.svg.length + requests.gradients.length;
+    const total = requests.png.length + requests.gradients.length;
     let completed = 0;
+    let apiPromise: Promise<FigmaClient> | null = null;
 
-    const processRemote = async (nodes: FigmaNode[], format: 'png' | 'svg') => {
+    const getApi = () => {
+        apiPromise ??= client();
+        return apiPromise;
+    };
+
+    const completeAsset = (
+        node: FigmaNode,
+        asset: SpriteAssetSpec,
+        source: 'existing' | 'local' | 'cache' | 'figma' | 'generated' = 'figma',
+    ) => {
+        assets.set(node.id, asset);
+        completed += 1;
+        const verb = source === 'local'
+            ? '复用本地资源'
+            : source === 'existing'
+                ? '复用已有资源'
+                : source === 'generated'
+                    ? '生成渐变'
+                : '导入资源';
+        emitProgress({
+            phase: 'assets',
+            value: total ? completed / total : 1,
+            message: `${verb} ${completed}/${total} · ${node.name}`,
+        });
+    };
+
+    const processRemote = async (nodes: FigmaNode[]) => {
         if (!nodes.length) {
             return;
         }
-        const urls = await api.getImageUrls(session.fileKey, nodes.map((node) => node.id), format, importSettings.scale);
+        const format = 'png' as const;
+        const groups = new Map<string, { url: string; nodes: FigmaNode[] }>();
         for (const node of nodes) {
+            const url = writer.buildUrl(
+                node.name,
+                `${session.fileKey}:${node.id}`,
+                format,
+                importSettings.scale,
+            );
+            const key = url.normalize('NFKC').toLocaleLowerCase('en-US');
+            const group = groups.get(key) ?? { url, nodes: [] };
+            group.nodes.push(node);
+            groups.set(key, group);
+        }
+        const pending: Array<{
+            node: FigmaNode;
+            nodes: FigmaNode[];
+            url: string;
+            borders?: { left: number; right: number; top: number; bottom: number };
+            key: CacheEntryKey;
+            contents: Buffer | null;
+            source: 'local' | 'cache' | 'figma';
+        }> = [];
+        const completeGroup = (
+            groupedNodes: FigmaNode[],
+            asset: SpriteAssetSpec,
+            source: 'existing' | 'local' | 'cache' | 'figma',
+        ) => {
+            for (const groupedNode of groupedNodes) {
+                completeAsset(groupedNode, asset, source);
+            }
+        };
+        for (const { url, nodes: groupedNodes } of groups.values()) {
             if (activeController?.signal.aborted) {
                 throw new CancelledError();
             }
-            const url = writer.buildUrl(node.name, node.id, format, importSettings.scale);
+            const node = groupedNodes[0];
             const decision = decisions.get(node.id) ?? defaultDecision(node);
             const borders = decision.nineSlice && format === 'png'
-                ? patchBorders(node, importSettings.scale)
+                ? analyzeSliceGrid(node, importSettings.scale)?.borders
                 : undefined;
-            let asset = !importSettings.refreshAssets ? await writer.existing(url) : null;
-            if (!asset || borders) {
-                const remoteUrl = urls[node.id];
-                if (!remoteUrl) {
-                    throw new Error(`Figma 未能渲染节点：${node.name}`);
-                }
-                asset = await writer.write(url, await api.download(remoteUrl), borders);
+            const localMatch = localResources
+                ? await localResources.find(node.name, format)
+                : null;
+            const localUrl = localMatch && !borders
+                ? assetDatabaseUrl(localMatch.path)
+                : null;
+            const localAsset = localUrl ? await writer.existing(localUrl) : null;
+            if (localAsset) {
+                completeGroup(groupedNodes, localAsset, 'local');
+                continue;
             }
-            assets.set(node.id, asset);
-            completed += 1;
-            emitProgress({
-                phase: 'assets',
-                value: total ? completed / total : 1,
-                message: `导入资源 ${completed}/${total} · ${node.name}`,
+            const existing = !importSettings.refreshAssets ? await writer.existing(url) : null;
+            if (!localMatch && existing && !borders) {
+                completeGroup(groupedNodes, existing, 'existing');
+                continue;
+            }
+            const key: CacheEntryKey = {
+                fileKey: session.fileKey,
+                nodeId: node.id,
+                format,
+                scale: importSettings.scale,
+            };
+            const cached = localMatch || importSettings.refreshAssets
+                ? null
+                : await cache.read(key);
+            pending.push({
+                node,
+                nodes: groupedNodes,
+                url,
+                borders,
+                key,
+                contents: localMatch?.contents ?? cached,
+                source: localMatch ? 'local' : cached ? 'cache' : 'figma',
             });
+        }
+        const remoteNodes = pending.filter((item) => !item.contents).map((item) => item.node);
+        const urls = remoteNodes.length
+            ? await (await getApi()).getImageUrls(
+                session.fileKey,
+                remoteNodes.map((node) => node.id),
+                format,
+                importSettings.scale,
+            )
+            : {};
+        for (const item of pending) {
+            if (activeController?.signal.aborted) {
+                throw new CancelledError();
+            }
+            let contents = item.contents;
+            if (!contents) {
+                const remoteUrl = urls[item.node.id];
+                if (!remoteUrl) {
+                    throw new Error(`Figma 未能渲染节点：${item.node.name}`);
+                }
+                contents = await (await getApi()).download(remoteUrl);
+                await cache.write(item.key, contents);
+            }
+            completeGroup(
+                item.nodes,
+                await writer.write(item.url, contents, item.borders),
+                item.source,
+            );
         }
     };
 
-    await processRemote(requests.png, 'png');
-    await processRemote(requests.svg, 'svg');
+    await processRemote(requests.png);
 
+    const gradientAssets = new Map<string, SpriteAssetSpec>();
     for (const node of requests.gradients) {
         const frame = node.absoluteBoundingBox;
         const fill = node.fills.find((item) => item.visible !== false && item.type.startsWith('GRADIENT_'));
-        const svg = frame && fill ? gradientSvg(frame.width, frame.height, fill, cornerRadii(node)) : null;
-        if (svg) {
-            const url = writer.buildUrl(`${node.name}_gradient`, `${node.id}:gradient`, 'svg', 1);
-            const asset = !importSettings.refreshAssets
-                ? await writer.existing(url) ?? await writer.write(url, svg)
-                : await writer.write(url, svg);
-            assets.set(node.id, asset);
+        const png = frame && fill
+            ? gradientPng(
+                frame.width,
+                frame.height,
+                fill,
+                cornerRadii(node),
+                importSettings.scale,
+            )
+            : null;
+        if (png) {
+            const url = writer.buildUrl(
+                node.name,
+                `${session.fileKey}:${node.id}:gradient`,
+                'png',
+                importSettings.scale,
+            );
+            const gradientKey = url.normalize('NFKC').toLocaleLowerCase('en-US');
+            const firstAsset = gradientAssets.get(gradientKey);
+            const existing = firstAsset || importSettings.refreshAssets
+                ? null
+                : await writer.existing(url);
+            const asset = firstAsset ?? existing ?? await writer.write(url, png);
+            gradientAssets.set(gradientKey, asset);
+            completeAsset(node, asset, firstAsset || existing ? 'existing' : 'generated');
+            continue;
         }
         completed += 1;
         emitProgress({
@@ -292,6 +480,33 @@ async function resolveFonts(settings: ImportSettings): Promise<Map<string, strin
         }
     }
     return result;
+}
+
+function inferredLayoutMode(node: FigmaNode): string | undefined {
+    const nativeMode = inferCocosLayoutMode(node);
+    if (nativeMode) {
+        return nativeMode;
+    }
+    if (node.layoutMode && node.layoutMode !== 'NONE') {
+        return undefined;
+    }
+    const frames = node.children
+        .map((child) => child.absoluteBoundingBox)
+        .filter((frame): frame is Rect => Boolean(frame));
+    if (!frames.length) {
+        return 'VERTICAL';
+    }
+    const centersX = frames.map((frame) => frame.x + frame.width / 2);
+    const centersY = frames.map((frame) => frame.y + frame.height / 2);
+    const spreadX = Math.max(...centersX) - Math.min(...centersX);
+    const spreadY = Math.max(...centersY) - Math.min(...centersY);
+    if (spreadY <= 2) {
+        return 'HORIZONTAL';
+    }
+    if (spreadX <= 2) {
+        return 'VERTICAL';
+    }
+    return 'GRID';
 }
 
 function makeSpec(
@@ -331,7 +546,10 @@ function makeSpec(
         characters: node.characters,
         textStyle: node.style,
         layout: {
-            mode: resolvedKind === 'grid' ? 'GRID' : node.layoutMode,
+            mode: resolvedKind === 'layout' || resolvedKind === 'scrollView'
+                ? inferredLayoutMode(node)
+                : undefined,
+            sourceMode: node.layoutMode,
             wrap: node.layoutWrap,
             primaryAlign: node.primaryAxisAlignItems,
             counterAlign: node.counterAxisAlignItems,
@@ -411,6 +629,7 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         const nodeMaps = await getNodeMaps();
         const selected = importSettings.useSelection ? Editor.Selection.getLastSelected('node') : undefined;
         const payload: SceneImportPayload = {
+            packageName: packageJSON.name,
             fileKey: activeDocument.fileKey,
             rootName: activeDocument.fileName,
             rootFrame,
@@ -463,6 +682,7 @@ export const methods: Record<string, (...args: any[]) => any> = {
     async getState() {
         await vault.initialize();
         return {
+            version: packageJSON.version,
             vault: vault.status(),
             settings: await getSettings(),
             document: activeDocument ? {
@@ -498,6 +718,18 @@ export const methods: Record<string, (...args: any[]) => any> = {
 
     async saveSettings(value: unknown) {
         return saveSettings(value);
+    },
+
+    async pickAssetFolder(current: unknown) {
+        return pickAssetFolder(current);
+    },
+
+    async pickLocalResourceFolder(current: unknown) {
+        return pickLocalResourceFolder(current);
+    },
+
+    async pickCacheFolder(current: unknown) {
+        return pickLocalResourceFolder(current);
     },
 
     async fetchDocument(sourceUrl: string) {

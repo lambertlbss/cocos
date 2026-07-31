@@ -54,16 +54,29 @@
             </div>
         </label>
         <div class="source-options">
-            <label class="field">
-                <span>导入倍率</span>
+            <label class="field import-option scale-option">
+                <div class="field-heading">
+                    <span>导入倍率</span>
+                    <span class="field-scope">0.25–4×</span>
+                </div>
                 <div class="number-input">
-                    <input id="scale" type="number" min="0.25" max="4" step="0.25" value="1">
+                    <input id="scale" type="number" min="0.25" max="4" step="0.25" value="1"
+                        aria-describedby="scale-hint">
                     <span>×</span>
                 </div>
+                <small id="scale-hint">节点尺寸与导出图片同步缩放。</small>
             </label>
-            <label class="field grow">
-                <span>资源目录（assets 下）</span>
-                <input id="asset-folder" type="text" value="figma-importer" spellcheck="false">
+            <label class="field import-option output-option">
+                <div class="field-heading">
+                    <span>资源输出目录</span>
+                    <span class="field-scope">项目 assets 内</span>
+                </div>
+                <div class="input-action path-action">
+                    <input id="asset-folder" type="text" value="figma-importer" spellcheck="false"
+                        aria-describedby="asset-folder-hint">
+                    <button id="pick-asset-folder" class="button ghost compact" type="button">选择</button>
+                </div>
+                <small id="asset-folder-hint">使用 Figma 节点名直接写入；同名资源只导入第一份并复用。</small>
             </label>
         </div>
     </section>
@@ -93,7 +106,7 @@
             <div class="preset-group" aria-label="导入预设">
                 <button class="chip active" data-preset="smart" type="button">智能</button>
                 <button class="chip" data-preset="editable" type="button">可编辑</button>
-                <button class="chip" data-preset="visual" type="button">视觉优先</button>
+                <button class="chip" data-preset="visual" type="button">分层高保真</button>
             </div>
         </div>
         <div class="workspace-grid">
@@ -124,7 +137,7 @@
     <details class="card settings-card">
         <summary>
             <span><span class="step">04</span> 导入设置</span>
-            <span class="summary-hint">更新、缓存、字体</span>
+            <span class="summary-hint">更新、本地资源、字体</span>
         </summary>
         <div class="settings-grid">
             <label class="toggle-row">
@@ -148,10 +161,20 @@
                 <span><strong>完成后保存场景</strong><small>关闭时仅创建可撤销快照</small></span>
             </label>
         </div>
+        <label class="field cache-field">
+            <span>本地同名资源目录（可选）</span>
+            <div class="input-action path-action">
+                <input id="local-resource-folder" type="text" readonly spellcheck="false"
+                    placeholder="未启用，找不到资源时从 Figma 下载">
+                <button id="clear-local-resource-folder" class="button ghost compact" type="button">清空</button>
+                <button id="pick-local-resource-folder" class="button primary compact" type="button">选择</button>
+            </div>
+            <small>递归匹配同名 PNG / SVG；项目 assets 内直接复用，外部素材复制到输出目录，未命中才从 Figma 下载。</small>
+        </label>
         <label class="field">
             <span>字体映射（JSON：Figma 字体 → Cocos db:// 资源）</span>
             <textarea id="font-map" rows="4" spellcheck="false"
-                placeholder='{"Inter": "db://assets/fonts/Inter.ttf"}'></textarea>
+                placeholder='{"JBHGY4": "db://assets/bundles/fonts/Font_CuYuan.ttf"}'></textarea>
             <small id="font-hint">当前文件尚未发现字体。</small>
         </label>
     </details>
@@ -159,11 +182,16 @@
     <footer class="action-bar">
         <div>
             <strong id="selection-summary">等待设计数据</strong>
-            <span id="action-note">导入操作会创建一条可撤销快照</span>
+            <span id="action-note">导入到当前打开场景或预制体的选中节点下</span>
         </div>
         <button id="cancel-import" class="button ghost is-hidden" type="button">取消</button>
-        <button id="import-button" class="button import" type="button" disabled>
-            <span>导入到场景</span><span aria-hidden="true">→</span>
+        <button id="import-button" class="button import" type="button"
+            title="导入到当前打开场景或预制体" disabled>
+            <span id="import-button-progress" class="import-button-progress" aria-hidden="true"></span>
+            <span class="import-button-content">
+                <span id="import-button-label">导入到场景</span>
+                <span id="import-button-percent" aria-hidden="true">→</span>
+            </span>
         </button>
     </footer>
 

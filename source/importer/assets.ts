@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import type { SpriteAssetSpec } from '../types';
 
 interface AssetInfo {
@@ -20,6 +19,16 @@ interface AssetMeta {
     }>;
 }
 
+export function hasSlicedBorders(meta: AssetMeta | null | undefined): boolean {
+    const spriteMeta = Object.values(meta?.subMetas ?? {})
+        .find((item) => item.importer === 'sprite-frame');
+    return ['borderLeft', 'borderRight', 'borderTop', 'borderBottom']
+        .some((key) => {
+            const value = spriteMeta?.userData?.[key];
+            return typeof value === 'number' && Number.isFinite(value) && value > 0;
+        });
+}
+
 function normalizeFolder(input: string): string {
     const value = input.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     if (!value || value === '.' || value.split('/').some((part) => !part || part === '..')) {
@@ -34,14 +43,16 @@ function normalizeFolder(input: string): string {
     return value;
 }
 
-function sanitizeName(input: string): string {
-    const value = input
+export function sanitizeAssetName(input: string): string {
+    let value = input
         .normalize('NFKC')
-        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
-        .replace(/\s+/g, '_')
-        .replace(/_+/g, '_')
-        .replace(/^_+|_+$/g, '')
+        .replace(/[<>:"/\\|?*#%\u0000-\u001f]/g, '_')
+        .replace(/\s+/g, ' ')
+        .replace(/^[. ]+|[. ]+$/g, '')
         .slice(0, 72);
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value)) {
+        value = `_${value}`;
+    }
     return value || 'figma_node';
 }
 
@@ -104,10 +115,9 @@ export class AssetWriter {
         }
     }
 
-    buildUrl(name: string, id: string, extension: 'png' | 'svg', scale: number): string {
-        const digest = createHash('sha1').update(id).digest('hex').slice(0, 8);
-        const scaleTag = extension === 'png' ? `_${String(scale).replace('.', '_')}x` : '';
-        return `db://assets/${this.folder}/${sanitizeName(name)}_${digest}${scaleTag}.${extension}`;
+    buildUrl(name: string, _id: string, extension: 'png', _scale: number): string {
+        const fileName = sanitizeAssetName(name).replace(/\.(png|svg)$/i, '');
+        return `db://assets/${this.folder}/${fileName}.${extension}`;
     }
 
     async existing(url: string): Promise<SpriteAssetSpec | null> {
@@ -116,7 +126,12 @@ export class AssetWriter {
         if (!info?.imported || info.invalid || !spriteFrame) {
             return null;
         }
-        return { uuid: spriteFrame.uuid, url, sliced: false };
+        const meta = await Editor.Message.request(
+            'asset-db',
+            'query-asset-meta',
+            info.uuid,
+        ) as AssetMeta | null;
+        return { uuid: spriteFrame.uuid, url, sliced: hasSlicedBorders(meta) };
     }
 
     async write(
@@ -132,7 +147,8 @@ export class AssetWriter {
             await Editor.Message.request('asset-db', 'create-asset', url, data, { overwrite: true });
         }
         let info = await waitForAsset(url);
-        if (borders && Object.values(borders).some((value) => value > 0)) {
+        const sliced = Boolean(borders && Object.values(borders).some((value) => value > 0));
+        if (borders && sliced) {
             await this.applyBorders(info, borders);
             info = await waitForAsset(url);
         }
@@ -140,7 +156,7 @@ export class AssetWriter {
         if (!spriteFrame) {
             throw new Error(`资源没有生成 SpriteFrame：${url}`);
         }
-        return { uuid: spriteFrame.uuid, url, sliced: Boolean(borders) };
+        return { uuid: spriteFrame.uuid, url, sliced };
     }
 
     private async applyBorders(

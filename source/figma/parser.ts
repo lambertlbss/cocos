@@ -147,6 +147,7 @@ export function parseNode(value: unknown): FigmaNode | null {
         style: input.style ? parseTextStyle(input.style) : undefined,
         layoutMode: stringValue(input.layoutMode) || undefined,
         layoutWrap: stringValue(input.layoutWrap) || undefined,
+        layoutPositioning: stringValue(input.layoutPositioning) || undefined,
         primaryAxisAlignItems: stringValue(input.primaryAxisAlignItems) || undefined,
         counterAxisAlignItems: stringValue(input.counterAxisAlignItems) || undefined,
         primaryAxisSizingMode: stringValue(input.primaryAxisSizingMode) || undefined,

@@ -4,6 +4,7 @@ import type { FigmaColor, FigmaPaint, Rect, SceneNodeSpec } from './types';
 module.paths.push(join(Editor.App.path, 'node_modules'));
 
 interface SceneImportPayload {
+    packageName: string;
     fileKey: string;
     rootName: string;
     rootFrame: Rect;
@@ -20,6 +21,8 @@ interface SceneImportResult {
     created: number;
     updated: number;
 }
+
+const BACKGROUND_NODE_NAME = '__FigmaBackground';
 
 function cleanName(input: string): string {
     return input.replace(/[\u0000-\u001f/\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 96) || 'Figma Node';
@@ -61,6 +64,16 @@ function findCanvas(root: any, Canvas: any): any | null {
     return null;
 }
 
+function containsNode(root: any, target: any): boolean {
+    if (!root || !target) {
+        return false;
+    }
+    if (root === target) {
+        return true;
+    }
+    return root.children.some((child: any) => containsNode(child, target));
+}
+
 function removeGeneratedComponents(node: any, classes: any[]): void {
     for (const type of classes) {
         const component = node.getComponent(type);
@@ -68,6 +81,15 @@ function removeGeneratedComponents(node: any, classes: any[]): void {
             node.removeComponent(component);
         }
     }
+}
+
+function removeGeneratedBackground(node: any): void {
+    const background = node.getChildByName(BACKGROUND_NODE_NAME);
+    if (!background) {
+        return;
+    }
+    background.removeFromParent();
+    background.destroy();
 }
 
 function framePosition(frame: Rect, parentFrame: Rect | undefined, scale: number): { x: number; y: number } {
@@ -101,9 +123,11 @@ function visiblePaint(paints: FigmaPaint[]): FigmaPaint | undefined {
 
 function configureGraphics(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const { Graphics } = cc;
-    const fill = visiblePaint(spec.fills);
-    const stroke = visiblePaint(spec.strokes);
-    if ((!fill || fill.type !== 'SOLID') && (!stroke || stroke.type !== 'SOLID')) {
+    const fill = spec.fills.find((paint) =>
+        paint.visible !== false && (paint.opacity ?? 1) > 0 && paint.type === 'SOLID');
+    const stroke = spec.strokes.find((paint) =>
+        paint.visible !== false && (paint.opacity ?? 1) > 0 && paint.type === 'SOLID');
+    if (!fill && !stroke) {
         return;
     }
     const graphics = node.addComponent(Graphics);
@@ -181,15 +205,20 @@ function loadAsset(assetManager: any, uuid: string): Promise<any> {
     });
 }
 
-async function configureSprite(node: any, spec: SceneNodeSpec, cc: any): Promise<void> {
+async function configureSprite(node: any, spec: SceneNodeSpec, scale: number, cc: any): Promise<void> {
     if (!spec.sprite) {
         return;
     }
-    const { Sprite, assetManager } = cc;
+    const { Sprite, UITransform, assetManager } = cc;
     const sprite = node.addComponent(Sprite);
-    sprite.spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
     sprite.sizeMode = Sprite.SizeMode.CUSTOM;
     sprite.type = spec.sprite.sliced ? Sprite.Type.SLICED : Sprite.Type.SIMPLE;
+    sprite.spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
+    const transform = node.getComponent(UITransform);
+    transform?.setContentSize(
+        Math.max(0, spec.frame.width * scale),
+        Math.max(0, spec.frame.height * scale),
+    );
 }
 
 function configureOpacity(node: any, spec: SceneNodeSpec, cc: any): void {
@@ -255,12 +284,17 @@ function configureLayout(node: any, spec: SceneNodeSpec, scale: number, cc: any)
         return;
     }
     const { Layout, Size } = cc;
-    const layout = node.addComponent(Layout);
+    const layout = node.getComponent(Layout) ?? node.addComponent(Layout);
     layout.type = mode === 'HORIZONTAL'
         ? Layout.Type.HORIZONTAL
         : mode === 'VERTICAL'
             ? Layout.Type.VERTICAL
             : Layout.Type.GRID;
+    if (mode === 'GRID') {
+        layout.startAxis = spec.layout?.sourceMode === 'VERTICAL'
+            ? Layout.AxisDirection.VERTICAL
+            : Layout.AxisDirection.HORIZONTAL;
+    }
     layout.resizeMode = Layout.ResizeMode.NONE;
     layout.paddingLeft = spec.layout!.paddingLeft * scale;
     layout.paddingRight = spec.layout!.paddingRight * scale;
@@ -362,16 +396,26 @@ function applyCounterAlignment(
 }
 
 function configureClip(node: any, spec: SceneNodeSpec, cc: any): void {
-    if (!spec.clipsContent || spec.kind === 'scroll') {
-        return;
-    }
-    const mask = node.addComponent(cc.Mask);
-    mask.type = spec.figmaType === 'ELLIPSE' ? cc.Mask.Type.ELLIPSE : cc.Mask.Type.RECT;
+    const mask = node.getComponent(cc.Mask) ?? node.addComponent(cc.Mask);
+    mask.type = spec.figmaType === 'ELLIPSE'
+        ? cc.Mask.Type.ELLIPSE
+        : cc.Mask.Type.GRAPHICS_RECT ?? cc.Mask.Type.RECT;
+}
+
+function clipsGeneratedChildren(spec: SceneNodeSpec): boolean {
+    return spec.clipsContent
+        && spec.kind !== 'scrollView'
+        && spec.children.length > 0
+        && spec.action === 'generate';
 }
 
 function configureButton(node: any, spec: SceneNodeSpec, cc: any): void {
     if (spec.kind === 'button') {
-        node.addComponent(cc.Button);
+        const button = node.addComponent(cc.Button);
+        button.target = node;
+        button.transition = cc.Button.Transition.SCALE;
+        button.zoomScale = 0.9;
+        button.duration = 0.1;
     }
 }
 
@@ -381,28 +425,92 @@ function configureScroll(
     transform: any,
     cc: any,
 ): any {
-    if (spec.kind !== 'scroll') {
+    if (spec.kind !== 'scrollView') {
         return node;
     }
     const { Node, UITransform, Mask, ScrollView } = cc;
-    const mask = node.addComponent(Mask);
-    mask.type = Mask.Type.RECT;
     const scroll = node.addComponent(ScrollView);
-    let content = node.getChildByName('__FigmaContent');
+    let view = node.getChildByName('view');
+    if (!view) {
+        view = new Node('view');
+        view.layer = node.layer;
+        node.addChild(view);
+    }
+    const viewTransform = view.getComponent(UITransform) ?? view.addComponent(UITransform);
+    viewTransform.setAnchorPoint(0, 1);
+    viewTransform.setContentSize(transform.contentSize.width, transform.contentSize.height);
+    view.setPosition(0, 0, 0);
+    const mask = view.getComponent(Mask) ?? view.addComponent(Mask);
+    mask.type = Mask.Type.GRAPHICS_RECT ?? Mask.Type.RECT;
+    let content = view.getChildByName('content');
     if (!content) {
-        content = new Node('__FigmaContent');
-        node.addChild(content);
+        content = new Node('content');
+        content.layer = node.layer;
+        view.addChild(content);
     }
     const contentTransform = content.getComponent(UITransform) ?? content.addComponent(UITransform);
     contentTransform.setAnchorPoint(0, 1);
     contentTransform.setContentSize(transform.contentSize.width, transform.contentSize.height);
     content.setPosition(0, 0, 0);
+    const legacy = node.getChildByName('__FigmaContent');
+    if (legacy && legacy !== content) {
+        for (const child of [...legacy.children]) {
+            child.parent = content;
+        }
+        legacy.destroy();
+    }
     scroll.content = contentTransform;
-    scroll.view = transform;
+    scroll.view = viewTransform;
     const direction = spec.overflowDirection ?? 'VERTICAL_SCROLLING';
     scroll.horizontal = direction === 'HORIZONTAL_SCROLLING' || direction === 'HORIZONTAL_AND_VERTICAL_SCROLLING';
     scroll.vertical = direction === 'VERTICAL_SCROLLING' || direction === 'HORIZONTAL_AND_VERTICAL_SCROLLING';
     return content;
+}
+
+function finalizeScroll(
+    node: any,
+    spec: SceneNodeSpec,
+    content: any,
+    viewport: any,
+    scale: number,
+    cc: any,
+): void {
+    if (spec.kind !== 'scrollView' || content === node) {
+        return;
+    }
+    const transform = content.getComponent(cc.UITransform);
+    if (!transform) {
+        return;
+    }
+    const childRight = spec.children.map((child) =>
+        (child.frame.x - spec.frame.x + child.frame.width) * scale);
+    const childBottom = spec.children.map((child) =>
+        (child.frame.y - spec.frame.y + child.frame.height) * scale);
+    transform.setContentSize(
+        Math.max(viewport.contentSize.width, 0, ...childRight),
+        Math.max(viewport.contentSize.height, 0, ...childBottom),
+    );
+    content.setPosition(0, 0, 0);
+}
+
+function countSpecs(specs: SceneNodeSpec[]): number {
+    return specs.reduce((total, spec) => total + 1 + countSpecs(spec.children), 0);
+}
+
+function emitSceneProgress(
+    payload: SceneImportPayload,
+    value: number,
+    message: string,
+): void {
+    try {
+        Editor.Message.send(payload.packageName, 'progress', {
+            phase: 'scene',
+            value,
+            message,
+        });
+    } catch {
+        // 进度反馈不可用时不应中断场景导入。
+    }
 }
 
 export function load(): void {}
@@ -427,21 +535,23 @@ export const methods = {
             Button,
             Widget,
             UIOpacity,
+            Camera,
         } = cc;
         const scene = director.getScene();
         if (!scene) {
             throw new Error('当前没有打开的场景。');
         }
-        const target = payload.targetUuid ? findByUuid(scene, payload.targetUuid) : null;
-        const parent = target ?? findCanvas(scene, Canvas) ?? scene;
+        const selectedTarget = payload.targetUuid ? findByUuid(scene, payload.targetUuid) : null;
+        const target = selectedTarget?.getComponent(Camera) ? null : selectedTarget;
+        const fallbackParent = findCanvas(scene, Canvas) ?? scene;
         const generatedClasses = [
+            Mask,
             Graphics,
             Sprite,
             Label,
             LabelOutline,
             Layout,
             ScrollView,
-            Mask,
             Button,
             Widget,
             UIOpacity,
@@ -449,10 +559,19 @@ export const methods = {
         const nodeMap: Record<string, string> = {};
         let created = 0;
         let updated = 0;
+        const totalNodes = Math.max(1, countSpecs(payload.roots));
+        let completedNodes = 0;
 
         let importRoot = payload.updateExisting && payload.existingMap.__root__
             ? findByUuid(scene, payload.existingMap.__root__)
             : null;
+        if (importRoot && (!importRoot.name.startsWith('Figma · ') || importRoot.getComponent(Camera))) {
+            importRoot = null;
+        }
+        const reusedImportRoot = Boolean(importRoot);
+        const parent = importRoot && containsNode(importRoot, target)
+            ? importRoot.parent ?? fallbackParent
+            : target ?? fallbackParent;
         if (!importRoot) {
             importRoot = new Node(`Figma · ${cleanName(payload.rootName)}`);
             parent.addChild(importRoot);
@@ -489,7 +608,9 @@ export const methods = {
 
             if (spec.action !== 'transform') {
                 removeGeneratedComponents(node, generatedClasses);
+                removeGeneratedBackground(node);
                 configureGeometry(node, spec, payload.scale, cc);
+                const clipsChildren = clipsGeneratedChildren(spec);
                 if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
                     configureLabel(node, spec, payload.scale, cc);
                     if (spec.fontUuid) {
@@ -497,13 +618,14 @@ export const methods = {
                         label.font = await loadAsset(cc.assetManager, spec.fontUuid);
                     }
                 } else if (spec.sprite) {
-                    await configureSprite(node, spec, cc);
+                    await configureSprite(node, spec, payload.scale, cc);
+                } else if (clipsChildren) {
+                    configureClip(node, spec, cc);
                 } else {
                     configureGraphics(node, spec, payload.scale, cc);
                 }
                 configureOpacity(node, spec, cc);
                 configureButton(node, spec, cc);
-                configureClip(node, spec, cc);
                 if (!parentHasLayout) {
                     configureWidget(node, spec, payload.scale, cc);
                 }
@@ -525,13 +647,28 @@ export const methods = {
             if (layout) {
                 applyCounterAlignment(childParent, spec, nodeMap, payload.scale, cc);
             }
+            finalizeScroll(node, spec, childParent, transform, payload.scale, cc);
             if (!existed && spec.action === 'transform') {
                 node.name += ' · Transform';
             }
+            completedNodes += 1;
+            emitSceneProgress(
+                payload,
+                completedNodes / totalNodes,
+                `构建节点 ${completedNodes}/${totalNodes} · ${spec.name}`,
+            );
         };
 
-        for (const root of payload.roots) {
-            await build(root, importRoot, false);
+        try {
+            for (const root of payload.roots) {
+                await build(root, importRoot, false);
+            }
+        } catch (error) {
+            if (!reusedImportRoot) {
+                importRoot.removeFromParent();
+                importRoot.destroy();
+            }
+            throw error;
         }
         return {
             rootUuid: importRoot.uuid,

@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { isAbsolute, join, resolve } from 'path';
 import packageJSON from '../../../package.json';
 import type {
     ImportAction,
@@ -30,16 +30,27 @@ interface PanelState {
     selectedId?: string;
     search: string;
     busy: boolean;
+    runtimeCompatible: boolean;
 }
 
 let panelHost: any = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let importButtonResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+const VECTOR_NODE_TYPES = new Set([
+    'VECTOR',
+    'BOOLEAN_OPERATION',
+    'STAR',
+    'LINE',
+    'REGULAR_POLYGON',
+]);
 
 const state: PanelState = {
     document: null,
     settings: {
         sourceUrl: '',
         assetFolder: 'figma-importer',
+        localResourceFolder: '',
         scale: 1,
         updateExisting: true,
         refreshAssets: false,
@@ -55,6 +66,7 @@ const state: PanelState = {
     suppressed: new Set(),
     search: '',
     busy: false,
+    runtimeCompatible: true,
 };
 
 function root(): HTMLElement {
@@ -82,6 +94,20 @@ function showToast(message: string, error = false): void {
         clearTimeout(toastTimer);
     }
     toastTimer = setTimeout(() => toast.classList.remove('show'), 3400);
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+    if (error instanceof Error && error.message) {
+        return error.message;
+    }
+    if (typeof error === 'string' && error.trim()) {
+        return error;
+    }
+    if (error && typeof error === 'object' && 'message' in error
+        && typeof (error as { message?: unknown }).message === 'string') {
+        return (error as { message: string }).message;
+    }
+    return fallback;
 }
 
 function setConnection(vault: {
@@ -118,6 +144,14 @@ function findNode(id: string, nodes = state.document?.tree ?? []): TreeNodeDto |
     return undefined;
 }
 
+function isVectorNodeType(type: string): boolean {
+    return VECTOR_NODE_TYPES.has(type);
+}
+
+function safeAction(_node: TreeNodeDto, action: ImportAction): ImportAction {
+    return action === 'svg' ? 'render' : action;
+}
+
 function initializeDocument(document: DocumentDto): void {
     state.document = document;
     state.actions.clear();
@@ -127,10 +161,22 @@ function initializeDocument(document: DocumentDto): void {
     state.collapsed.clear();
     state.suppressed.clear();
     for (const node of flatten(document.tree)) {
-        state.actions.set(node.id, node.action);
+        const inferred = safeAction(node, node.action);
+        const action = node.children.length && terminal(inferred) && inferred !== 'merge'
+            ? 'generate'
+            : inferred;
+        state.actions.set(node.id, action);
         state.kinds.set(node.id, node.kind);
-        state.defaults.set(node.id, { action: node.action, kind: node.kind });
+        state.defaults.set(node.id, { action, kind: node.kind });
     }
+    for (const node of flatten(document.tree)) {
+        if (state.actions.get(node.id) === 'merge' && !state.suppressed.has(node.id)) {
+            setAction(node, 'merge');
+        }
+    }
+    root().querySelectorAll<HTMLElement>('[data-preset]').forEach((button) => {
+        button.classList.toggle('active', button.dataset.preset === 'smart');
+    });
     element('#file-name').textContent = document.fileName;
     element<HTMLInputElement>('#source-url').value = document.sourceUrl;
     element('#font-hint').textContent = document.fonts.length
@@ -144,11 +190,15 @@ function applySettings(settings: ImportSettings): void {
     state.settings = settings;
     element<HTMLInputElement>('#source-url').value = settings.sourceUrl;
     element<HTMLInputElement>('#asset-folder').value = settings.assetFolder;
+    const localResourceFolder = element<HTMLInputElement>('#local-resource-folder');
+    localResourceFolder.value = settings.localResourceFolder ?? '';
+    localResourceFolder.title = settings.localResourceFolder ?? '';
     element<HTMLInputElement>('#scale').value = String(settings.scale);
     element<HTMLInputElement>('#update-existing').checked = settings.updateExisting;
     element<HTMLInputElement>('#refresh-assets').checked = settings.refreshAssets;
     element<HTMLInputElement>('#auto-save').checked = settings.autoSave;
     element<HTMLInputElement>('#use-selection').checked = settings.useSelection;
+    updateTargetHint();
     element<HTMLTextAreaElement>('#font-map').value = Object.keys(settings.fontMap).length
         ? JSON.stringify(settings.fontMap, null, 2)
         : '';
@@ -179,9 +229,17 @@ function readSettings(showError = true): ImportSettings | null {
         }
         return null;
     }
+    const assetFolder = element<HTMLInputElement>('#asset-folder').value.trim();
+    if (!assetFolder) {
+        if (showError) {
+            showToast('请选择项目 assets 下的资源输出目录。', true);
+        }
+        return null;
+    }
     return {
         sourceUrl: element<HTMLInputElement>('#source-url').value.trim(),
-        assetFolder: element<HTMLInputElement>('#asset-folder').value.trim(),
+        assetFolder,
+        localResourceFolder: element<HTMLInputElement>('#local-resource-folder').value.trim(),
         scale,
         updateExisting: element<HTMLInputElement>('#update-existing').checked,
         refreshAssets: element<HTMLInputElement>('#refresh-assets').checked,
@@ -195,8 +253,45 @@ function setBusy(value: boolean): void {
     state.busy = value;
     element<HTMLButtonElement>('#fetch-document').disabled = value;
     element<HTMLButtonElement>('#save-token').disabled = value;
-    element<HTMLButtonElement>('#import-button').disabled = value || !state.document;
+    element<HTMLButtonElement>('#pick-asset-folder').disabled = value;
+    element<HTMLButtonElement>('#pick-local-resource-folder').disabled = value;
+    element<HTMLButtonElement>('#clear-local-resource-folder').disabled = value;
+    element<HTMLButtonElement>('#import-button').disabled = value
+        || !state.document
+        || !state.runtimeCompatible;
     element('#cancel-import').classList.toggle('is-hidden', !value);
+}
+
+function updateTargetHint(): void {
+    if (!state.runtimeCompatible) {
+        element('#action-note').textContent = '主进程与面板版本不一致，需要完整重启 Cocos Creator';
+        return;
+    }
+    const useSelection = element<HTMLInputElement>('#use-selection').checked;
+    element('#action-note').textContent = useSelection
+        ? '导入到当前打开场景或预制体的选中节点下'
+        : '导入到当前 Canvas 根节点下';
+}
+
+function resetImportButton(): void {
+    const button = element<HTMLButtonElement>('#import-button');
+    button.classList.remove('is-running', 'is-success', 'is-error');
+    button.removeAttribute('aria-busy');
+    button.title = '导入到当前打开场景或预制体';
+    element('#import-button-label').textContent = '导入到场景';
+    element('#import-button-percent').textContent = '→';
+    (element('#import-button-progress') as HTMLElement).style.width = '0%';
+}
+
+function importProgress(event: ProgressEvent): number {
+    const value = Math.max(0, Math.min(1, event.value));
+    if (event.phase === 'assets') {
+        return 0.05 + value * 0.55;
+    }
+    if (event.phase === 'scene') {
+        return 0.6 + value * 0.38;
+    }
+    return event.phase === 'done' ? 1 : 0;
 }
 
 function updateProgress(event: ProgressEvent): void {
@@ -208,6 +303,37 @@ function updateProgress(event: ProgressEvent): void {
     const value = Math.max(0, Math.min(1, event.value));
     element('#progress-percent').textContent = `${Math.round(value * 100)}%`;
     (element('#progress-bar') as HTMLElement).style.width = `${value * 100}%`;
+    const button = element<HTMLButtonElement>('#import-button');
+    const importing = event.phase === 'assets' || event.phase === 'scene';
+    if (importButtonResetTimer) {
+        clearTimeout(importButtonResetTimer);
+        importButtonResetTimer = null;
+    }
+    if (importing) {
+        const progress = importProgress(event);
+        button.classList.add('is-running');
+        button.classList.remove('is-success', 'is-error');
+        button.setAttribute('aria-busy', 'true');
+        button.title = event.message;
+        element('#import-button-label').textContent = event.phase === 'assets' ? '准备资源' : '构建节点';
+        element('#import-button-percent').textContent = `${Math.round(progress * 100)}%`;
+        (element('#import-button-progress') as HTMLElement).style.width = `${progress * 100}%`;
+    } else if (event.phase === 'done') {
+        button.classList.remove('is-running', 'is-error');
+        button.classList.add('is-success');
+        button.removeAttribute('aria-busy');
+        element('#import-button-label').textContent = '导入完成';
+        element('#import-button-percent').textContent = '100%';
+        (element('#import-button-progress') as HTMLElement).style.width = '100%';
+        importButtonResetTimer = setTimeout(resetImportButton, 1400);
+    } else if (event.phase === 'error' || event.phase === 'cancelled') {
+        button.classList.remove('is-running', 'is-success');
+        button.classList.add('is-error');
+        button.removeAttribute('aria-busy');
+        element('#import-button-label').textContent = event.phase === 'cancelled' ? '已取消' : '导入失败';
+        element('#import-button-percent').textContent = '重试';
+        importButtonResetTimer = setTimeout(resetImportButton, 1800);
+    }
     if (['done', 'error', 'cancelled', 'idle'].includes(event.phase)) {
         setBusy(false);
     }
@@ -222,6 +348,7 @@ function descendants(node: TreeNodeDto): TreeNodeDto[] {
 }
 
 function setAction(node: TreeNodeDto, action: ImportAction): void {
+    action = safeAction(node, action);
     state.actions.set(node.id, action);
     if (terminal(action)) {
         for (const child of descendants(node)) {
@@ -311,24 +438,29 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     copy.append(name, meta);
     main.append(collapse, dot, copy);
 
-    const action = makeSelect('action-select', state.actions.get(node.id) ?? node.action, [
+    const actionOptions: Array<[string, string]> = [
         ['ignore', '忽略'],
         ['generate', '生成'],
-        ['render', 'PNG'],
-        ['svg', 'SVG'],
-        ['merge', '合并'],
+        ['render', 'PNG 整层'],
+        ['merge', '合并子树'],
         ['transform', '更新'],
-    ], `${node.name} 导入方式`);
+    ];
+    const action = makeSelect(
+        'action-select',
+        safeAction(node, state.actions.get(node.id) ?? node.action),
+        actionOptions,
+        `${node.name} 导入方式`,
+    );
     action.dataset.actionFor = node.id;
 
     const kind = makeSelect('kind-select', state.kinds.get(node.id) ?? node.kind, [
         ['auto', '自动'],
-        ['container', '容器'],
-        ['label', '文本'],
-        ['button', '按钮'],
-        ['scroll', '滚动'],
-        ['grid', '网格'],
-        ['sprite', '精灵'],
+        ['node', 'Node'],
+        ['sprite', 'Sprite'],
+        ['label', 'Label'],
+        ['button', 'Button'],
+        ['scrollView', 'ScrollView'],
+        ['layout', 'Layout'],
     ], `${node.name} 节点类型`);
     kind.dataset.kindFor = node.id;
 
@@ -378,7 +510,10 @@ function updateSummary(): void {
     element('#selection-summary').textContent = state.document
         ? `${selected.length} / ${nodes.length} 个节点将参与导入`
         : '等待设计数据';
-    element<HTMLButtonElement>('#import-button').disabled = state.busy || !state.document || !selected.length;
+    element<HTMLButtonElement>('#import-button').disabled = state.busy
+        || !state.document
+        || !selected.length
+        || !state.runtimeCompatible;
 }
 
 async function preview(node: TreeNodeDto): Promise<void> {
@@ -420,20 +555,27 @@ function applyPreset(name: string): void {
     if (name === 'smart') {
         for (const node of all) {
             const original = state.defaults.get(node.id)!;
-            state.actions.set(node.id, original.action);
+            state.actions.set(node.id, node.children.length && original.action !== 'merge'
+                ? 'generate'
+                : safeAction(node, original.action));
             state.kinds.set(node.id, original.kind);
+        }
+        for (const node of all) {
+            if (state.actions.get(node.id) === 'merge' && !state.suppressed.has(node.id)) {
+                setAction(node, 'merge');
+            }
         }
     } else if (name === 'editable') {
         for (const node of all) {
-            state.actions.set(node.id, ['VECTOR', 'BOOLEAN_OPERATION', 'STAR', 'LINE', 'REGULAR_POLYGON']
-                .includes(node.type) ? 'svg' : 'generate');
+            state.actions.set(node.id, isVectorNodeType(node.type) ? 'render' : 'generate');
         }
     } else {
         for (const node of all) {
-            state.actions.set(node.id, 'ignore');
-        }
-        for (const node of state.document.tree) {
-            setAction(node, 'render');
+            state.actions.set(node.id, !node.visible
+                ? 'ignore'
+                : node.children.length
+                    ? 'generate'
+                    : 'render');
         }
     }
     root().querySelectorAll<HTMLElement>('[data-preset]').forEach((button) => {
@@ -444,6 +586,10 @@ function applyPreset(name: string): void {
 }
 
 async function importToScene(): Promise<void> {
+    if (!state.runtimeCompatible) {
+        showToast('扩展主进程仍是旧版，请保存项目并完整重启 Cocos Creator。', true);
+        return;
+    }
     if (!state.document || state.busy) {
         return;
     }
@@ -463,7 +609,10 @@ async function importToScene(): Promise<void> {
         await request('import-selection', { overrides, settings });
         showToast('导入完成，已在场景中选中根节点。');
     } catch (error) {
-        showToast(error instanceof Error ? error.message : '导入失败。', true);
+        const message = errorMessage(error, '导入失败。');
+        updateProgress({ phase: 'error', value: 0, message });
+        showToast(message, true);
+    } finally {
         setBusy(false);
     }
 }
@@ -528,6 +677,74 @@ function bindEvents(): void {
             element<HTMLButtonElement>('#fetch-document').click();
         }
     });
+    element('#pick-asset-folder').addEventListener('click', async () => {
+        try {
+            const current = element<HTMLInputElement>('#asset-folder').value;
+            const result = await request<{ folder: string; absolutePath: string } | null>(
+                'pick-asset-folder',
+                current,
+            );
+            if (!result) {
+                return;
+            }
+            const input = element<HTMLInputElement>('#asset-folder');
+            input.value = result.folder;
+            input.title = result.absolutePath;
+            const settings = readSettings(false);
+            if (settings) {
+                await request('save-settings', settings);
+            }
+            showToast(`资源将写入 assets/${result.folder}`);
+        } catch (error) {
+            showToast(error instanceof Error ? error.message : '选择资源目录失败。', true);
+        }
+    });
+    element('#pick-local-resource-folder').addEventListener('click', async () => {
+        if (!state.runtimeCompatible) {
+            showToast('请先保存项目并完整重启 Cocos Creator，再选择本地资源目录。', true);
+            return;
+        }
+        try {
+            const current = element<HTMLInputElement>('#local-resource-folder').value;
+            const result = await Editor.Dialog.select({
+                title: '选择本地同名资源目录',
+                path: current && isAbsolute(current)
+                    ? current
+                    : resolve(Editor.Project.path, 'assets'),
+                type: 'directory',
+                button: '选择目录',
+            });
+            const selected = result.filePaths[0];
+            if (result.canceled || !selected) {
+                return;
+            }
+            const folder = resolve(selected);
+            const input = element<HTMLInputElement>('#local-resource-folder');
+            input.value = folder;
+            input.title = folder;
+            const settings = readSettings(false);
+            if (settings) {
+                await request('save-settings', settings);
+            }
+            showToast('已启用本地同名资源优先。');
+        } catch (error) {
+            showToast(error instanceof Error ? error.message : '选择本地资源目录失败。', true);
+        }
+    });
+    element('#clear-local-resource-folder').addEventListener('click', async () => {
+        if (!state.runtimeCompatible) {
+            showToast('请先保存项目并完整重启 Cocos Creator。', true);
+            return;
+        }
+        const input = element<HTMLInputElement>('#local-resource-folder');
+        input.value = '';
+        input.title = '';
+        const settings = readSettings(false);
+        if (settings) {
+            await request('save-settings', settings);
+        }
+        showToast('已关闭本地同名资源优先。');
+    });
     element('#import-button').addEventListener('click', importToScene);
     element('#cancel-import').addEventListener('click', () => request('cancel-import'));
 
@@ -563,7 +780,13 @@ function bindEvents(): void {
         if (target.dataset.actionFor) {
             const node = findNode(target.dataset.actionFor);
             if (node) {
-                setAction(node, target.value as ImportAction);
+                const action = target.value as ImportAction;
+                setAction(node, action);
+                root().querySelectorAll<HTMLElement>('[data-preset]')
+                    .forEach((button) => button.classList.remove('active'));
+                if (terminal(action) && node.children.length) {
+                    showToast(`“${node.name}”将作为整层导入，${descendants(node).length} 个子节点不会单独生成。`);
+                }
                 renderTree();
             }
         } else if (target.dataset.kindFor) {
@@ -588,9 +811,12 @@ function bindEvents(): void {
     });
 
     root().querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-        '#scale, #asset-folder, #update-existing, #refresh-assets, #auto-save, #use-selection, #font-map',
+        '#scale, #asset-folder, #local-resource-folder, #update-existing, #refresh-assets, #auto-save, #use-selection, #font-map',
     ).forEach((control) => {
         control.addEventListener('change', async () => {
+            if (control.id === 'use-selection') {
+                updateTargetHint();
+            }
             const settings = readSettings(false);
             if (settings) {
                 await request('save-settings', settings);
@@ -619,14 +845,24 @@ module.exports = Editor.Panel.define({
         bindEvents();
         try {
             const initial = await request<{
+                version?: string;
                 vault: any;
                 settings: ImportSettings;
                 document: DocumentDto | null;
             }>('get-state');
+            state.runtimeCompatible = initial.version === packageJSON.version;
             setConnection(initial.vault);
             applySettings(initial.settings);
             if (initial.document) {
                 initializeDocument(initial.document);
+            }
+            if (!state.runtimeCompatible) {
+                updateSummary();
+                const button = element<HTMLButtonElement>('#import-button');
+                button.classList.add('is-error');
+                element('#import-button-label').textContent = '请重启 Cocos';
+                element('#import-button-percent').textContent = '↻';
+                showToast('检测到旧版主进程仍在运行：请保存项目并完整重启 Cocos Creator。', true);
             }
         } catch (error) {
             showToast(error instanceof Error ? error.message : '初始化失败。', true);

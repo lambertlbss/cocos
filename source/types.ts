@@ -2,12 +2,12 @@ export type ImportAction = 'ignore' | 'generate' | 'render' | 'svg' | 'merge' | 
 
 export type NodeKind =
     | 'auto'
-    | 'container'
+    | 'node'
+    | 'sprite'
     | 'label'
     | 'button'
-    | 'scroll'
-    | 'grid'
-    | 'sprite';
+    | 'scrollView'
+    | 'layout';
 
 export interface Rect {
     x: number;
@@ -81,6 +81,7 @@ export interface FigmaNode {
     style?: FigmaTextStyle;
     layoutMode?: string;
     layoutWrap?: string;
+    layoutPositioning?: string;
     primaryAxisAlignItems?: string;
     counterAxisAlignItems?: string;
     primaryAxisSizingMode?: string;
@@ -137,6 +138,7 @@ export interface ImportOverride {
 export interface ImportSettings {
     sourceUrl: string;
     assetFolder: string;
+    localResourceFolder: string;
     scale: number;
     updateExisting: boolean;
     refreshAssets: boolean;
@@ -176,6 +178,7 @@ export interface SceneNodeSpec {
     textStyle?: FigmaTextStyle;
     layout?: {
         mode?: string;
+        sourceMode?: string;
         wrap?: string;
         primaryAlign?: string;
         counterAlign?: string;
@@ -208,6 +211,7 @@ export interface ProgressEvent {
 export const DEFAULT_SETTINGS: ImportSettings = {
     sourceUrl: '',
     assetFolder: 'figma-importer',
+    localResourceFolder: '',
     scale: 1,
     updateExisting: true,
     refreshAssets: false,

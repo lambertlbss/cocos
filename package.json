@@ -2,7 +2,7 @@
   "package_version": 2,
   "name": "figma-importer-cocos",
   "title": "Figma Importer",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Figma UI importer for Cocos Creator 3.8.7",
   "main": "./dist/main.js",
   "author": "Figma Importer contributors",
@@ -74,6 +74,21 @@
       "save-settings": {
         "methods": [
           "saveSettings"
+        ]
+      },
+      "pick-asset-folder": {
+        "methods": [
+          "pickAssetFolder"
+        ]
+      },
+      "pick-local-resource-folder": {
+        "methods": [
+          "pickLocalResourceFolder"
+        ]
+      },
+      "pick-cache-folder": {
+        "methods": [
+          "pickCacheFolder"
         ]
       },
       "fetch-document": {

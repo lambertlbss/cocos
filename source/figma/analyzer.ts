@@ -1,4 +1,5 @@
 import type { FigmaNode, ImportAction, NodeKind, TreeNodeDto } from '../types';
+import { analyzeSliceGrid } from './slicing';
 
 const CONTAINER_TYPES = new Set([
     'DOCUMENT',
@@ -18,6 +19,17 @@ const VECTOR_TYPES = new Set([
     'LINE',
     'REGULAR_POLYGON',
 ]);
+
+const SLICE_RECTANGLE_NAME = /^Rectangle(?:[\s_-]*\d+)?$/i;
+
+export function isVectorNode(node: Pick<FigmaNode, 'type'>): boolean {
+    return VECTOR_TYPES.has(node.type);
+}
+
+export function isNamedSliceGroup(node: FigmaNode): boolean {
+    return (node.children.length === 3 || node.children.length === 9)
+        && node.children.every((child) => SLICE_RECTANGLE_NAME.test(child.name.trim()));
+}
 
 function hasVisibleImage(node: FigmaNode): boolean {
     return node.fills.some((fill) => fill.visible !== false && fill.type === 'IMAGE');
@@ -42,21 +54,48 @@ function hasComplexPaint(node: FigmaNode): boolean {
         || Boolean(strokes.length && node.strokeAlign && node.strokeAlign !== 'CENTER');
 }
 
+export function inferCocosLayoutMode(node: FigmaNode): string | undefined {
+    const mode = node.layoutMode;
+    if (!mode || mode === 'NONE') {
+        return undefined;
+    }
+    const visibleChildren = node.children.filter((child) => child.visible !== false);
+    if (visibleChildren.some((child) => child.layoutPositioning === 'ABSOLUTE')) {
+        return undefined;
+    }
+    const needsGridValidation = mode === 'GRID' || node.layoutWrap === 'WRAP';
+    if (!needsGridValidation) {
+        return mode;
+    }
+    const frames = visibleChildren
+        .map((child) => child.absoluteBoundingBox)
+        .filter((frame): frame is NonNullable<FigmaNode['absoluteBoundingBox']> => Boolean(frame));
+    if (frames.length !== visibleChildren.length || frames.length < 2) {
+        return undefined;
+    }
+    const widths = frames.map((frame) => frame.width);
+    const heights = frames.map((frame) => frame.height);
+    const uniformWidth = Math.max(...widths) - Math.min(...widths) <= 2;
+    const uniformHeight = Math.max(...heights) - Math.min(...heights) <= 2;
+    return uniformWidth && uniformHeight ? 'GRID' : undefined;
+}
+
 export function inferKind(node: FigmaNode): NodeKind {
     if (node.type === 'TEXT') {
         return 'label';
     }
-    if (node.overflowDirection && node.overflowDirection !== 'NONE') {
-        return 'scroll';
+    if ((node.overflowDirection && node.overflowDirection !== 'NONE')
+        || /(^|_)(list|scroll)(_|$)|列表|滚动/i.test(node.name)) {
+        return 'scrollView';
     }
-    if (/button|按钮/i.test(node.name)) {
+    if (/(^|_)btn_|button|按钮/i.test(node.name)) {
         return 'button';
     }
-    if (node.layoutMode === 'GRID') {
-        return 'grid';
+    if (inferCocosLayoutMode(node)) {
+        return 'layout';
     }
     if (CONTAINER_TYPES.has(node.type)) {
-        return 'container';
+        return 'node';
     }
     return 'sprite';
 }
@@ -65,14 +104,25 @@ export function inferAction(node: FigmaNode): ImportAction {
     if (!node.visible) {
         return 'ignore';
     }
-    if (node.type === 'TEXT' || CONTAINER_TYPES.has(node.type)) {
+    if (isNamedSliceGroup(node)) {
+        return 'merge';
+    }
+    if (node.type === 'TEXT') {
         if (hasVisibleImage(node) || hasComplexEffects(node) || hasComplexPaint(node)) {
             return 'render';
         }
         return 'generate';
     }
-    if (VECTOR_TYPES.has(node.type)) {
-        return 'svg';
+    if (CONTAINER_TYPES.has(node.type)) {
+        if (node.children.length) {
+            return 'generate';
+        }
+        return hasVisibleImage(node) || hasComplexEffects(node) || hasComplexPaint(node)
+            ? 'render'
+            : 'generate';
+    }
+    if (isVectorNode(node)) {
+        return 'render';
     }
     if (node.type === 'ELLIPSE' || node.type === 'RECTANGLE') {
         return hasVisibleImage(node) || hasComplexEffects(node) || hasComplexPaint(node)
@@ -83,15 +133,7 @@ export function inferAction(node: FigmaNode): ImportAction {
 }
 
 export function isPatchCandidate(node: FigmaNode): boolean {
-    if (node.children.length !== 3 && node.children.length !== 9) {
-        return false;
-    }
-    const counts = new Map<string, number>();
-    for (const child of node.children) {
-        const key = child.name.trim().toLowerCase();
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    return [...counts.values()].some((count) => count >= 3);
+    return isNamedSliceGroup(node) || Boolean(analyzeSliceGrid(node));
 }
 
 function warningFor(node: FigmaNode): string | undefined {
@@ -100,6 +142,13 @@ function warningFor(node: FigmaNode): string | undefined {
     }
     if (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode)) {
         return `混合模式 ${node.blendMode} 将近似处理`;
+    }
+    if (isNamedSliceGroup(node)) {
+        return '检测到 3/9 个 Rectangle 切片，将合并子树并优先复用同名资源';
+    }
+    if (CONTAINER_TYPES.has(node.type) && node.children.length
+        && (hasVisibleImage(node) || hasComplexEffects(node) || hasComplexPaint(node))) {
+        return '复杂容器将优先保留可编辑子节点，背景会近似处理';
     }
     return undefined;
 }
