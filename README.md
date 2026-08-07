@@ -36,7 +36,7 @@
 
 - 生成：转换为 `UITransform`、`Graphics`、`Label`、`Layout`、`Button`、`ScrollView`、`Mask`、`Widget` 等可编辑组件。
 - PNG：由 Figma 渲染后导入 `SpriteFrame`，适合图片填充、阴影和复杂效果。
-- 矢量节点：通过 Figma PNG 渲染后导入 `Sprite`，不会用 `cc.Graphics` 近似任意矢量路径。
+- 矢量节点：面板显示为“PNG Sprite”，通过 Figma PNG 渲染后导入 `Sprite`，不会用 `cc.Graphics` 近似任意矢量路径；它只渲染当前矢量节点，不会压平父节点子树。
 - 合并：把当前节点及其子树合并为一张 PNG。
 - 更新：只更新已映射节点的几何与可见性。
 - 九宫格：把识别到的三宫/九宫节点导入为 `Sprite.Type.SLICED`，切片边界写入 SpriteFrame 元数据。

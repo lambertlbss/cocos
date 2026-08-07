@@ -502,7 +502,7 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     const actionOptions: Array<[string, string]> = [
         ['ignore', '忽略'],
         ['generate', '生成'],
-        ['render', 'PNG 整层'],
+        ['render', isVectorNodeType(node.type) ? 'PNG Sprite' : 'PNG 整层'],
         ['merge', '合并子树'],
         ['transform', '更新'],
     ];
