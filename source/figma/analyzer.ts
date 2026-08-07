@@ -108,9 +108,9 @@ export function inferAction(node: FigmaNode): ImportAction {
         return 'merge';
     }
     if (node.type === 'TEXT') {
-        if (hasVisibleImage(node) || hasComplexEffects(node) || hasComplexPaint(node)) {
-            return 'render';
-        }
+        // Text remains an editable Cocos Label. Even when Figma reports fills,
+        // shadows, or other paint data, exporting a bitmap would lose the text
+        // semantics and make the imported UI impossible to edit.
         return 'generate';
     }
     if (CONTAINER_TYPES.has(node.type)) {

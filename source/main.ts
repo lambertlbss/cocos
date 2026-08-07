@@ -314,6 +314,14 @@ function defaultDecision(node: FigmaNode): Decision {
     };
 }
 
+function decisionForNode(node: FigmaNode, decisions: Map<string, Decision>): Decision {
+    const decision = decisions.get(node.id) ?? defaultDecision(node);
+    if (node.type === 'TEXT' && decision.action !== 'ignore') {
+        return { ...decision, action: 'generate', nineSlice: false };
+    }
+    return decision;
+}
+
 function decisionMap(overrides: ImportOverride[]): Map<string, Decision> {
     return new Map(overrides.map((item) => [item.id, {
         action: item.action,
@@ -329,8 +337,12 @@ function collectAssetRequests(
     const png: FigmaNode[] = [];
     const gradients: FigmaNode[] = [];
     const visit = (node: FigmaNode) => {
-        const decision = decisions.get(node.id) ?? defaultDecision(node);
+        const decision = decisionForNode(node, decisions);
         if (decision.action === 'ignore') {
+            node.children.forEach(visit);
+            return;
+        }
+        if (node.type === 'TEXT') {
             node.children.forEach(visit);
             return;
         }
@@ -370,6 +382,28 @@ async function buildAssets(
     const localResources = importSettings.localResourceFolders
         .map((folder) => new LocalResourceLibrary(folder));
     await Promise.all(localResources.map((library) => library.initialize()));
+    const promoteLocalParents = async (node: FigmaNode): Promise<void> => {
+        const decision = decisionForNode(node, decisions);
+        if (decision.action === 'ignore') {
+            await Promise.all(node.children.map(promoteLocalParents));
+            return;
+        }
+        if (node.children.length && node.type !== 'TEXT') {
+            let localMatch = null;
+            for (const library of localResources) {
+                localMatch = await library.find(node.name, 'png');
+                if (localMatch) {
+                    break;
+                }
+            }
+            if (localMatch) {
+                decisions.set(node.id, { ...decision, action: 'render', nineSlice: false });
+                return;
+            }
+        }
+        await Promise.all(node.children.map(promoteLocalParents));
+    };
+    await Promise.all(session.roots.map(promoteLocalParents));
     const requests = collectAssetRequests(session.roots, decisions);
     const assets = new Map<string, SpriteAssetSpec>();
     const total = requests.png.length + requests.gradients.length;
@@ -603,7 +637,7 @@ function makeSpec(
     assets: Map<string, SpriteAssetSpec>,
     fonts: Map<string, string>,
 ): SceneNodeSpec | null {
-    const decision = decisions.get(node.id) ?? defaultDecision(node);
+    const decision = decisionForNode(node, decisions);
     if (decision.action === 'ignore') {
         return null;
     }

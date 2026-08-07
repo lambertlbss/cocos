@@ -28,6 +28,12 @@ function node(value) {
 
 test('chooses editable Cocos components where fidelity is safe', () => {
     assert.equal(inferAction(node({ type: 'TEXT', characters: 'Text' })), 'generate');
+    assert.equal(inferAction(node({
+        type: 'TEXT',
+        characters: 'Decorated text',
+        fills: [{ type: 'SOLID', visible: true, color: { r: 1, g: 0, b: 0, a: 1 } }],
+        effects: [{ type: 'DROP_SHADOW', visible: true, radius: 8 }],
+    })), 'generate');
     assert.equal(inferAction(node({ type: 'VECTOR' })), 'render');
     assert.equal(isVectorNode(node({ type: 'BOOLEAN_OPERATION' })), true);
     assert.equal(isVectorNode(node({ type: 'RECTANGLE' })), false);
