@@ -1,4 +1,5 @@
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path';
+import { existsSync } from 'fs';
 import { readdir } from 'fs/promises';
 import packageJSON from '../package.json';
 import { FigmaClient, CancelledError } from './figma/client';
@@ -196,9 +197,10 @@ async function pickAssetFolder(current: unknown): Promise<{
     const currentFolder = typeof current === 'string'
         ? current.trim().replace(/\\/g, '/').replace(/^assets\/+/, '')
         : '';
-    const initialPath = currentFolder && !currentFolder.startsWith('..')
+    const preferredPath = currentFolder && !currentFolder.startsWith('..')
         ? resolve(assetsRoot, currentFolder)
         : assetsRoot;
+    const initialPath = existsSync(preferredPath) ? preferredPath : assetsRoot;
     const result = await Editor.Dialog.select({
         title: '选择 Figma 导入资源目录',
         path: initialPath,
@@ -223,9 +225,10 @@ async function pickPrefabFolder(current: unknown): Promise<{
     const currentFolder = typeof current === 'string'
         ? current.trim().replace(/\\/g, '/').replace(/^assets\/+/, '')
         : '';
-    const initialPath = currentFolder && !currentFolder.startsWith('..')
+    const preferredPath = currentFolder && !currentFolder.startsWith('..')
         ? resolve(assetsRoot, currentFolder)
         : assetsRoot;
+    const initialPath = existsSync(preferredPath) ? preferredPath : assetsRoot;
     const result = await Editor.Dialog.select({
         title: '选择预制体输出目录',
         path: initialPath,
