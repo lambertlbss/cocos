@@ -45,7 +45,6 @@ interface SceneImportPayload {
     rootName: string;
     rootFrame: Rect;
     scale: number;
-    targetUuid?: string;
     updateExisting: boolean;
     existingMap: Record<string, string>;
     prefabUrl?: string;
@@ -143,7 +142,6 @@ function safeSettings(value: unknown): ImportSettings {
         updateExisting: input.updateExisting !== false,
         refreshAssets: input.refreshAssets === true,
         autoSave: input.autoSave === true,
-        useSelection: input.useSelection !== false,
         fontMap,
     };
 }
@@ -764,16 +762,12 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         const legacyRootUuid = linkedFrame
             ? nodeMaps[activeDocument.fileKey]?.__root__
             : undefined;
-        const selected = linkedFrame
-            ? undefined
-            : importSettings.useSelection ? Editor.Selection.getLastSelected('node') : undefined;
         const payload: SceneImportPayload = {
             packageName: packageJSON.name,
             fileKey: activeDocument.fileKey,
             rootName: activeDocument.fileName,
             rootFrame,
             scale: importSettings.scale,
-            targetUuid: selected || undefined,
             // A linked Figma frame is a prefab export, not an insertion into the
             // currently selected scene/prefab. Build an isolated temporary root
             // and remove it as soon as the prefab asset has been serialized.

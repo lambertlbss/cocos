@@ -148,7 +148,6 @@ export interface ImportSettings {
     updateExisting: boolean;
     refreshAssets: boolean;
     autoSave: boolean;
-    useSelection: boolean;
     fontMap: Record<string, string>;
 }
 
@@ -223,6 +222,5 @@ export const DEFAULT_SETTINGS: ImportSettings = {
     updateExisting: true,
     refreshAssets: false,
     autoSave: false,
-    useSelection: true,
     fontMap: {},
 };

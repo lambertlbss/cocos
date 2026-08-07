@@ -9,7 +9,6 @@ interface SceneImportPayload {
     rootName: string;
     rootFrame: Rect;
     scale: number;
-    targetUuid?: string;
     updateExisting: boolean;
     existingMap: Record<string, string>;
     prefabUrl?: string;
@@ -72,16 +71,6 @@ function findCanvas(root: any, Canvas: any): any | null {
         }
     }
     return null;
-}
-
-function containsNode(root: any, target: any): boolean {
-    if (!root || !target) {
-        return false;
-    }
-    if (root === target) {
-        return true;
-    }
-    return root.children.some((child: any) => containsNode(child, target));
 }
 
 function removeGeneratedComponents(node: any, classes: any[]): void {
@@ -572,8 +561,6 @@ export const methods = {
         if (!scene) {
             throw new Error('当前没有打开的场景。');
         }
-        const selectedTarget = payload.targetUuid ? findByUuid(scene, payload.targetUuid) : null;
-        const target = selectedTarget?.getComponent(Camera) ? null : selectedTarget;
         const fallbackParent = findCanvas(scene, Canvas) ?? scene;
         const directRoot = payload.roots.length === 1;
         const canvas = findCanvas(scene, Canvas);
@@ -608,9 +595,7 @@ export const methods = {
             ? importRoot.parent
             : null;
         const reusedImportRoot = Boolean(importRoot);
-        const parent = importRoot && containsNode(importRoot, target)
-            ? importRoot.parent ?? fallbackParent
-            : target ?? fallbackParent;
+        const parent = fallbackParent;
         if (!directRoot) {
             if (!importRoot) {
                 importRoot = new Node(`Figma · ${cleanName(payload.rootName)}`);

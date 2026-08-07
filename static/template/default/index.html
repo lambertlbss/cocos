@@ -146,11 +146,6 @@
                 <span><strong>更新已有节点</strong><small>通过 UUID 映射保留节点引用</small></span>
             </label>
             <label class="toggle-row">
-                <input id="use-selection" type="checkbox" checked>
-                <span class="toggle"></span>
-                <span><strong>导入到当前选中节点</strong><small>未选中时自动放入 Canvas</small></span>
-            </label>
-            <label class="toggle-row">
                 <input id="refresh-assets" type="checkbox">
                 <span class="toggle"></span>
                 <span><strong>强制刷新资源</strong><small>忽略已有 PNG / SVG 缓存</small></span>
@@ -207,11 +202,11 @@
     <footer class="action-bar">
         <div>
             <strong id="selection-summary">等待设计数据</strong>
-            <span id="action-note">导入到当前打开场景或预制体的选中节点下</span>
+            <span id="action-note">导入到当前场景 Canvas 根节点下；Frame 链接将自动创建并打开预制体</span>
         </div>
         <button id="cancel-import" class="button ghost is-hidden" type="button">取消</button>
         <button id="import-button" class="button import" type="button"
-            title="导入到当前打开场景或预制体" disabled>
+            title="导入到当前场景 Canvas 根节点或创建预制体" disabled>
             <span id="import-button-progress" class="import-button-progress" aria-hidden="true"></span>
             <span class="import-button-content">
                 <span id="import-button-label">导入到场景</span>

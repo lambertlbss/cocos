@@ -60,7 +60,6 @@ const state: PanelState = {
         updateExisting: true,
         refreshAssets: false,
         autoSave: false,
-        useSelection: true,
         fontMap: {},
     },
     actions: new Map(),
@@ -257,7 +256,6 @@ function applySettings(settings: ImportSettings): void {
     element<HTMLInputElement>('#update-existing').checked = settings.updateExisting;
     element<HTMLInputElement>('#refresh-assets').checked = settings.refreshAssets;
     element<HTMLInputElement>('#auto-save').checked = settings.autoSave;
-    element<HTMLInputElement>('#use-selection').checked = settings.useSelection;
     updateTargetHint();
     renderFontMap();
 }
@@ -308,7 +306,6 @@ function readSettings(showError = true): ImportSettings | null {
         updateExisting: element<HTMLInputElement>('#update-existing').checked,
         refreshAssets: element<HTMLInputElement>('#refresh-assets').checked,
         autoSave: element<HTMLInputElement>('#auto-save').checked,
-        useSelection: element<HTMLInputElement>('#use-selection').checked,
         fontMap,
     };
 }
@@ -334,10 +331,7 @@ function updateTargetHint(): void {
         element('#action-note').textContent = '主进程与面板版本不一致，需要完整重启 Cocos Creator';
         return;
     }
-    const useSelection = element<HTMLInputElement>('#use-selection').checked;
-    element('#action-note').textContent = useSelection
-        ? '导入到当前打开场景或预制体的选中节点下'
-        : '导入到当前 Canvas 根节点下';
+    element('#action-note').textContent = '导入到当前场景 Canvas 根节点下；Frame 链接将自动创建并打开预制体';
 }
 
 function resetImportButton(): void {
@@ -901,12 +895,9 @@ function bindEvents(): void {
     });
 
     root().querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-        '#scale, #asset-folder, #prefab-folder, #local-resource-folder, #update-existing, #refresh-assets, #auto-save, #use-selection',
+        '#scale, #asset-folder, #prefab-folder, #local-resource-folder, #update-existing, #refresh-assets, #auto-save',
     ).forEach((control) => {
         control.addEventListener('change', async () => {
-            if (control.id === 'use-selection') {
-                updateTargetHint();
-            }
             const settings = readSettings(false);
             if (settings) {
                 await request('save-settings', settings);
