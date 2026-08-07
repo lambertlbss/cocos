@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
 import packageJSON from '../../../package.json';
+import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import type {
     ImportAction,
     ImportOverride,
@@ -16,6 +17,7 @@ interface DocumentDto {
     sourceUrl: string;
     tree: TreeNodeDto[];
     fonts: string[];
+    fontAssets?: FontAssetOption[];
 }
 
 interface PanelState {
@@ -31,6 +33,7 @@ interface PanelState {
     search: string;
     busy: boolean;
     runtimeCompatible: boolean;
+    fontAssets: FontAssetOption[];
 }
 
 let panelHost: any = null;
@@ -50,6 +53,7 @@ const state: PanelState = {
     settings: {
         sourceUrl: '',
         assetFolder: 'figma-importer',
+        prefabFolder: 'figma-importer/prefabs',
         localResourceFolder: '',
         scale: 1,
         updateExisting: true,
@@ -67,6 +71,7 @@ const state: PanelState = {
     search: '',
     busy: false,
     runtimeCompatible: true,
+    fontAssets: [],
 };
 
 function root(): HTMLElement {
@@ -148,6 +153,51 @@ function isVectorNodeType(type: string): boolean {
     return VECTOR_NODE_TYPES.has(type);
 }
 
+function renderFontMap(): void {
+    const list = element('#font-map-list');
+    list.replaceChildren();
+    const families = state.document?.fonts ?? [];
+    if (!families.length) {
+        const empty = document.createElement('div');
+        empty.className = 'font-map-empty';
+        empty.textContent = '读取 Figma 后，这里会列出检测到的字体。';
+        list.appendChild(empty);
+        return;
+    }
+    if (!state.fontAssets.length) {
+        const empty = document.createElement('div');
+        empty.className = 'font-map-empty is-warning';
+        empty.textContent = '项目 assets 内没有检测到 .ttf / .otf / .fnt / .woff 字体资源。';
+        list.appendChild(empty);
+    }
+    for (const family of families) {
+        const row = document.createElement('div');
+        row.className = 'font-map-row';
+        const source = document.createElement('span');
+        source.className = 'font-map-source';
+        source.textContent = family;
+        source.title = family;
+        const arrow = document.createElement('span');
+        arrow.className = 'font-map-arrow';
+        arrow.textContent = '→';
+        const select = document.createElement('select');
+        select.className = 'font-map-select';
+        select.dataset.fontFamily = family;
+        select.setAttribute('aria-label', `${family} 映射字体`);
+        select.appendChild(option('', '不映射（使用默认字体）'));
+        const automatic = findFontAsset(family, state.fontAssets);
+        const selected = state.settings.fontMap[family] ?? automatic?.url ?? '';
+        for (const asset of state.fontAssets) {
+            const item = option(asset.url, `${asset.name} · ${asset.relativePath}`);
+            item.selected = asset.url === selected;
+            select.appendChild(item);
+        }
+        select.value = selected;
+        row.append(source, arrow, select);
+        list.appendChild(row);
+    }
+}
+
 function safeAction(_node: TreeNodeDto, action: ImportAction): ImportAction {
     return action === 'svg' ? 'render' : action;
 }
@@ -182,6 +232,7 @@ function initializeDocument(document: DocumentDto): void {
     element('#font-hint').textContent = document.fonts.length
         ? `检测到：${document.fonts.join('、')}`
         : '当前文件尚未发现字体。';
+    renderFontMap();
     renderTree();
     updateSummary();
 }
@@ -190,6 +241,7 @@ function applySettings(settings: ImportSettings): void {
     state.settings = settings;
     element<HTMLInputElement>('#source-url').value = settings.sourceUrl;
     element<HTMLInputElement>('#asset-folder').value = settings.assetFolder;
+    element<HTMLInputElement>('#prefab-folder').value = settings.prefabFolder;
     const localResourceFolder = element<HTMLInputElement>('#local-resource-folder');
     localResourceFolder.value = settings.localResourceFolder ?? '';
     localResourceFolder.title = settings.localResourceFolder ?? '';
@@ -199,29 +251,22 @@ function applySettings(settings: ImportSettings): void {
     element<HTMLInputElement>('#auto-save').checked = settings.autoSave;
     element<HTMLInputElement>('#use-selection').checked = settings.useSelection;
     updateTargetHint();
-    element<HTMLTextAreaElement>('#font-map').value = Object.keys(settings.fontMap).length
-        ? JSON.stringify(settings.fontMap, null, 2)
-        : '';
+    renderFontMap();
 }
 
 function readSettings(showError = true): ImportSettings | null {
-    let fontMap: Record<string, string> = {};
-    const fontText = element<HTMLTextAreaElement>('#font-map').value.trim();
-    if (fontText) {
-        try {
-            const parsed = JSON.parse(fontText) as unknown;
-            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-                || Object.values(parsed).some((value) => typeof value !== 'string')) {
-                throw new Error();
-            }
-            fontMap = parsed as Record<string, string>;
-        } catch {
-            if (showError) {
-                showToast('字体映射必须是“字体名 → db:// 资源”的 JSON 对象。', true);
-            }
-            return null;
+    const fontMap: Record<string, string> = { ...state.settings.fontMap };
+    if (state.document) {
+        for (const family of state.document.fonts) {
+            delete fontMap[family];
         }
     }
+    root().querySelectorAll<HTMLSelectElement>('[data-font-family]').forEach((select) => {
+        const family = select.dataset.fontFamily?.trim();
+        if (family && select.value) {
+            fontMap[family] = select.value;
+        }
+    });
     const scale = Number(element<HTMLInputElement>('#scale').value);
     if (!Number.isFinite(scale) || scale < 0.25 || scale > 4) {
         if (showError) {
@@ -236,9 +281,17 @@ function readSettings(showError = true): ImportSettings | null {
         }
         return null;
     }
+    const prefabFolder = element<HTMLInputElement>('#prefab-folder').value.trim();
+    if (!prefabFolder) {
+        if (showError) {
+            showToast('请选择预制体输出目录。', true);
+        }
+        return null;
+    }
     return {
         sourceUrl: element<HTMLInputElement>('#source-url').value.trim(),
         assetFolder,
+        prefabFolder,
         localResourceFolder: element<HTMLInputElement>('#local-resource-folder').value.trim(),
         scale,
         updateExisting: element<HTMLInputElement>('#update-existing').checked,
@@ -254,6 +307,7 @@ function setBusy(value: boolean): void {
     element<HTMLButtonElement>('#fetch-document').disabled = value;
     element<HTMLButtonElement>('#save-token').disabled = value;
     element<HTMLButtonElement>('#pick-asset-folder').disabled = value;
+    element<HTMLButtonElement>('#pick-prefab-folder').disabled = value;
     element<HTMLButtonElement>('#pick-local-resource-folder').disabled = value;
     element<HTMLButtonElement>('#clear-local-resource-folder').disabled = value;
     element<HTMLButtonElement>('#import-button').disabled = value
@@ -666,7 +720,9 @@ function bindEvents(): void {
         setBusy(true);
         updateProgress({ phase: 'fetch', value: 0.05, message: '正在连接 Figma…' });
         try {
-            initializeDocument(await request<DocumentDto>('fetch-document', source));
+            const document = await request<DocumentDto>('fetch-document', source);
+            state.fontAssets = document.fontAssets ?? state.fontAssets;
+            initializeDocument(document);
         } catch (error) {
             showToast(error instanceof Error ? error.message : '读取失败。', true);
         } finally {
@@ -699,6 +755,28 @@ function bindEvents(): void {
             showToast(`资源将写入 assets/${result.folder}`);
         } catch (error) {
             showToast(error instanceof Error ? error.message : '选择资源目录失败。', true);
+        }
+    });
+    element('#pick-prefab-folder').addEventListener('click', async () => {
+        try {
+            const current = element<HTMLInputElement>('#prefab-folder').value;
+            const result = await request<{ folder: string; absolutePath: string } | null>(
+                'pick-prefab-folder',
+                current,
+            );
+            if (!result) {
+                return;
+            }
+            const input = element<HTMLInputElement>('#prefab-folder');
+            input.value = result.folder;
+            input.title = result.absolutePath;
+            const settings = readSettings(false);
+            if (settings) {
+                await request('save-settings', settings);
+            }
+            showToast(`预制体将写入 assets/${result.folder}`);
+        } catch (error) {
+            showToast(error instanceof Error ? error.message : '选择预制体目录失败。', true);
         }
     });
     element('#pick-local-resource-folder').addEventListener('click', async () => {
@@ -813,7 +891,7 @@ function bindEvents(): void {
     });
 
     root().querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-        '#scale, #asset-folder, #local-resource-folder, #update-existing, #refresh-assets, #auto-save, #use-selection, #font-map',
+        '#scale, #asset-folder, #prefab-folder, #local-resource-folder, #update-existing, #refresh-assets, #auto-save, #use-selection',
     ).forEach((control) => {
         control.addEventListener('change', async () => {
             if (control.id === 'use-selection') {
@@ -824,6 +902,13 @@ function bindEvents(): void {
                 await request('save-settings', settings);
             }
         });
+    });
+    element('#font-map-list').addEventListener('change', async () => {
+        const settings = readSettings(false);
+        if (settings) {
+            state.settings = settings;
+            await request('save-settings', settings);
+        }
     });
 }
 
@@ -851,8 +936,10 @@ module.exports = Editor.Panel.define({
                 vault: any;
                 settings: ImportSettings;
                 document: DocumentDto | null;
+                fontAssets?: FontAssetOption[];
             }>('get-state');
             state.runtimeCompatible = initial.version === packageJSON.version;
+            state.fontAssets = initial.fontAssets ?? [];
             setConnection(initial.vault);
             applySettings(initial.settings);
             if (initial.document) {

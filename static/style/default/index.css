@@ -811,6 +811,57 @@ input[readonly] {
     margin-bottom: 12px;
 }
 
+.settings-card > .prefab-field {
+    margin-bottom: 12px;
+}
+
+.font-map-list {
+    display: grid;
+    gap: 7px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.018);
+}
+
+.font-map-row {
+    display: grid;
+    grid-template-columns: minmax(90px, 0.7fr) 18px minmax(0, 1.5fr);
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+}
+
+.font-map-source {
+    overflow: hidden;
+    color: var(--text);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.font-map-arrow {
+    color: var(--accent);
+    text-align: center;
+}
+
+.font-map-select {
+    min-width: 0;
+    min-height: 32px;
+    padding: 0 7px;
+    font-size: 11px;
+}
+
+.font-map-empty {
+    padding: 4px 2px;
+    color: var(--muted-2);
+    font-size: 11px;
+}
+
+.font-map-empty.is-warning {
+    color: var(--amber);
+}
+
 .settings-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -1,4 +1,5 @@
-import { isAbsolute, join, relative, resolve } from 'path';
+import { basename, extname, isAbsolute, join, relative, resolve } from 'path';
+import { readdir } from 'fs/promises';
 import packageJSON from '../package.json';
 import { FigmaClient, CancelledError } from './figma/client';
 import { inferAction, inferCocosLayoutMode, inferKind } from './figma/analyzer';
@@ -7,6 +8,7 @@ import { analyzeSliceGrid } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
 import { AssetWriter, resolveAssetUuid, sanitizeAssetName } from './importer/assets';
 import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
+import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
 import { TokenVault } from './security/token-vault';
@@ -58,6 +60,42 @@ interface SceneImportResult {
     prefabUrl?: string;
 }
 
+const FONT_EXTENSIONS = new Set(['.ttf', '.otf', '.fnt', '.woff', '.woff2']);
+
+async function listFontAssets(): Promise<FontAssetOption[]> {
+    const assetsRoot = resolve(Editor.Project.path, 'assets');
+    const fonts: FontAssetOption[] = [];
+    async function visit(folder: string): Promise<void> {
+        let entries;
+        try {
+            entries = await readdir(folder, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        for (const entry of entries) {
+            if (entry.name === 'node_modules' || entry.name === 'library' || entry.name === 'temp') {
+                continue;
+            }
+            const filePath = join(folder, entry.name);
+            if (entry.isDirectory()) {
+                await visit(filePath);
+                continue;
+            }
+            if (!FONT_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+                continue;
+            }
+            const path = relative(assetsRoot, filePath).replace(/\\/g, '/');
+            fonts.push({
+                name: basename(entry.name, extname(entry.name)),
+                url: `db://assets/${path}`,
+                relativePath: path,
+            });
+        }
+    }
+    await visit(assetsRoot);
+    return fonts.sort((a, b) => a.relativePath.localeCompare(b.relativePath, 'zh-CN'));
+}
+
 function emitProgress(progress: ProgressEvent): void {
     Editor.Message.send(packageJSON.name, 'progress', progress);
 }
@@ -83,6 +121,9 @@ function safeSettings(value: unknown): ImportSettings {
         assetFolder: typeof input.assetFolder === 'string' && input.assetFolder.trim()
             ? input.assetFolder.trim()
             : DEFAULT_SETTINGS.assetFolder,
+        prefabFolder: typeof input.prefabFolder === 'string' && input.prefabFolder.trim()
+            ? input.prefabFolder.trim()
+            : DEFAULT_SETTINGS.prefabFolder,
         localResourceFolder: typeof input.localResourceFolder === 'string'
             ? input.localResourceFolder.trim()
             : '',
@@ -160,6 +201,33 @@ async function pickAssetFolder(current: unknown): Promise<{
         : assetsRoot;
     const result = await Editor.Dialog.select({
         title: '选择 Figma 导入资源目录',
+        path: initialPath,
+        type: 'directory',
+        button: '选择目录',
+    });
+    const selected = result.filePaths[0];
+    if (result.canceled || !selected) {
+        return null;
+    }
+    return {
+        folder: relativeAssetFolder(selected),
+        absolutePath: resolve(selected),
+    };
+}
+
+async function pickPrefabFolder(current: unknown): Promise<{
+    folder: string;
+    absolutePath: string;
+} | null> {
+    const assetsRoot = resolve(Editor.Project.path, 'assets');
+    const currentFolder = typeof current === 'string'
+        ? current.trim().replace(/\\/g, '/').replace(/^assets\/+/, '')
+        : '';
+    const initialPath = currentFolder && !currentFolder.startsWith('..')
+        ? resolve(assetsRoot, currentFolder)
+        : assetsRoot;
+    const result = await Editor.Dialog.select({
+        title: '选择预制体输出目录',
         path: initialPath,
         type: 'directory',
         button: '选择目录',
@@ -630,10 +698,12 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         }
 
         const linkedFrame = Boolean(activeDocument.sourceNodeId && roots.length === 1);
-        const outputFolder = new AssetWriter(importSettings.assetFolder).folder;
-        const prefabUrl = linkedFrame
-            ? `db://assets/${outputFolder}/${sanitizeAssetName(activeDocument.fileName)}.prefab`
-            : undefined;
+        let prefabUrl: string | undefined;
+        if (linkedFrame) {
+            const prefabWriter = new AssetWriter(importSettings.prefabFolder);
+            await prefabWriter.initialize();
+            prefabUrl = `db://assets/${prefabWriter.folder}/${sanitizeAssetName(activeDocument.fileName)}.prefab`;
+        }
 
         const nodeMaps = await getNodeMaps();
         const selected = linkedFrame
@@ -712,6 +782,7 @@ export const methods: Record<string, (...args: any[]) => any> = {
             version: packageJSON.version,
             vault: vault.status(),
             settings: await getSettings(),
+            fontAssets: await listFontAssets(),
             document: activeDocument ? {
                 fileKey: activeDocument.fileKey,
                 fileName: activeDocument.fileName,
@@ -751,6 +822,10 @@ export const methods: Record<string, (...args: any[]) => any> = {
         return pickAssetFolder(current);
     },
 
+    async pickPrefabFolder(current: unknown) {
+        return pickPrefabFolder(current);
+    },
+
     async pickLocalResourceFolder(current: unknown) {
         return pickLocalResourceFolder(current);
     },
@@ -778,6 +853,7 @@ export const methods: Record<string, (...args: any[]) => any> = {
                 sourceUrl,
                 tree: activeDocument.tree,
                 fonts: activeDocument.fonts,
+                fontAssets: await listFontAssets(),
             };
         } catch (error) {
             emitProgress({

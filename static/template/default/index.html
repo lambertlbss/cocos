@@ -161,6 +161,15 @@
                 <span><strong>完成后保存场景</strong><small>关闭时仅创建可撤销快照</small></span>
             </label>
         </div>
+        <label class="field prefab-field">
+            <span>自动创建的预制体目录</span>
+            <div class="input-action path-action">
+                <input id="prefab-folder" type="text" value="figma-importer/prefabs" readonly spellcheck="false"
+                    placeholder="选择项目 assets 下的目录">
+                <button id="pick-prefab-folder" class="button ghost compact" type="button">选择</button>
+            </div>
+            <small>Figma 节点链接作为新预制体导入时，.prefab 会保存到该目录。</small>
+        </label>
         <label class="field cache-field">
             <span>本地同名资源目录（可选）</span>
             <div class="input-action path-action">
@@ -172,10 +181,9 @@
             <small>递归匹配同名 PNG / SVG；项目 assets 内直接复用，外部素材复制到输出目录，未命中才从 Figma 下载。</small>
         </label>
         <label class="field">
-            <span>字体映射（JSON：Figma 字体 → Cocos db:// 资源）</span>
-            <textarea id="font-map" rows="4" spellcheck="false"
-                placeholder='{"JBHGY4": "db://assets/bundles/fonts/Font_CuYuan.ttf"}'></textarea>
-            <small id="font-hint">当前文件尚未发现字体。</small>
+            <span>字体映射（Figma 字体 → 项目字体）</span>
+            <div id="font-map-list" class="font-map-list"></div>
+            <small id="font-hint">读取 Figma 后自动匹配项目字体；可在每行下拉框手动指定。</small>
         </label>
     </details>
 

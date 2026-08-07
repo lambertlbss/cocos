@@ -24,7 +24,7 @@
 5. 选择场景中的目标节点；未选择时会自动导入到 Canvas。
 6. 点击“导入到场景”。
 
-带 `node-id` 的 Figma Frame 链接会按独立预制体导入：最外层 Frame 作为 Prefab 根节点，根节点挂载对应尺寸的 `UITransform`，并自动放置在 Canvas 参考边界中心。当前项目参考画布为 640×1136；预制体会保存到资源输出目录，导入完成后可在 Cocos 资源管理器中直接复用。
+带 `node-id` 的 Figma Frame 链接会按独立预制体导入：最外层 Frame 作为 Prefab 根节点，根节点挂载对应尺寸的 `UITransform`，并自动放置在 Canvas 参考边界中心。当前项目参考画布为 640×1136；预制体会保存到“自动创建的预制体目录”（可在面板中选择 `assets` 下的任意子目录），导入完成后可在 Cocos 资源管理器中直接复用。
 
 “导入到当前选中节点”只针对当前已经打开的场景或预制体编辑模式中的 Node。若要修改某个预制体，需要先双击该预制体进入预制体编辑模式，再选择预制体根节点或目标子节点；仅在资源管理器中选中 `.prefab` 文件不会直接修改它。
 
@@ -59,16 +59,7 @@
 
 ## 字体映射
 
-“导入设置”支持 JSON 字体映射，值必须是 Cocos Asset Database URL：
-
-```json
-{
-  "JBHGY4": "db://assets/bundles/fonts/Font_CuYuan.ttf",
-  "Noto Sans SC": "db://assets/bundles/fonts/NotoSansSC.ttf"
-}
-```
-
-键是 Figma 的 `fontFamily`，值是 Cocos Asset Database URL，不建议填写操作系统绝对路径。未映射字体使用 Cocos 默认字体，不会阻塞导入。
+读取 Figma 后，面板会列出检测到的 `fontFamily`，并递归扫描项目 `assets` 下的 `.ttf`、`.otf`、`.fnt`、`.woff` 字体资源。文件名与 Figma 字体名规范化后完全或部分匹配时会自动选中；未匹配项可直接在每一行下拉框中手动选择项目字体，不需要填写 `db://` 路径或操作系统绝对路径。未映射字体使用 Cocos 默认字体，不会阻塞导入。
 
 ## 开发与验证
 

@@ -139,6 +139,7 @@ export interface ImportOverride {
 export interface ImportSettings {
     sourceUrl: string;
     assetFolder: string;
+    prefabFolder: string;
     localResourceFolder: string;
     scale: number;
     updateExisting: boolean;
@@ -212,6 +213,7 @@ export interface ProgressEvent {
 export const DEFAULT_SETTINGS: ImportSettings = {
     sourceUrl: '',
     assetFolder: 'figma-importer',
+    prefabFolder: 'figma-importer/prefabs',
     localResourceFolder: '',
     scale: 1,
     updateExisting: true,
