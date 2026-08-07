@@ -732,6 +732,9 @@ export const methods = {
         if (!node) {
             return false;
         }
+        // Stop rendering immediately. Cocos destroys nodes at the end of the
+        // frame, so removing the parent alone can leave a one-frame ghost.
+        node.active = false;
         node.removeFromParent();
         node.destroy();
         return true;

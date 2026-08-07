@@ -819,6 +819,10 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
                         args: [{ rootUuid: legacyRootUuid }],
                     }).catch(() => undefined);
                 }
+                // create-prefab may select the source node internally. Clear
+                // that stale node selection before opening the asset; otherwise
+                // Cocos can keep drawing the old node as a top-level overlay.
+                Editor.Selection.clear('node');
             } catch (error) {
                 if (result.temporaryRoot) {
                     await Editor.Message.request('scene', 'execute-scene-script', {
@@ -828,6 +832,7 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
                     }).catch(() => undefined);
                 }
                 if (linkedFrame) {
+                    Editor.Selection.clear('node');
                     await Editor.Message.request('scene', 'snapshot-abort').catch(() => undefined);
                 }
                 throw error;
