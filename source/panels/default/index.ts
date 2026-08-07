@@ -606,8 +606,10 @@ async function importToScene(): Promise<void> {
     setBusy(true);
     updateProgress({ phase: 'assets', value: 0, message: '正在准备导入…' });
     try {
-        await request('import-selection', { overrides, settings });
-        showToast('导入完成，已在场景中选中根节点。');
+        const result = await request<{ prefabUrl?: string }>('import-selection', { overrides, settings });
+        showToast(result?.prefabUrl
+            ? `导入完成，已创建预制体：${result.prefabUrl}`
+            : '导入完成，已在场景中选中根节点。');
     } catch (error) {
         const message = errorMessage(error, '导入失败。');
         updateProgress({ phase: 'error', value: 0, message });

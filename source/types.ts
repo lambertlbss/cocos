@@ -122,6 +122,7 @@ export interface DocumentSession {
     fileKey: string;
     fileName: string;
     sourceUrl: string;
+    sourceNodeId?: string;
     roots: FigmaNode[];
     nodeById: Map<string, FigmaNode>;
     tree: TreeNodeDto[];

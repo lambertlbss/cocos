@@ -12,6 +12,8 @@ interface SceneImportPayload {
     targetUuid?: string;
     updateExisting: boolean;
     existingMap: Record<string, string>;
+    prefabUrl?: string;
+    centerInCanvas?: boolean;
     roots: SceneNodeSpec[];
 }
 
@@ -497,6 +499,27 @@ function countSpecs(specs: SceneNodeSpec[]): number {
     return specs.reduce((total, spec) => total + 1 + countSpecs(spec.children), 0);
 }
 
+function centerInCanvas(node: any, canvas: any, UITransform: any, Vec3: any): void {
+    const nodeTransform = node.getComponent(UITransform);
+    const canvasTransform = canvas?.getComponent(UITransform);
+    if (!nodeTransform || !canvasTransform) {
+        return;
+    }
+    const canvasSize = canvasTransform.contentSize ?? {
+        width: canvasTransform.width,
+        height: canvasTransform.height,
+    };
+    const width = Number(canvasSize?.width) > 0 ? Number(canvasSize.width) : 640;
+    const height = Number(canvasSize?.height) > 0 ? Number(canvasSize.height) : 1136;
+    const canvasAnchor = canvasTransform.anchorPoint ?? { x: 0.5, y: 0.5 };
+    const nodeAnchor = nodeTransform.anchorPoint ?? { x: 0, y: 1 };
+    const x = width * (0.5 - canvasAnchor.x)
+        - nodeTransform.width * (0.5 - nodeAnchor.x);
+    const y = height * (0.5 - canvasAnchor.y)
+        - nodeTransform.height * (0.5 - nodeAnchor.y);
+    node.setPosition(new Vec3(x, y, node.position?.z ?? 0));
+}
+
 function emitSceneProgress(
     payload: SceneImportPayload,
     value: number,
@@ -544,6 +567,8 @@ export const methods = {
         const selectedTarget = payload.targetUuid ? findByUuid(scene, payload.targetUuid) : null;
         const target = selectedTarget?.getComponent(Camera) ? null : selectedTarget;
         const fallbackParent = findCanvas(scene, Canvas) ?? scene;
+        const directRoot = payload.roots.length === 1;
+        const canvas = findCanvas(scene, Canvas);
         const generatedClasses = [
             Mask,
             Graphics,
@@ -562,38 +587,54 @@ export const methods = {
         const totalNodes = Math.max(1, countSpecs(payload.roots));
         let completedNodes = 0;
 
-        let importRoot = payload.updateExisting && payload.existingMap.__root__
-            ? findByUuid(scene, payload.existingMap.__root__)
+        const mappedRootUuid = directRoot
+            ? payload.existingMap[payload.roots[0].figmaId]
+            : payload.existingMap.__root__;
+        let importRoot = payload.updateExisting && mappedRootUuid
+            ? findByUuid(scene, mappedRootUuid)
             : null;
-        if (importRoot && (!importRoot.name.startsWith('Figma · ') || importRoot.getComponent(Camera))) {
+        if (importRoot?.getComponent(Camera)) {
             importRoot = null;
         }
+        const legacyWrapper = directRoot && importRoot?.parent?.name.startsWith('Figma · ')
+            ? importRoot.parent
+            : null;
         const reusedImportRoot = Boolean(importRoot);
         const parent = importRoot && containsNode(importRoot, target)
             ? importRoot.parent ?? fallbackParent
             : target ?? fallbackParent;
-        if (!importRoot) {
-            importRoot = new Node(`Figma · ${cleanName(payload.rootName)}`);
+        if (!directRoot) {
+            if (!importRoot) {
+                importRoot = new Node(`Figma · ${cleanName(payload.rootName)}`);
+                parent.addChild(importRoot);
+                created += 1;
+            } else {
+                importRoot.parent = parent;
+                importRoot.name = `Figma · ${cleanName(payload.rootName)}`;
+                updated += 1;
+            }
+            const rootTransform = importRoot.getComponent(UITransform) ?? importRoot.addComponent(UITransform);
+            rootTransform.setAnchorPoint(0, 1);
+            rootTransform.setContentSize(
+                payload.rootFrame.width * payload.scale,
+                payload.rootFrame.height * payload.scale,
+            );
+            importRoot.setPosition(0, 0, 0);
+            nodeMap.__root__ = importRoot.uuid;
+        } else if (!importRoot) {
+            importRoot = new Node(cleanName(payload.roots[0].name));
             parent.addChild(importRoot);
-            created += 1;
-        } else {
-            importRoot.parent = parent;
-            importRoot.name = `Figma · ${cleanName(payload.rootName)}`;
-            updated += 1;
         }
-        const rootTransform = importRoot.getComponent(UITransform) ?? importRoot.addComponent(UITransform);
-        rootTransform.setAnchorPoint(0, 1);
-        rootTransform.setContentSize(
-            payload.rootFrame.width * payload.scale,
-            payload.rootFrame.height * payload.scale,
-        );
-        importRoot.setPosition(0, 0, 0);
-        nodeMap.__root__ = importRoot.uuid;
 
-        const build = async (spec: SceneNodeSpec, nodeParent: any, parentHasLayout: boolean): Promise<void> => {
-            let node = payload.updateExisting && payload.existingMap[spec.figmaId]
+        const build = async (
+            spec: SceneNodeSpec,
+            nodeParent: any,
+            parentHasLayout: boolean,
+            providedNode?: any,
+        ): Promise<void> => {
+            let node = providedNode ?? (payload.updateExisting && payload.existingMap[spec.figmaId]
                 ? findByUuid(scene, payload.existingMap[spec.figmaId])
-                : null;
+                : null);
             const existed = Boolean(node);
             if (!node) {
                 node = new Node(cleanName(spec.name));
@@ -661,7 +702,17 @@ export const methods = {
 
         try {
             for (const root of payload.roots) {
-                await build(root, importRoot, false);
+                await build(root, directRoot ? parent : importRoot, false, directRoot ? importRoot : undefined);
+            }
+            if (directRoot) {
+                nodeMap.__root__ = importRoot.uuid;
+                if (payload.centerInCanvas && canvas) {
+                    centerInCanvas(importRoot, canvas, UITransform, cc.Vec3);
+                }
+            }
+            if (legacyWrapper && legacyWrapper !== importRoot && !legacyWrapper.children.length) {
+                legacyWrapper.removeFromParent();
+                legacyWrapper.destroy();
             }
         } catch (error) {
             if (!reusedImportRoot) {

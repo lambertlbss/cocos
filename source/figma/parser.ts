@@ -212,6 +212,7 @@ export function parseDocument(
         fileKey,
         fileName,
         sourceUrl,
+        sourceNodeId: requestedNodeId,
         roots,
         nodeById: collected.nodeById,
         tree: analyzeTree(roots),

@@ -18,9 +18,12 @@ class UITransform extends Component {
         this.width = 0;
         this.height = 0;
         this.contentSize = { width: 0, height: 0 };
+        this.anchorPoint = { x: 0.5, y: 0.5 };
     }
 
-    setAnchorPoint() {}
+    setAnchorPoint(x, y) {
+        this.anchorPoint = { x, y };
+    }
 
     setContentSize(width, height) {
         this.width = width;
@@ -201,6 +204,9 @@ function fakeCocos() {
     const scene = new FakeNode('Scene');
     const canvas = new FakeNode('Canvas');
     canvas.addComponent(Canvas);
+    const canvasTransform = canvas.addComponent(UITransform);
+    canvasTransform.setAnchorPoint(0.5, 0.5);
+    canvasTransform.setContentSize(640, 1136);
     scene.addChild(canvas);
     return {
         scene,
@@ -264,6 +270,7 @@ async function importWithFakeCocos(spec) {
             scale: 1,
             updateExisting: false,
             existingMap: {},
+            centerInCanvas: true,
             roots: [spec],
         });
         return { ...environment, result };
@@ -279,7 +286,7 @@ test('does not add a clipping Mask to a terminal Sprite layer', async () => {
         clipsContent: true,
         sprite: { uuid: 'sprite-frame', url: 'db://assets/red.png', sliced: false },
     }));
-    const imported = environment.canvas.children[0].children[0];
+    const imported = environment.canvas.children[0];
 
     assert.ok(imported.getComponent(Sprite));
     assert.equal(imported.getComponent(Mask), null);
@@ -296,7 +303,7 @@ test('does not import a __FigmaBackground child for clipped containers', async (
             frame: { x: 0, y: 0, width: 40, height: 30 },
         })],
     }));
-    const imported = environment.canvas.children[0].children[0];
+    const imported = environment.canvas.children[0];
     const background = imported.getChildByName('__FigmaBackground');
 
     assert.ok(imported.getComponent(Mask));
@@ -311,10 +318,27 @@ test('keeps the Figma node size when an existing sliced SpriteFrame is assigned'
         frame: { x: 0, y: 0, width: 180, height: 72 },
         sprite: { uuid: 'sprite-frame', url: 'db://assets/panel.png', sliced: true },
     }));
-    const imported = environment.canvas.children[0].children[0];
+    const imported = environment.canvas.children[0];
     const transform = imported.getComponent(UITransform);
     const sprite = imported.getComponent(Sprite);
 
     assert.equal(sprite.type, Sprite.Type.SLICED);
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
+});
+
+test('uses the outermost Figma Frame as the root and centers it on a 640x1136 Canvas', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        name: 'PopupMaster',
+        frame: { x: 0, y: 0, width: 180, height: 72 },
+    }));
+    const imported = environment.canvas.children[0];
+    const transform = imported.getComponent(UITransform);
+
+    assert.equal(imported.name, 'PopupMaster');
+    assert.equal(imported.children.length, 0);
+    assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
+    assert.deepEqual(
+        { x: imported.position.x, y: imported.position.y },
+        { x: -90, y: 36 },
+    );
 });

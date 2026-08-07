@@ -5,7 +5,7 @@ import { inferAction, inferCocosLayoutMode, inferKind } from './figma/analyzer';
 import { parseDocument } from './figma/parser';
 import { analyzeSliceGrid } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
-import { AssetWriter, resolveAssetUuid } from './importer/assets';
+import { AssetWriter, resolveAssetUuid, sanitizeAssetName } from './importer/assets';
 import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
 import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
@@ -45,6 +45,8 @@ interface SceneImportPayload {
     targetUuid?: string;
     updateExisting: boolean;
     existingMap: Record<string, string>;
+    prefabUrl?: string;
+    centerInCanvas?: boolean;
     roots: SceneNodeSpec[];
 }
 
@@ -53,6 +55,7 @@ interface SceneImportResult {
     nodeMap: Record<string, string>;
     created: number;
     updated: number;
+    prefabUrl?: string;
 }
 
 function emitProgress(progress: ProgressEvent): void {
@@ -626,8 +629,16 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             throw new Error('没有选中任何可导入节点。');
         }
 
+        const linkedFrame = Boolean(activeDocument.sourceNodeId && roots.length === 1);
+        const outputFolder = new AssetWriter(importSettings.assetFolder).folder;
+        const prefabUrl = linkedFrame
+            ? `db://assets/${outputFolder}/${sanitizeAssetName(activeDocument.fileName)}.prefab`
+            : undefined;
+
         const nodeMaps = await getNodeMaps();
-        const selected = importSettings.useSelection ? Editor.Selection.getLastSelected('node') : undefined;
+        const selected = linkedFrame
+            ? undefined
+            : importSettings.useSelection ? Editor.Selection.getLastSelected('node') : undefined;
         const payload: SceneImportPayload = {
             packageName: packageJSON.name,
             fileKey: activeDocument.fileKey,
@@ -637,6 +648,8 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             targetUuid: selected || undefined,
             updateExisting: importSettings.updateExisting,
             existingMap: nodeMaps[activeDocument.fileKey] ?? {},
+            prefabUrl,
+            centerInCanvas: linkedFrame,
             roots,
         };
         emitProgress({ phase: 'scene', value: 0.1, message: '正在构建 Cocos 节点树…' });
@@ -645,6 +658,18 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             method: 'importDocument',
             args: [payload],
         }) as SceneImportResult;
+        if (prefabUrl) {
+            const prefabUuid = await Editor.Message.request(
+                'scene',
+                'create-prefab',
+                result.rootUuid,
+                prefabUrl,
+            );
+            if (!prefabUuid) {
+                throw new Error(`预制体创建失败：${prefabUrl}`);
+            }
+            result.prefabUrl = prefabUrl;
+        }
         await Editor.Message.request('scene', 'snapshot');
         nodeMaps[activeDocument.fileKey] = result.nodeMap;
         await Editor.Profile.setProject(packageJSON.name, 'nodeMaps', nodeMaps, 'project');
@@ -655,7 +680,9 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         emitProgress({
             phase: 'done',
             value: 1,
-            message: `完成：新建 ${result.created}，更新 ${result.updated}`,
+            message: result.prefabUrl
+                ? `完成：新建 ${result.created}，已创建预制体 ${result.prefabUrl}`
+                : `完成：新建 ${result.created}，更新 ${result.updated}`,
         });
         return result;
     } catch (error) {
