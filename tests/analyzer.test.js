@@ -36,7 +36,9 @@ test('chooses editable Cocos components where fidelity is safe', () => {
     })), 'generate');
     assert.equal(inferAction(node({ type: 'VECTOR' })), 'render');
     assert.equal(isVectorNode(node({ type: 'BOOLEAN_OPERATION' })), true);
-    assert.equal(isVectorNode(node({ type: 'RECTANGLE' })), false);
+    assert.equal(isVectorNode(node({ type: 'RECTANGLE' })), true);
+    assert.equal(inferAction(node({ type: 'RECTANGLE' })), 'render');
+    assert.equal(inferAction(node({ type: 'ELLIPSE' })), 'render');
     assert.equal(inferKind(node({ overflowDirection: 'VERTICAL_SCROLLING' })), 'scrollView');
     assert.equal(inferKind(node({ name: 'Primary Button' })), 'button');
     assert.equal(inferKind(node({ layoutMode: 'HORIZONTAL' })), 'layout');

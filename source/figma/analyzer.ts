@@ -18,6 +18,10 @@ const VECTOR_TYPES = new Set([
     'STAR',
     'LINE',
     'REGULAR_POLYGON',
+    // Figma represents basic shape layers as vector geometry too. Keeping
+    // them in the raster path prevents cc.Graphics from approximating them.
+    'RECTANGLE',
+    'ELLIPSE',
 ]);
 
 const SLICE_RECTANGLE_NAME = /^Rectangle(?:[\s_-]*\d+)?$/i;

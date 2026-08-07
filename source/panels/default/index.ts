@@ -212,9 +212,11 @@ function initializeDocument(document: DocumentDto): void {
     state.suppressed.clear();
     for (const node of flatten(document.tree)) {
         const inferred = safeAction(node, node.action);
-        const action = node.children.length && terminal(inferred) && inferred !== 'merge'
-            ? 'generate'
-            : inferred;
+        const action = isVectorNodeType(node.type) && inferred !== 'ignore'
+            ? 'render'
+            : node.children.length && terminal(inferred) && inferred !== 'merge'
+                ? 'generate'
+                : inferred;
         state.actions.set(node.id, action);
         state.kinds.set(node.id, node.kind);
         state.defaults.set(node.id, { action, kind: node.kind });
@@ -483,7 +485,7 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     const dot = document.createElement('span');
     dot.className = `type-dot ${
         node.type === 'TEXT' ? 'text'
-            : node.type.includes('VECTOR') ? 'vector'
+            : isVectorNodeType(node.type) ? 'vector'
                 : node.type.includes('COMPONENT') || node.type === 'INSTANCE' ? 'component'
                     : ''
     }`;
@@ -616,9 +618,12 @@ function applyPreset(name: string): void {
     if (name === 'smart') {
         for (const node of all) {
             const original = state.defaults.get(node.id)!;
-            state.actions.set(node.id, node.children.length && original.action !== 'merge'
-                ? 'generate'
-                : safeAction(node, original.action));
+            const action = safeAction(node, original.action);
+            state.actions.set(node.id, isVectorNodeType(node.type) && action !== 'ignore'
+                ? 'render'
+                : node.children.length && action !== 'merge'
+                    ? 'generate'
+                    : action);
             state.kinds.set(node.id, original.kind);
         }
         for (const node of all) {

@@ -778,6 +778,12 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             roots,
         };
         emitProgress({ phase: 'scene', value: 0.1, message: '正在构建 Cocos 节点树…' });
+        if (linkedFrame) {
+            // Establish an undo boundary before creating the temporary export
+            // root, so aborting the export cannot discard the user's prior
+            // edits in the currently opened scene/prefab.
+            await Editor.Message.request('scene', 'snapshot');
+        }
         const result = await Editor.Message.request('scene', 'execute-scene-script', {
             name: packageJSON.name,
             method: 'importDocument',
@@ -821,10 +827,20 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
                         args: [{ rootUuid: result.rootUuid }],
                     }).catch(() => undefined);
                 }
+                if (linkedFrame) {
+                    await Editor.Message.request('scene', 'snapshot-abort').catch(() => undefined);
+                }
                 throw error;
             }
         }
-        await Editor.Message.request('scene', 'snapshot');
+        if (result.prefabUrl) {
+            // The prefab export uses a temporary scene node only for
+            // serialization. Abort that editor undo step so the currently
+            // opened scene/prefab is not marked dirty by the export.
+            await Editor.Message.request('scene', 'snapshot-abort');
+        } else {
+            await Editor.Message.request('scene', 'snapshot');
+        }
         if (result.prefabUrl) {
             // The linked frame root is temporary and has already been removed
             // from the scene, so never persist its destroyed UUID for updates.
@@ -836,7 +852,7 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         if (!result.prefabUrl) {
             Editor.Selection.select('node', result.rootUuid);
         }
-        if (importSettings.autoSave) {
+        if (importSettings.autoSave && !result.prefabUrl) {
             await Editor.Message.request('scene', 'save-scene');
         }
         if (result.prefabUrl && prefabUuid) {
