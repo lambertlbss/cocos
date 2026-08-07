@@ -171,14 +171,31 @@
             <small>Figma 节点链接作为新预制体导入时，.prefab 会保存到该目录。</small>
         </label>
         <label class="field cache-field">
-            <span>本地同名资源目录（可选）</span>
-            <div class="input-action path-action">
-                <input id="local-resource-folder" type="text" readonly spellcheck="false"
-                    placeholder="未启用，找不到资源时从 Figma 下载">
-                <button id="clear-local-resource-folder" class="button ghost compact" type="button">清空</button>
-                <button id="pick-local-resource-folder" class="button primary compact" type="button">选择</button>
+            <span>本地同名资源目录（最多 3 个，可不选）</span>
+            <div class="local-resource-list">
+                <div class="local-resource-row">
+                    <span class="local-resource-index">1</span>
+                    <input id="local-resource-folder-0" type="text" readonly spellcheck="false"
+                        placeholder="优先目录：未选择">
+                    <button id="clear-local-resource-folder-0" class="button ghost compact" type="button">清空</button>
+                    <button id="pick-local-resource-folder-0" class="button primary compact" type="button">选择</button>
+                </div>
+                <div class="local-resource-row">
+                    <span class="local-resource-index">2</span>
+                    <input id="local-resource-folder-1" type="text" readonly spellcheck="false"
+                        placeholder="备用目录：未选择">
+                    <button id="clear-local-resource-folder-1" class="button ghost compact" type="button">清空</button>
+                    <button id="pick-local-resource-folder-1" class="button primary compact" type="button">选择</button>
+                </div>
+                <div class="local-resource-row">
+                    <span class="local-resource-index">3</span>
+                    <input id="local-resource-folder-2" type="text" readonly spellcheck="false"
+                        placeholder="备用目录：未选择">
+                    <button id="clear-local-resource-folder-2" class="button ghost compact" type="button">清空</button>
+                    <button id="pick-local-resource-folder-2" class="button primary compact" type="button">选择</button>
+                </div>
             </div>
-            <small>递归匹配同名 PNG / SVG；项目 assets 内直接复用，外部素材复制到输出目录，未命中才从 Figma 下载。</small>
+            <small>按 1 → 2 → 3 顺序递归匹配同名 PNG / SVG；命中一个目录后停止，全部未命中才从 Figma 下载。</small>
         </label>
         <label class="field">
             <span>字体映射（Figma 字体 → 项目字体）</span>

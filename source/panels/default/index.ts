@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { isAbsolute, join, resolve } from 'path';
+import { join } from 'path';
 import packageJSON from '../../../package.json';
 import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import type {
@@ -54,6 +54,7 @@ const state: PanelState = {
         sourceUrl: '',
         assetFolder: 'figma-importer',
         prefabFolder: 'figma-importer/prefabs',
+        localResourceFolders: [],
         localResourceFolder: '',
         scale: 1,
         updateExisting: true,
@@ -242,9 +243,16 @@ function applySettings(settings: ImportSettings): void {
     element<HTMLInputElement>('#source-url').value = settings.sourceUrl;
     element<HTMLInputElement>('#asset-folder').value = settings.assetFolder;
     element<HTMLInputElement>('#prefab-folder').value = settings.prefabFolder;
-    const localResourceFolder = element<HTMLInputElement>('#local-resource-folder');
-    localResourceFolder.value = settings.localResourceFolder ?? '';
-    localResourceFolder.title = settings.localResourceFolder ?? '';
+    const localResourceFolders = settings.localResourceFolders?.length
+        ? settings.localResourceFolders
+        : settings.localResourceFolder
+            ? [settings.localResourceFolder]
+            : [];
+    for (let index = 0; index < 3; index += 1) {
+        const input = element<HTMLInputElement>(`#local-resource-folder-${index}`);
+        input.value = localResourceFolders[index] ?? '';
+        input.title = localResourceFolders[index] ?? '';
+    }
     element<HTMLInputElement>('#scale').value = String(settings.scale);
     element<HTMLInputElement>('#update-existing').checked = settings.updateExisting;
     element<HTMLInputElement>('#refresh-assets').checked = settings.refreshAssets;
@@ -292,7 +300,10 @@ function readSettings(showError = true): ImportSettings | null {
         sourceUrl: element<HTMLInputElement>('#source-url').value.trim(),
         assetFolder,
         prefabFolder,
-        localResourceFolder: element<HTMLInputElement>('#local-resource-folder').value.trim(),
+        localResourceFolders: Array.from({ length: 3 }, (_, index) =>
+            element<HTMLInputElement>(`#local-resource-folder-${index}`).value.trim(),
+        ),
+        localResourceFolder: element<HTMLInputElement>('#local-resource-folder-0').value.trim(),
         scale,
         updateExisting: element<HTMLInputElement>('#update-existing').checked,
         refreshAssets: element<HTMLInputElement>('#refresh-assets').checked,
@@ -308,8 +319,10 @@ function setBusy(value: boolean): void {
     element<HTMLButtonElement>('#save-token').disabled = value;
     element<HTMLButtonElement>('#pick-asset-folder').disabled = value;
     element<HTMLButtonElement>('#pick-prefab-folder').disabled = value;
-    element<HTMLButtonElement>('#pick-local-resource-folder').disabled = value;
-    element<HTMLButtonElement>('#clear-local-resource-folder').disabled = value;
+    for (let index = 0; index < 3; index += 1) {
+        element<HTMLButtonElement>(`#pick-local-resource-folder-${index}`).disabled = value;
+        element<HTMLButtonElement>(`#clear-local-resource-folder-${index}`).disabled = value;
+    }
     element<HTMLButtonElement>('#import-button').disabled = value
         || !state.document
         || !state.runtimeCompatible;
@@ -779,52 +792,49 @@ function bindEvents(): void {
             showToast(error instanceof Error ? error.message : '选择预制体目录失败。', true);
         }
     });
-    element('#pick-local-resource-folder').addEventListener('click', async () => {
+    for (let index = 0; index < 3; index += 1) {
+        element(`#pick-local-resource-folder-${index}`).addEventListener('click', async () => {
         if (!state.runtimeCompatible) {
             showToast('请先保存项目并完整重启 Cocos Creator，再选择本地资源目录。', true);
             return;
         }
         try {
-            const current = element<HTMLInputElement>('#local-resource-folder').value;
-            const result = await Editor.Dialog.select({
-                title: '选择本地同名资源目录',
-                path: current && isAbsolute(current)
-                    ? current
-                    : resolve(Editor.Project.path, 'assets'),
-                type: 'directory',
-                button: '选择目录',
-            });
-            const selected = result.filePaths[0];
-            if (result.canceled || !selected) {
+            const current = element<HTMLInputElement>(`#local-resource-folder-${index}`).value;
+            const result = await request<{ folder: string } | null>(
+                'pick-local-resource-folder',
+                current,
+                index,
+            );
+            if (!result) {
                 return;
             }
-            const folder = resolve(selected);
-            const input = element<HTMLInputElement>('#local-resource-folder');
-            input.value = folder;
-            input.title = folder;
+            const input = element<HTMLInputElement>(`#local-resource-folder-${index}`);
+            input.value = result.folder;
+            input.title = result.folder;
             const settings = readSettings(false);
             if (settings) {
                 await request('save-settings', settings);
             }
-            showToast('已启用本地同名资源优先。');
+            showToast(`已启用本地同名资源目录 ${index + 1}。`);
         } catch (error) {
             showToast(error instanceof Error ? error.message : '选择本地资源目录失败。', true);
         }
-    });
-    element('#clear-local-resource-folder').addEventListener('click', async () => {
+        });
+        element(`#clear-local-resource-folder-${index}`).addEventListener('click', async () => {
         if (!state.runtimeCompatible) {
             showToast('请先保存项目并完整重启 Cocos Creator。', true);
             return;
         }
-        const input = element<HTMLInputElement>('#local-resource-folder');
+        const input = element<HTMLInputElement>(`#local-resource-folder-${index}`);
         input.value = '';
         input.title = '';
         const settings = readSettings(false);
         if (settings) {
             await request('save-settings', settings);
         }
-        showToast('已关闭本地同名资源优先。');
-    });
+        showToast(`已清除本地同名资源目录 ${index + 1}。`);
+        });
+    }
     element('#import-button').addEventListener('click', importToScene);
     element('#cancel-import').addEventListener('click', () => request('cancel-import'));
 

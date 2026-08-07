@@ -862,6 +862,40 @@ input[readonly] {
     color: var(--amber);
 }
 
+.local-resource-list {
+    display: grid;
+    gap: 7px;
+}
+
+.local-resource-row {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 6px;
+}
+
+.local-resource-index {
+    display: grid;
+    width: 20px;
+    height: 20px;
+    place-items: center;
+    border: 1px solid var(--border-strong);
+    border-radius: 50%;
+    color: var(--muted);
+    font: 600 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.local-resource-row input {
+    min-width: 0;
+    min-height: 32px;
+    font-size: 11px;
+}
+
+.local-resource-row .button {
+    min-height: 32px;
+    padding-inline: 9px;
+}
+
 .settings-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

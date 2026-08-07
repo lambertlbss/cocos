@@ -140,6 +140,9 @@ export interface ImportSettings {
     sourceUrl: string;
     assetFolder: string;
     prefabFolder: string;
+    /** 最多三个本地同名资源目录，按数组顺序优先匹配。 */
+    localResourceFolders: string[];
+    /** 兼容旧版本设置，始终等于 localResourceFolders[0] 或空字符串。 */
     localResourceFolder: string;
     scale: number;
     updateExisting: boolean;
@@ -214,6 +217,7 @@ export const DEFAULT_SETTINGS: ImportSettings = {
     sourceUrl: '',
     assetFolder: 'figma-importer',
     prefabFolder: 'figma-importer/prefabs',
+    localResourceFolders: [],
     localResourceFolder: '',
     scale: 1,
     updateExisting: true,

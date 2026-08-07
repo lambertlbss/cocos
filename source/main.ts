@@ -117,6 +117,17 @@ function safeSettings(value: unknown): ImportSettings {
             .filter(([key, item]) => key.trim() && typeof item === 'string')
             .map(([key, item]) => [key.trim(), item.trim()]))
         : {};
+    const rawLocalFolders = Array.isArray(input.localResourceFolders)
+        ? input.localResourceFolders
+        : typeof input.localResourceFolder === 'string'
+            ? [input.localResourceFolder]
+            : [];
+    const localResourceFolders = rawLocalFolders
+        .filter((folder): folder is string => typeof folder === 'string')
+        .map((folder) => folder.trim())
+        .filter(Boolean)
+        .filter((folder, index, folders) => folders.indexOf(folder) === index)
+        .slice(0, 3);
     return {
         sourceUrl: typeof input.sourceUrl === 'string' ? input.sourceUrl.trim() : '',
         assetFolder: typeof input.assetFolder === 'string' && input.assetFolder.trim()
@@ -125,9 +136,8 @@ function safeSettings(value: unknown): ImportSettings {
         prefabFolder: typeof input.prefabFolder === 'string' && input.prefabFolder.trim()
             ? input.prefabFolder.trim()
             : DEFAULT_SETTINGS.prefabFolder,
-        localResourceFolder: typeof input.localResourceFolder === 'string'
-            ? input.localResourceFolder.trim()
-            : '',
+        localResourceFolders,
+        localResourceFolder: localResourceFolders[0] ?? '',
         scale,
         updateExisting: input.updateExisting !== false,
         refreshAssets: input.refreshAssets === true,
@@ -245,7 +255,7 @@ async function pickPrefabFolder(current: unknown): Promise<{
     };
 }
 
-async function pickLocalResourceFolder(current: unknown): Promise<{
+async function pickLocalResourceFolder(current: unknown, _index = 0): Promise<{
     folder: string;
 } | null> {
     const currentFolder = typeof current === 'string' ? current.trim() : '';
@@ -357,10 +367,9 @@ async function buildAssets(
     await writer.initialize();
     const cache = new LocalAssetCache(defaultCacheFolder());
     await cache.initialize();
-    const localResources = importSettings.localResourceFolder
-        ? new LocalResourceLibrary(importSettings.localResourceFolder)
-        : null;
-    await localResources?.initialize();
+    const localResources = importSettings.localResourceFolders
+        .map((folder) => new LocalResourceLibrary(folder));
+    await Promise.all(localResources.map((library) => library.initialize()));
     const requests = collectAssetRequests(session.roots, decisions);
     const assets = new Map<string, SpriteAssetSpec>();
     const total = requests.png.length + requests.gradients.length;
@@ -438,9 +447,13 @@ async function buildAssets(
             const borders = decision.nineSlice && format === 'png'
                 ? analyzeSliceGrid(node, importSettings.scale)?.borders
                 : undefined;
-            const localMatch = localResources
-                ? await localResources.find(node.name, format)
-                : null;
+            let localMatch = null;
+            for (const library of localResources) {
+                localMatch = await library.find(node.name, format);
+                if (localMatch) {
+                    break;
+                }
+            }
             const localUrl = localMatch && !borders
                 ? assetDatabaseUrl(localMatch.path)
                 : null;
