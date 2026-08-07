@@ -3,7 +3,7 @@ import { existsSync } from 'fs';
 import { readdir } from 'fs/promises';
 import packageJSON from '../package.json';
 import { FigmaClient, CancelledError } from './figma/client';
-import { inferAction, inferCocosLayoutMode, inferKind } from './figma/analyzer';
+import { inferAction, inferCocosLayoutMode, inferKind, isVectorNode } from './figma/analyzer';
 import { parseDocument } from './figma/parser';
 import { analyzeSliceGrid } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
@@ -318,6 +318,9 @@ function decisionForNode(node: FigmaNode, decisions: Map<string, Decision>): Dec
     const decision = decisions.get(node.id) ?? defaultDecision(node);
     if (node.type === 'TEXT' && decision.action !== 'ignore') {
         return { ...decision, action: 'generate', nineSlice: false };
+    }
+    if (isVectorNode(node) && decision.action !== 'ignore') {
+        return { ...decision, action: 'render', nineSlice: false };
     }
     return decision;
 }

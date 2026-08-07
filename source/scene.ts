@@ -25,6 +25,13 @@ interface SceneImportResult {
 }
 
 const BACKGROUND_NODE_NAME = '__FigmaBackground';
+const RASTER_VECTOR_TYPES = new Set([
+    'VECTOR',
+    'BOOLEAN_OPERATION',
+    'STAR',
+    'LINE',
+    'REGULAR_POLYGON',
+]);
 
 function cleanName(input: string): string {
     return input.replace(/[\u0000-\u001f/\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 96) || 'Figma Node';
@@ -660,6 +667,8 @@ export const methods = {
                     }
                 } else if (spec.sprite) {
                     await configureSprite(node, spec, payload.scale, cc);
+                } else if (RASTER_VECTOR_TYPES.has(spec.figmaType)) {
+                    throw new Error(`矢量节点“${spec.name}”没有绑定 SpriteFrame，PNG 资源可能未成功导入。`);
                 } else if (clipsChildren) {
                     configureClip(node, spec, cc);
                 } else {

@@ -293,6 +293,19 @@ test('does not add a clipping Mask to a terminal Sprite layer', async () => {
     assert.equal(imported.getComponent(Graphics), null);
 });
 
+test('imports Figma vector nodes as Sprite instead of Graphics', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        figmaType: 'VECTOR',
+        action: 'render',
+        kind: 'sprite',
+        sprite: { uuid: 'vector-frame', url: 'db://assets/vector.png', sliced: false },
+    }));
+    const imported = environment.canvas.children[0];
+
+    assert.ok(imported.getComponent(Sprite));
+    assert.equal(imported.getComponent(Graphics), null);
+});
+
 test('does not import a __FigmaBackground child for clipped containers', async () => {
     const environment = await importWithFakeCocos(makeSpec({
         clipsContent: true,
