@@ -755,7 +755,8 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         if (linkedFrame) {
             const prefabWriter = new AssetWriter(importSettings.prefabFolder);
             await prefabWriter.initialize();
-            prefabUrl = `db://assets/${prefabWriter.folder}/${sanitizeAssetName(activeDocument.fileName)}.prefab`;
+            const frameName = activeDocument.roots[0]?.name?.trim() || activeDocument.fileName;
+            prefabUrl = `db://assets/${prefabWriter.folder}/${sanitizeAssetName(frameName)}.prefab`;
         }
 
         const nodeMaps = await getNodeMaps();
