@@ -22,6 +22,7 @@ interface SceneImportResult {
     nodeMap: Record<string, string>;
     created: number;
     updated: number;
+    temporaryRoot?: boolean;
 }
 
 const BACKGROUND_NODE_NAME = '__FigmaBackground';
@@ -735,6 +736,19 @@ export const methods = {
             nodeMap,
             created,
             updated,
+            temporaryRoot: directRoot && !reusedImportRoot,
         };
+    },
+
+    removeImportedNode(payload: { rootUuid: string }): boolean {
+        const cc = require('cc') as any;
+        const scene = cc.director.getScene();
+        const node = scene ? findByUuid(scene, payload.rootUuid) : null;
+        if (!node) {
+            return false;
+        }
+        node.removeFromParent();
+        node.destroy();
+        return true;
     },
 };

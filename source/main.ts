@@ -58,6 +58,7 @@ interface SceneImportResult {
     nodeMap: Record<string, string>;
     created: number;
     updated: number;
+    temporaryRoot?: boolean;
     prefabUrl?: string;
 }
 
@@ -760,6 +761,9 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         }
 
         const nodeMaps = await getNodeMaps();
+        const legacyRootUuid = linkedFrame
+            ? nodeMaps[activeDocument.fileKey]?.__root__
+            : undefined;
         const selected = linkedFrame
             ? undefined
             : importSettings.useSelection ? Editor.Selection.getLastSelected('node') : undefined;
@@ -770,8 +774,11 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             rootFrame,
             scale: importSettings.scale,
             targetUuid: selected || undefined,
-            updateExisting: importSettings.updateExisting,
-            existingMap: nodeMaps[activeDocument.fileKey] ?? {},
+            // A linked Figma frame is a prefab export, not an insertion into the
+            // currently selected scene/prefab. Build an isolated temporary root
+            // and remove it as soon as the prefab asset has been serialized.
+            updateExisting: linkedFrame ? false : importSettings.updateExisting,
+            existingMap: linkedFrame ? {} : (nodeMaps[activeDocument.fileKey] ?? {}),
             prefabUrl,
             centerInCanvas: linkedFrame,
             roots,
@@ -782,30 +789,73 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             method: 'importDocument',
             args: [payload],
         }) as SceneImportResult;
+        let prefabUuid: string | undefined;
         if (prefabUrl) {
-            const prefabUuid = await Editor.Message.request(
-                'scene',
-                'create-prefab',
-                result.rootUuid,
-                prefabUrl,
-            );
-            if (!prefabUuid) {
-                throw new Error(`预制体创建失败：${prefabUrl}`);
+            try {
+                prefabUuid = String(await Editor.Message.request(
+                    'scene',
+                    'create-prefab',
+                    result.rootUuid,
+                    prefabUrl,
+                ) || '');
+                if (!prefabUuid) {
+                    throw new Error(`预制体创建失败：${prefabUrl}`);
+                }
+                result.prefabUrl = prefabUrl;
+                if (result.temporaryRoot) {
+                    await Editor.Message.request('scene', 'execute-scene-script', {
+                        name: packageJSON.name,
+                        method: 'removeImportedNode',
+                        args: [{ rootUuid: result.rootUuid }],
+                    });
+                }
+                // Remove the root left behind by versions before 1.0.11. It is
+                // tracked by the importer map and is the source of the fixed
+                // top-level ghost that survived prefab switches.
+                if (legacyRootUuid && legacyRootUuid !== result.rootUuid) {
+                    await Editor.Message.request('scene', 'execute-scene-script', {
+                        name: packageJSON.name,
+                        method: 'removeImportedNode',
+                        args: [{ rootUuid: legacyRootUuid }],
+                    }).catch(() => undefined);
+                }
+            } catch (error) {
+                if (result.temporaryRoot) {
+                    await Editor.Message.request('scene', 'execute-scene-script', {
+                        name: packageJSON.name,
+                        method: 'removeImportedNode',
+                        args: [{ rootUuid: result.rootUuid }],
+                    }).catch(() => undefined);
+                }
+                throw error;
             }
-            result.prefabUrl = prefabUrl;
         }
         await Editor.Message.request('scene', 'snapshot');
-        nodeMaps[activeDocument.fileKey] = result.nodeMap;
+        if (result.prefabUrl) {
+            // The linked frame root is temporary and has already been removed
+            // from the scene, so never persist its destroyed UUID for updates.
+            delete nodeMaps[activeDocument.fileKey];
+        } else {
+            nodeMaps[activeDocument.fileKey] = result.nodeMap;
+        }
         await Editor.Profile.setProject(packageJSON.name, 'nodeMaps', nodeMaps, 'project');
-        Editor.Selection.select('node', result.rootUuid);
+        if (!result.prefabUrl) {
+            Editor.Selection.select('node', result.rootUuid);
+        }
         if (importSettings.autoSave) {
             await Editor.Message.request('scene', 'save-scene');
+        }
+        if (result.prefabUrl && prefabUuid) {
+            // Cocos 3.8.7 opens prefab assets through asset-db. Selecting the
+            // asset first keeps the Assets panel and Inspector in sync.
+            Editor.Selection.select('asset', prefabUuid);
+            await Editor.Message.request('asset-db', 'open-asset', result.prefabUrl);
         }
         emitProgress({
             phase: 'done',
             value: 1,
             message: result.prefabUrl
-                ? `完成：新建 ${result.created}，已创建预制体 ${result.prefabUrl}`
+                ? `完成：新建 ${result.created}，已创建并打开预制体 ${result.prefabUrl}`
                 : `完成：新建 ${result.created}，更新 ${result.updated}`,
         });
         return result;

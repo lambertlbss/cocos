@@ -354,4 +354,5 @@ test('uses the outermost Figma Frame as the root and centers it on a 640x1136 Ca
         { x: imported.position.x, y: imported.position.y },
         { x: -90, y: 36 },
     );
+    assert.equal(environment.result.temporaryRoot, true);
 });
