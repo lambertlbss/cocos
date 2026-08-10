@@ -2,6 +2,8 @@
 
 面向 Cocos Creator 3.8.7 的 Figma UI 导入扩展。它可以把 Figma 文件或单个节点转换为可编辑的 Cocos UI 节点树，也可以按节点选择 PNG、SVG、合并渲染、九宫格或增量更新。
 
+完整架构、数据流、安全约束、故障记录和后续变更规则见 [插件技术知识库](./FIGMA_IMPORTER_KNOWLEDGE_BASE.md)。
+
 ## 安装
 
 1. 将本目录放到 Cocos 项目的 `extensions/figma-importer-cocos`。
