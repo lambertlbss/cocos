@@ -352,7 +352,31 @@ test('uses the outermost Figma Frame as the root and centers it on a 640x1136 Ca
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
     assert.deepEqual(
         { x: imported.position.x, y: imported.position.y },
-        { x: -90, y: 36 },
+        { x: 0, y: 0 },
     );
+    assert.deepEqual(transform.anchorPoint, { x: 0.5, y: 0.5 });
     assert.equal(environment.result.temporaryRoot, true);
+});
+
+test('converts child nodes to center anchors without changing their Figma placement', async () => {
+    const root = makeSpec({
+        name: 'PopupMaster',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:194',
+            name: 'Icon',
+            frame: { x: 10, y: 5, width: 20, height: 10 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const child = imported.children[0];
+
+    assert.deepEqual(imported.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
+    assert.deepEqual(child.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
+    assert.deepEqual(
+        { x: child.position.x, y: child.position.y },
+        { x: -30, y: 30 },
+    );
 });
