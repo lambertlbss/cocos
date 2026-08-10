@@ -91,25 +91,54 @@ function removeGeneratedBackground(node: any): void {
     background.destroy();
 }
 
-function framePosition(frame: Rect, parentFrame: Rect | undefined, scale: number): { x: number; y: number } {
+function framePosition(
+    frame: Rect,
+    parentFrame: Rect | undefined,
+    scale: number,
+    parentTransform?: any,
+    childTransform?: any,
+): { x: number; y: number } {
     if (!parentFrame) {
         return { x: 0, y: 0 };
     }
+    const parentAnchor = parentTransform?.anchorPoint ?? { x: 0, y: 1 };
+    const parentSize = parentTransform?.contentSize ?? {};
+    const parentWidth = Number(parentSize.width) > 0
+        ? Number(parentSize.width)
+        : parentFrame.width * scale;
+    const parentHeight = Number(parentSize.height) > 0
+        ? Number(parentSize.height)
+        : parentFrame.height * scale;
+    const width = frame.width * scale;
+    const height = frame.height * scale;
+    const childAnchor = childTransform?.anchorPoint ?? { x: 0.5, y: 0.5 };
     return {
-        x: (frame.x - parentFrame.x) * scale,
-        y: -(frame.y - parentFrame.y) * scale,
+        // Figma coordinates are measured from the parent's top-left. Convert
+        // that rectangle to the local position of the node's center anchor.
+        x: (frame.x - parentFrame.x) * scale
+            - parentWidth * parentAnchor.x
+            + width * childAnchor.x,
+        y: parentHeight * (1 - parentAnchor.y)
+            - (frame.y - parentFrame.y) * scale
+            - height * (1 - childAnchor.y),
     };
 }
 
 function configureGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): any {
     const { UITransform, Vec3 } = cc;
     const transform = node.getComponent(UITransform) ?? node.addComponent(UITransform);
-    transform.setAnchorPoint(0, 1);
+    transform.setAnchorPoint(0.5, 0.5);
     transform.setContentSize(
         Math.max(0, spec.frame.width * scale),
         Math.max(0, spec.frame.height * scale),
     );
-    const position = framePosition(spec.frame, spec.parentFrame, scale);
+    const position = framePosition(
+        spec.frame,
+        spec.parentFrame,
+        scale,
+        node.parent?.getComponent(UITransform),
+        transform,
+    );
     node.setPosition(new Vec3(position.x, position.y, node.position?.z ?? 0));
     node.setRotationFromEuler(0, 0, -spec.rotation);
     node.active = spec.visible;
@@ -120,7 +149,7 @@ function visiblePaint(paints: FigmaPaint[]): FigmaPaint | undefined {
     return paints.find((paint) => paint.visible !== false && (paint.opacity ?? 1) > 0);
 }
 
-function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any, centered: boolean): void {
+function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const fill = spec.fills.find((paint) =>
         paint.visible !== false && (paint.opacity ?? 1) > 0 && paint.type === 'SOLID');
     const stroke = spec.strokes.find((paint) =>
@@ -134,14 +163,12 @@ function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any
         0,
         Math.min(Math.min(...spec.cornerRadii) * scale, width / 2, height / 2),
     );
-    const left = centered ? -width / 2 : 0;
-    const bottom = centered ? -height / 2 : -height;
     if (spec.figmaType === 'ELLIPSE') {
-        graphics.ellipse(centered ? 0 : width / 2, centered ? 0 : -height / 2, width / 2, height / 2);
+        graphics.ellipse(0, 0, width / 2, height / 2);
     } else if (radius > 0) {
-        graphics.roundRect(left, bottom, width, height, radius);
+        graphics.roundRect(-width / 2, -height / 2, width, height, radius);
     } else {
-        graphics.rect(left, bottom, width, height);
+        graphics.rect(-width / 2, -height / 2, width, height);
     }
     if (fill?.color) {
         graphics.fillColor = toColor(cc.Color, fill.color, fill.opacity ?? 1);
@@ -157,7 +184,7 @@ function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any
 function configureGraphics(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const graphics = node.addComponent(cc.Graphics);
     graphics.clear();
-    drawGraphics(graphics, spec, scale, cc, false);
+    drawGraphics(graphics, spec, scale, cc);
 }
 
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
@@ -362,6 +389,8 @@ function applyCounterAlignment(
     const right = spec.layout!.paddingRight * scale;
     const top = spec.layout!.paddingTop * scale;
     const bottom = spec.layout!.paddingBottom * scale;
+    const parentTransform = parent.getComponent(cc.UITransform);
+    const parentAnchor = parentTransform?.anchorPoint ?? { x: 0.5, y: 0.5 };
     for (const childSpec of spec.children) {
         const uuid = nodeMap[childSpec.figmaId];
         const child = uuid ? findByUuid(parent, uuid) : null;
@@ -372,28 +401,34 @@ function applyCounterAlignment(
         const position = child.position.clone();
         if (mode === 'HORIZONTAL') {
             const available = Math.max(0, parentHeight - top - bottom);
+            let topOffset = top;
             if (alignment === 'CENTER') {
-                position.y = -(top + (available - transform.height) / 2);
+                topOffset = top + (available - transform.height) / 2;
             } else if (alignment === 'MAX') {
-                position.y = -(parentHeight - bottom - transform.height);
+                topOffset = parentHeight - bottom - transform.height;
             } else {
-                position.y = -top;
                 if (alignment === 'STRETCH') {
                     transform.setContentSize(transform.width, available);
                 }
             }
+            position.y = parentHeight * (1 - parentAnchor.y)
+                - topOffset
+                - transform.height * (1 - (transform.anchorPoint?.y ?? 0.5));
         } else {
             const available = Math.max(0, parentWidth - left - right);
+            let leftOffset = left;
             if (alignment === 'CENTER') {
-                position.x = left + (available - transform.width) / 2;
+                leftOffset = left + (available - transform.width) / 2;
             } else if (alignment === 'MAX') {
-                position.x = parentWidth - right - transform.width;
+                leftOffset = parentWidth - right - transform.width;
             } else {
-                position.x = left;
                 if (alignment === 'STRETCH') {
                     transform.setContentSize(available, transform.height);
                 }
             }
+            position.x = leftOffset
+                - parentWidth * parentAnchor.x
+                + transform.width * (transform.anchorPoint?.x ?? 0.5);
         }
         child.setPosition(position);
     }
@@ -495,97 +530,6 @@ function finalizeScroll(
         Math.max(viewport.contentSize.height, 0, ...childBottom),
     );
     content.setPosition(0, 0, 0);
-}
-
-function anchoredFramePosition(
-    frame: Rect,
-    parentFrame: Rect | undefined,
-    scale: number,
-    parentTransform: any,
-    childTransform: any,
-): { x: number; y: number } {
-    if (!parentFrame) {
-        return {
-            x: childTransform.node?.position?.x ?? 0,
-            y: childTransform.node?.position?.y ?? 0,
-        };
-    }
-    const parentAnchor = parentTransform?.anchorPoint ?? { x: 0, y: 1 };
-    const parentSize = parentTransform?.contentSize ?? {};
-    const parentWidth = Number(parentSize.width) > 0
-        ? Number(parentSize.width)
-        : parentFrame.width * scale;
-    const parentHeight = Number(parentSize.height) > 0
-        ? Number(parentSize.height)
-        : parentFrame.height * scale;
-    const width = frame.width * scale;
-    const height = frame.height * scale;
-    const childAnchor = childTransform.anchorPoint ?? { x: 0.5, y: 0.5 };
-    return {
-        x: (frame.x - parentFrame.x) * scale
-            - parentWidth * parentAnchor.x
-            + width * childAnchor.x,
-        y: parentHeight * (1 - parentAnchor.y)
-            - (frame.y - parentFrame.y) * scale
-            - height * (1 - childAnchor.y),
-    };
-}
-
-function normalizeSpecAnchors(
-    node: any,
-    spec: SceneNodeSpec,
-    nodeMap: Record<string, string>,
-    scale: number,
-    cc: any,
-): void {
-    const transform = node.getComponent(cc.UITransform);
-    if (!transform) {
-        return;
-    }
-    transform.setAnchorPoint(0.5, 0.5);
-    const position = anchoredFramePosition(
-        spec.frame,
-        spec.parentFrame,
-        scale,
-        node.parent?.getComponent(cc.UITransform),
-        transform,
-    );
-    node.setPosition(new cc.Vec3(position.x, position.y, node.position?.z ?? 0));
-    const graphics = node.getComponent(cc.Graphics);
-    if (graphics) {
-        graphics.clear();
-        drawGraphics(graphics, spec, scale, cc, true);
-    }
-    const childParent = spec.kind === 'scrollView'
-        ? node.getChildByName('view')?.getChildByName('content') ?? node
-        : node;
-    for (const childSpec of spec.children) {
-        const childUuid = nodeMap[childSpec.figmaId];
-        const child = childUuid ? findByUuid(childParent, childUuid) : null;
-        if (child) {
-            normalizeSpecAnchors(child, childSpec, nodeMap, scale, cc);
-        }
-    }
-}
-
-function normalizeImportedAnchors(
-    importRoot: any,
-    roots: SceneNodeSpec[],
-    nodeMap: Record<string, string>,
-    scale: number,
-    cc: any,
-): void {
-    const rootTransform = importRoot.getComponent(cc.UITransform);
-    if (rootTransform) {
-        rootTransform.setAnchorPoint(0.5, 0.5);
-    }
-    for (const spec of roots) {
-        const rootUuid = nodeMap[spec.figmaId];
-        const node = rootUuid ? findByUuid(importRoot, rootUuid) : null;
-        if (node) {
-            normalizeSpecAnchors(node, spec, nodeMap, scale, cc);
-        }
-    }
 }
 
 function countSpecs(specs: SceneNodeSpec[]): number {
@@ -703,7 +647,7 @@ export const methods = {
                 updated += 1;
             }
             const rootTransform = importRoot.getComponent(UITransform) ?? importRoot.addComponent(UITransform);
-            rootTransform.setAnchorPoint(0, 1);
+            rootTransform.setAnchorPoint(0.5, 0.5);
             rootTransform.setContentSize(
                 payload.rootFrame.width * payload.scale,
                 payload.rootFrame.height * payload.scale,
@@ -795,10 +739,6 @@ export const methods = {
             for (const root of payload.roots) {
                 await build(root, directRoot ? parent : importRoot, false, directRoot ? importRoot : undefined);
             }
-            // Build with Figma's top-left coordinate system first, then switch
-            // the completed tree to Cocos' center anchors in one pass. This
-            // avoids parent/child anchor changes affecting one another mid-import.
-            normalizeImportedAnchors(importRoot, payload.roots, nodeMap, payload.scale, cc);
             if (directRoot) {
                 nodeMap.__root__ = importRoot.uuid;
                 if (payload.centerInCanvas && canvas) {

@@ -48,7 +48,7 @@
 
 节点类型使用 Cocos 组件语义：`Node`、`Sprite`、`Label`、`Button`、`ScrollView`、`Layout`。滚动节点使用 `ScrollView → view（Mask）→ content（Layout）` 标准结构。
 
-普通导入节点完成构建后统一使用 Cocos 默认中心锚点 `(0.5, 0.5)`，插件会依据原始 Figma 左上坐标补偿节点位置，因此不会改变最终画面；ScrollView 的 `view/content` 保留左上锚点以兼容滚动内容布局。
+普通导入节点在建树时直接使用 Cocos 默认中心锚点 `(0.5, 0.5)`，插件会依据父节点实际锚点、尺寸和原始 Figma 左上坐标计算中心位置，不经过导入后的二次调整；ScrollView 的 `view/content` 保留左上锚点以兼容滚动内容布局。
 
 “智能”和“分层高保真”都会保留容器层级；后者只把叶子节点渲染为 PNG / SVG。只有手动把带子节点的容器设为“PNG 整层”或“合并子树”时，子节点才不会单独生成。
 

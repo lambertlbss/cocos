@@ -380,3 +380,31 @@ test('converts child nodes to center anchors without changing their Figma placem
         { x: -30, y: 30 },
     );
 });
+
+test('keeps ScrollView helpers top-left while importing content nodes with center anchors', async () => {
+    const root = makeSpec({
+        name: 'Scroll',
+        kind: 'scrollView',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:195',
+            name: 'Item',
+            frame: { x: 10, y: 5, width: 20, height: 10 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const view = imported.getChildByName('view');
+    const content = view.getChildByName('content');
+    const child = content.children[0];
+
+    assert.deepEqual(imported.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
+    assert.deepEqual(view.getComponent(UITransform).anchorPoint, { x: 0, y: 1 });
+    assert.deepEqual(content.getComponent(UITransform).anchorPoint, { x: 0, y: 1 });
+    assert.deepEqual(child.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
+    assert.deepEqual(
+        { x: child.position.x, y: child.position.y },
+        { x: 20, y: -10 },
+    );
+});
