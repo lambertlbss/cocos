@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.19`
+> 当前插件版本：`1.0.20`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-10  
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -255,7 +255,7 @@ Frame 链接的 Prefab 流程是当前最重要的特殊路径：
 | Figma 语义 | Cocos 结果 | 备注 |
 |---|---|---|
 | Frame/Group/Component/Instance 容器 | `Node` + `UITransform` | 保留子节点层级 |
-| 文本 | `Label`、可选 `LabelOutline` | 自动映射字体 UUID |
+| 文本 | `Label` | 字体描边使用 Label 内置 outline 属性 |
 | PNG/矢量/复杂视觉 | `Sprite` + `SpriteFrame` | 矢量不走 Graphics |
 | 简单可表达图形（历史兼容路径） | `Graphics` | 新矢量形状已强制 PNG；仅保留非矢量可编辑降级路径 |
 | Button 命名/语义 | `Button` | 根据 `kind` 推断 |
@@ -397,6 +397,10 @@ Frame Prefab 导入完成后不会保存已销毁临时根节点 UUID；普通�
 
 旧版本在整个导入树中保留 `(0, 1)` 左上锚点，原因是直接复用 Figma 的左上坐标。当前版本在建树时直接使用 `(0.5, 0.5)`，根据父节点实际锚点和尺寸计算中心位置，不再依赖导入完成后的二次归一化。若 Cocos 仍显示左上锚点，先确认扩展已重新构建并重启，且项目加载的是最新 `dist/scene.js`。
 
+### 12.8 文字节点偏移或高度异常
+
+文字节点先设置 Figma Frame 几何，再设置 Label 字符串、字体和溢出模式时，Cocos Label 可能根据默认 `NONE` 溢出模式重新计算 UITransform 尺寸；中心锚点下会表现为轻微位置偏移或文字框高度变化。当前实现先设置字体、行高、对齐和溢出模式，设置字符串后再次恢复 Figma Frame 的 UITransform 尺寸；异步字体加载完成后再次恢复一次。`lineHeight` 保留 Figma 的 `lineHeightPx`，不再强制提升到 fontSize。
+
 ## 13. 测试与质量门禁
 
 标准命令：
@@ -486,6 +490,12 @@ npm test
 - 停止根据 Figma Constraints 自动创建 `cc.Widget`。
 - 保留节点的中心锚点、尺寸和绝对位置，避免 Widget 适配逻辑覆盖导入结果。
 - 新增 Constraints 场景回归测试；30 项测试通过。
+
+### 2026-08-11 · `1.0.20`
+
+- 字体描边改用 Cocos 3.8.7 `Label.enableOutline`、`outlineColor`、`outlineWidth`，不再创建 `LabelOutline`。
+- 修复 Label 设置字符串/字体后 UITransform 被重新计算导致的文字偏移和高度异常：恢复 Figma Frame 尺寸，并保留原始行高。
+- 新增文字描边、文字框尺寸和位置回归测试；31 项测试通过。
 
 ### `1.0.14` / `2f92870`
 

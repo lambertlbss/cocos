@@ -188,14 +188,18 @@ function configureGraphics(node: any, spec: SceneNodeSpec, scale: number, cc: an
 }
 
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
-    const { Label, LabelOutline } = cc;
+    const { Label } = cc;
     const label = node.addComponent(Label);
     const style = spec.textStyle ?? {};
-    label.string = spec.characters ?? '';
     label.fontSize = Math.max(1, (style.fontSize ?? 16) * scale);
-    label.lineHeight = Math.max(label.fontSize, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
+    label.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
     label.spacingX = (style.letterSpacing ?? 0) * scale;
     label.enableWrapText = style.textAutoResize !== 'WIDTH_AND_HEIGHT';
+    label.overflow = style.textAutoResize === 'HEIGHT'
+        ? Label.Overflow.RESIZE_HEIGHT
+        : style.textAutoResize === 'WIDTH_AND_HEIGHT'
+            ? Label.Overflow.NONE
+            : Label.Overflow.CLAMP;
     label.horizontalAlign = ({
         LEFT: Label.HorizontalAlign.LEFT,
         CENTER: Label.HorizontalAlign.CENTER,
@@ -207,21 +211,26 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
         CENTER: Label.VerticalAlign.CENTER,
         BOTTOM: Label.VerticalAlign.BOTTOM,
     } as Record<string, number>)[style.textAlignVertical ?? 'TOP'] ?? Label.VerticalAlign.TOP;
-    label.overflow = style.textAutoResize === 'HEIGHT'
-        ? Label.Overflow.RESIZE_HEIGHT
-        : style.textAutoResize === 'WIDTH_AND_HEIGHT'
-            ? Label.Overflow.NONE
-            : Label.Overflow.CLAMP;
+    label.string = spec.characters ?? '';
     const fill = visiblePaint(spec.fills);
     if (fill?.color) {
         label.color = toColor(cc.Color, fill.color, fill.opacity ?? 1);
     }
     const stroke = visiblePaint(spec.strokes);
     if (stroke?.color && spec.strokeWeight > 0) {
-        const outline = node.addComponent(LabelOutline);
-        outline.color = toColor(cc.Color, stroke.color, stroke.opacity ?? 1);
-        outline.width = Math.max(1, spec.strokeWeight * scale);
+        label.enableOutline = true;
+        label.outlineColor = toColor(cc.Color, stroke.color, stroke.opacity ?? 1);
+        label.outlineWidth = Math.max(1, spec.strokeWeight * scale);
     }
+    restoreLabelGeometry(node, spec, scale, cc);
+}
+
+function restoreLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
+    const transform = node.getComponent(cc.UITransform);
+    transform?.setContentSize(
+        Math.max(0, spec.frame.width * scale),
+        Math.max(0, spec.frame.height * scale),
+    );
 }
 
 function loadAsset(assetManager: any, uuid: string): Promise<any> {
@@ -638,6 +647,7 @@ export const methods = {
                     if (spec.fontUuid) {
                         const label = node.getComponent(Label);
                         label.font = await loadAsset(cc.assetManager, spec.fontUuid);
+                        restoreLabelGeometry(node, spec, payload.scale, cc);
                     }
                 } else if (spec.sprite) {
                     await configureSprite(node, spec, payload.scale, cc);

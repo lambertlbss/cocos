@@ -2,7 +2,7 @@
   "package_version": 2,
   "name": "figma-importer-cocos",
   "title": "Figma Importer",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "Figma UI importer for Cocos Creator 3.8.7",
   "main": "./dist/main.js",
   "author": "Figma Importer contributors",

@@ -317,6 +317,51 @@ test('does not auto-create Widget for Figma constraints', async () => {
     assert.equal(imported.getComponent(Widget), null);
 });
 
+test('configures text outline on Label and preserves the Figma text box geometry', async () => {
+    const root = makeSpec({
+        name: 'TextRoot',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:196',
+            name: 'Title',
+            figmaType: 'TEXT',
+            kind: 'label',
+            frame: { x: 10, y: 5, width: 40, height: 20 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    root.children[0].characters = '标题';
+    root.children[0].textStyle = {
+        fontSize: 16,
+        lineHeightPx: 18,
+        textAlignHorizontal: 'CENTER',
+        textAlignVertical: 'CENTER',
+        textAutoResize: 'NONE',
+    };
+    root.children[0].strokes = [{
+        type: 'SOLID',
+        visible: true,
+        color: { r: 1, g: 0, b: 0, a: 1 },
+    }];
+    root.children[0].strokeWeight = 2;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const title = imported.children[0];
+    const label = title.getComponent(Label);
+    const transform = title.getComponent(UITransform);
+
+    assert.ok(label);
+    assert.equal(title.getComponent(LabelOutline), null);
+    assert.equal(label.enableOutline, true);
+    assert.equal(label.outlineWidth, 2);
+    assert.equal(label.lineHeight, 18);
+    assert.deepEqual(transform.contentSize, { width: 40, height: 20 });
+    assert.deepEqual(
+        { x: title.position.x, y: title.position.y },
+        { x: -20, y: 25 },
+    );
+});
+
 test('does not import a __FigmaBackground child for clipped containers', async () => {
     const environment = await importWithFakeCocos(makeSpec({
         clipsContent: true,
