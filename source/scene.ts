@@ -260,55 +260,6 @@ function configureOpacity(node: any, spec: SceneNodeSpec, cc: any): void {
     opacity.opacity = Math.round(Math.max(0, Math.min(1, spec.opacity)) * 255);
 }
 
-function configureWidget(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
-    if (!spec.parentFrame || !spec.constraints) {
-        return;
-    }
-    const { Widget } = cc;
-    const horizontal = spec.constraints.horizontal;
-    const vertical = spec.constraints.vertical;
-    if (!horizontal && !vertical) {
-        return;
-    }
-    const widget = node.addComponent(Widget);
-    widget.alignMode = Widget.AlignMode.ALWAYS;
-    const parent = spec.parentFrame;
-    const left = (spec.frame.x - parent.x) * scale;
-    const right = (parent.x + parent.width - spec.frame.x - spec.frame.width) * scale;
-    const top = (spec.frame.y - parent.y) * scale;
-    const bottom = (parent.y + parent.height - spec.frame.y - spec.frame.height) * scale;
-    if (horizontal === 'MIN') {
-        widget.isAlignLeft = true;
-        widget.left = left;
-    } else if (horizontal === 'MAX') {
-        widget.isAlignRight = true;
-        widget.right = right;
-    } else if (horizontal === 'CENTER') {
-        widget.isAlignHorizontalCenter = true;
-        widget.horizontalCenter = (left - right) / 2;
-    } else if (horizontal === 'STRETCH' || horizontal === 'SCALE') {
-        widget.isAlignLeft = true;
-        widget.isAlignRight = true;
-        widget.left = left;
-        widget.right = right;
-    }
-    if (vertical === 'MIN') {
-        widget.isAlignTop = true;
-        widget.top = top;
-    } else if (vertical === 'MAX') {
-        widget.isAlignBottom = true;
-        widget.bottom = bottom;
-    } else if (vertical === 'CENTER') {
-        widget.isAlignVerticalCenter = true;
-        widget.verticalCenter = (bottom - top) / 2;
-    } else if (vertical === 'STRETCH' || vertical === 'SCALE') {
-        widget.isAlignTop = true;
-        widget.isAlignBottom = true;
-        widget.top = top;
-        widget.bottom = bottom;
-    }
-}
-
 function configureLayout(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const mode = spec.layout?.mode;
     if (!mode || mode === 'NONE') {
@@ -593,7 +544,6 @@ export const methods = {
             ScrollView,
             Mask,
             Button,
-            Widget,
             UIOpacity,
             Camera,
         } = cc;
@@ -613,7 +563,6 @@ export const methods = {
             Layout,
             ScrollView,
             Button,
-            Widget,
             UIOpacity,
         ];
         const nodeMap: Record<string, string> = {};
@@ -662,7 +611,6 @@ export const methods = {
         const build = async (
             spec: SceneNodeSpec,
             nodeParent: any,
-            parentHasLayout: boolean,
             providedNode?: any,
         ): Promise<void> => {
             let node = providedNode ?? (payload.updateExisting && payload.existingMap[spec.figmaId]
@@ -702,9 +650,6 @@ export const methods = {
                 }
                 configureOpacity(node, spec, cc);
                 configureButton(node, spec, cc);
-                if (!parentHasLayout) {
-                    configureWidget(node, spec, payload.scale, cc);
-                }
             }
 
             const transform = node.getComponent(UITransform);
@@ -714,9 +659,8 @@ export const methods = {
             if (spec.action !== 'transform') {
                 configureLayout(childParent, spec, payload.scale, cc);
             }
-            const hasLayout = Boolean(spec.layout?.mode && spec.layout.mode !== 'NONE');
             for (const child of spec.children) {
-                await build(child, childParent, hasLayout);
+                await build(child, childParent);
             }
             const layout = childParent.getComponent(Layout);
             layout?.updateLayout();
@@ -737,7 +681,7 @@ export const methods = {
 
         try {
             for (const root of payload.roots) {
-                await build(root, directRoot ? parent : importRoot, false, directRoot ? importRoot : undefined);
+                await build(root, directRoot ? parent : importRoot, directRoot ? importRoot : undefined);
             }
             if (directRoot) {
                 nodeMap.__root__ = importRoot.uuid;

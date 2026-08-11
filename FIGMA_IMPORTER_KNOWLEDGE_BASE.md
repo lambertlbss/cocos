@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.18`
+> 当前插件版本：`1.0.19`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-10  
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -262,7 +262,7 @@ Frame 链接的 Prefab 流程是当前最重要的特殊路径：
 | Auto Layout | `Layout` | 不安全的 Wrap/Grid 保留绝对几何 |
 | Clip/Mask | `Mask` | 不给终端 Sprite 误加 Mask |
 | Scroll | `ScrollView → view(Mask) → content(Layout)` | 标准 Cocos 结构 |
-| Constraints | `Widget` | 仅在可推断时设置 |
+| Constraints | 不自动添加组件 | 保留绝对几何，Widget 由用户手动配置 |
 | 透明度 | `UIOpacity` | 与 Figma opacity 对应 |
 | 三宫/九宫 | `Sprite.Type.SLICED` | SpriteFrame 写入边界元数据 |
 
@@ -418,7 +418,7 @@ npm test
 - Token 加密和明文不落盘；
 - 缓存哈希键不泄露 fileKey/nodeId。
 
-当前基线：`29` 项测试通过（截至 2026-08-10）。
+当前基线：`30` 项测试通过（截至 2026-08-11）。
 
 ## 14. 发布与版本策略
 
@@ -442,6 +442,7 @@ npm test
 | 不读取 Cocos 选中节点 | 避免导入到错误场景/Prefab或产生残影 | 普通导入固定 Canvas 根 |
 | 同名资源复用首个命中 | 避免后缀泛滥和重复资源 | 确定性查找，不追加随机名 |
 | ScrollView 使用标准三层结构 | 与 Cocos 常用结构兼容 | ScrollView → view → content |
+| 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
 
 ## 16. 变更记录
@@ -479,6 +480,12 @@ npm test
 - 面板顶部移除装饰图标。
 - 移除顶部 Cocos Creator 版本号文案，标题区域改为简洁的两列布局。
 - 保留插件标题、副标题和连接状态显示；构建后需重启面板加载新模板。
+
+### 2026-08-11 · `1.0.19`
+
+- 停止根据 Figma Constraints 自动创建 `cc.Widget`。
+- 保留节点的中心锚点、尺寸和绝对位置，避免 Widget 适配逻辑覆盖导入结果。
+- 新增 Constraints 场景回归测试；30 项测试通过。
 
 ### `1.0.14` / `2f92870`
 

@@ -36,7 +36,7 @@
 
 ## 节点策略
 
-- 生成：转换为 `UITransform`、`Graphics`、`Label`、`Layout`、`Button`、`ScrollView`、`Mask`、`Widget` 等可编辑组件。
+- 生成：转换为 `UITransform`、`Graphics`、`Label`、`Layout`、`Button`、`ScrollView`、`Mask` 等可编辑组件。
 - PNG：由 Figma 渲染后导入 `SpriteFrame`，适合图片填充、阴影和复杂效果。
 - 矢量节点：面板显示为“PNG Sprite”，通过 Figma PNG 渲染后导入 `Sprite`，不会用 `cc.Graphics` 近似任意矢量路径；它只渲染当前矢量节点，不会压平父节点子树。
 - 合并：把当前节点及其子树合并为一张 PNG。
@@ -52,7 +52,7 @@
 
 “智能”和“分层高保真”都会保留容器层级；后者只把叶子节点渲染为 PNG / SVG。只有手动把带子节点的容器设为“PNG 整层”或“合并子树”时，子节点才不会单独生成。
 
-可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪映射为 `Mask`，明确的溢出或 `list_` / `scroll_` 命名映射为 `ScrollView`，Constraints 映射为 `Widget`。
+可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪映射为 `Mask`，明确的溢出或 `list_` / `scroll_` 命名映射为 `ScrollView`。Figma Constraints 暂不自动映射为 `Widget`，导入后由用户在 Cocos 中手动配置。
 
 ## Token 安全
 

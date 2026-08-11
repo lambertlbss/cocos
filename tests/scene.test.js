@@ -306,6 +306,17 @@ test('imports Figma vector nodes as Sprite instead of Graphics', async () => {
     assert.equal(imported.getComponent(Graphics), null);
 });
 
+test('does not auto-create Widget for Figma constraints', async () => {
+    const spec = makeSpec({
+        frame: { x: 10, y: 12, width: 40, height: 24 },
+    });
+    spec.constraints = { horizontal: 'MIN', vertical: 'MIN' };
+    const environment = await importWithFakeCocos(spec);
+    const imported = environment.canvas.children[0];
+
+    assert.equal(imported.getComponent(Widget), null);
+});
+
 test('does not import a __FigmaBackground child for clipped containers', async () => {
     const environment = await importWithFakeCocos(makeSpec({
         clipsContent: true,
