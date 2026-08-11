@@ -187,30 +187,34 @@ function configureGraphics(node: any, spec: SceneNodeSpec, scale: number, cc: an
     drawGraphics(graphics, spec, scale, cc);
 }
 
+function isMultilineLabel(spec: SceneNodeSpec): boolean {
+    const characters = spec.characters ?? '';
+    if (/[\r\n\u2028\u2029]/.test(characters)) {
+        return true;
+    }
+    if ((spec.textStyle?.maxLines ?? 0) > 1) {
+        return true;
+    }
+    const lineHeight = spec.textStyle?.lineHeightPx ?? spec.textStyle?.fontSize ?? 16;
+    return lineHeight > 0 && spec.frame.height > lineHeight * 1.25;
+}
+
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const { Label } = cc;
     const label = node.addComponent(Label);
     const style = spec.textStyle ?? {};
+    const multiline = isMultilineLabel(spec);
     label.fontSize = Math.max(1, (style.fontSize ?? 16) * scale);
     label.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
     label.spacingX = (style.letterSpacing ?? 0) * scale;
-    label.enableWrapText = style.textAutoResize !== 'WIDTH_AND_HEIGHT';
-    // Figma has already supplied the final text frame dimensions. Cocos'
-    // NONE/RESIZE_HEIGHT modes recalculate UITransform from font metrics,
-    // which changes the center position and produces the reported 21.34px
-    // height instead of the Figma 17px box. Keep the imported box authoritative.
-    label.overflow = Label.Overflow.CLAMP;
-    label.horizontalAlign = ({
-        LEFT: Label.HorizontalAlign.LEFT,
-        CENTER: Label.HorizontalAlign.CENTER,
-        RIGHT: Label.HorizontalAlign.RIGHT,
-        JUSTIFIED: Label.HorizontalAlign.LEFT,
-    } as Record<string, number>)[style.textAlignHorizontal ?? 'LEFT'] ?? Label.HorizontalAlign.LEFT;
-    label.verticalAlign = ({
-        TOP: Label.VerticalAlign.TOP,
-        CENTER: Label.VerticalAlign.CENTER,
-        BOTTOM: Label.VerticalAlign.BOTTOM,
-    } as Record<string, number>)[style.textAlignVertical ?? 'TOP'] ?? Label.VerticalAlign.TOP;
+    label.enableWrapText = multiline;
+    label.overflow = Label.Overflow.NONE;
+    label.horizontalAlign = multiline
+        ? Label.HorizontalAlign.LEFT
+        : Label.HorizontalAlign.CENTER;
+    label.verticalAlign = multiline
+        ? Label.VerticalAlign.TOP
+        : Label.VerticalAlign.CENTER;
     label.string = spec.characters ?? '';
     const fill = visiblePaint(spec.fills);
     if (fill?.color) {
@@ -222,15 +226,31 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
         label.outlineColor = toColor(cc.Color, stroke.color, stroke.opacity ?? 1);
         label.outlineWidth = Math.max(1, spec.strokeWeight * scale);
     }
-    restoreLabelGeometry(node, spec, scale, cc);
 }
 
-function restoreLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
+function finalizeLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
+    const label = node.getComponent(cc.Label);
     const transform = node.getComponent(cc.UITransform);
-    transform?.setContentSize(
-        Math.max(0, spec.frame.width * scale),
-        Math.max(0, spec.frame.height * scale),
+    if (!label || !transform) {
+        return;
+    }
+    label.updateRenderData(true);
+    if (!isMultilineLabel(spec) || !spec.parentFrame) {
+        return;
+    }
+    const measuredFrame: Rect = {
+        ...spec.frame,
+        width: transform.width / scale,
+        height: transform.height / scale,
+    };
+    const position = framePosition(
+        measuredFrame,
+        spec.parentFrame,
+        scale,
+        node.parent?.getComponent(cc.UITransform),
+        transform,
     );
+    node.setPosition(new cc.Vec3(position.x, position.y, node.position?.z ?? 0));
 }
 
 function loadAsset(assetManager: any, uuid: string): Promise<any> {
@@ -647,8 +667,8 @@ export const methods = {
                     if (spec.fontUuid) {
                         const label = node.getComponent(Label);
                         label.font = await loadAsset(cc.assetManager, spec.fontUuid);
-                        restoreLabelGeometry(node, spec, payload.scale, cc);
                     }
+                    finalizeLabelGeometry(node, spec, payload.scale, cc);
                 } else if (spec.sprite) {
                     await configureSprite(node, spec, payload.scale, cc);
                 } else if (RASTER_VECTOR_TYPES.has(spec.figmaType)) {

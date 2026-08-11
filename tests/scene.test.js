@@ -59,7 +59,23 @@ class Sprite extends Component {
 Sprite.SizeMode = { CUSTOM: 1 };
 Sprite.Type = { SIMPLE: 0, SLICED: 1 };
 
-class Label extends Component {}
+class Label extends Component {
+    updateRenderData() {
+        if (this.overflow !== Label.Overflow.NONE) {
+            return;
+        }
+        const transform = this.node.getComponent(UITransform);
+        if (!transform) {
+            return;
+        }
+        const lineHeight = Math.max(1, this.lineHeight ?? 1);
+        const explicitLines = String(this.string ?? '').split(/\r\n|[\n\r\u2028\u2029]/).length;
+        const inferredLines = this.enableWrapText
+            ? Math.max(1, Math.round(transform.height / lineHeight))
+            : 1;
+        transform.setContentSize(transform.width, lineHeight * Math.max(explicitLines, inferredLines));
+    }
+}
 Label.HorizontalAlign = { LEFT: 0, CENTER: 1, RIGHT: 2 };
 Label.VerticalAlign = { TOP: 0, CENTER: 1, BOTTOM: 2 };
 Label.Overflow = { NONE: 0, CLAMP: 1, RESIZE_HEIGHT: 2 };
@@ -317,7 +333,7 @@ test('does not auto-create Widget for Figma constraints', async () => {
     assert.equal(imported.getComponent(Widget), null);
 });
 
-test('configures text outline on Label and preserves the Figma text box geometry', async () => {
+test('uses NONE and centers a single-line Label on the Figma reference frame', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 100, height: 80 },
@@ -354,12 +370,51 @@ test('configures text outline on Label and preserves the Figma text box geometry
     assert.equal(title.getComponent(LabelOutline), null);
     assert.equal(label.enableOutline, true);
     assert.equal(label.outlineWidth, 2);
-    assert.equal(label.overflow, Label.Overflow.CLAMP);
+    assert.equal(label.overflow, Label.Overflow.NONE);
+    assert.equal(label.enableWrapText, false);
+    assert.equal(label.horizontalAlign, Label.HorizontalAlign.CENTER);
+    assert.equal(label.verticalAlign, Label.VerticalAlign.CENTER);
     assert.equal(label.lineHeight, 18);
-    assert.deepEqual(transform.contentSize, { width: 40, height: 20 });
+    assert.deepEqual(transform.contentSize, { width: 40, height: 18 });
     assert.deepEqual(
         { x: title.position.x, y: title.position.y },
         { x: -20, y: 25 },
+    );
+});
+
+test('uses NONE and keeps a multiline Label aligned to the Figma top-left', async () => {
+    const root = makeSpec({
+        name: 'TextRoot',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:197',
+            name: 'Description',
+            figmaType: 'TEXT',
+            kind: 'label',
+            frame: { x: 10, y: 5, width: 40, height: 40 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    root.children[0].characters = '第一行第二行';
+    root.children[0].textStyle = {
+        fontSize: 16,
+        lineHeightPx: 18,
+        textAutoResize: 'HEIGHT',
+    };
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const description = imported.children[0];
+    const label = description.getComponent(Label);
+    const transform = description.getComponent(UITransform);
+
+    assert.equal(label.overflow, Label.Overflow.NONE);
+    assert.equal(label.enableWrapText, true);
+    assert.equal(label.horizontalAlign, Label.HorizontalAlign.LEFT);
+    assert.equal(label.verticalAlign, Label.VerticalAlign.TOP);
+    assert.deepEqual(transform.contentSize, { width: 40, height: 36 });
+    assert.deepEqual(
+        { x: description.position.x, y: description.position.y },
+        { x: -20, y: 17 },
     );
 });
 
