@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.22`
+> 当前插件版本：`1.0.23`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-11  
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -399,7 +399,23 @@ Frame Prefab 导入完成后不会保存已销毁临时根节点 UUID；普通�
 
 ### 12.8 文字节点偏移或高度异常
 
-`Label.Overflow.NONE` 会按实际字体度量重算 UITransform，不能同时把同一 Label 的宽高锁死为 Figma 文本框。当前实现把 Figma 文本框作为对齐参考而非强制尺寸：单行 Label 关闭换行，以测量后的中心对齐 Figma 参考框中心；多行 Label 开启换行，以测量后的左上角对齐 Figma 参考框左上角。字体资源设置完成后调用 `updateRenderData(true)` 获取最终尺寸，再完成多行位置补偿。`lineHeight` 保留 Figma 的 `lineHeightPx`，不强制提升到 fontSize。
+`Label.Overflow.NONE` 会按实际字体度量重算 UITransform，不能同时把同一 Label 的宽高锁死为 Figma 文本框。Cocos 3.8.7 的 TTF 排版器还会在 `NONE` 下强制设置 `wrapping = false`，因此 `enableWrapText` 不能恢复自动折行。
+
+当前导入标准：
+
+- 先设置文字内容、字号、行高、颜色、描边和映射字体，再调用 `updateRenderData(true)`，只使用最终字体度量做一次位置补偿；
+- 所有 Label 最终保持 `Overflow.NONE` 和 `enableWrapText = false`；
+- CRLF、CR、U+2028、U+2029 统一转换为 `\n`，只有实际包含 `\n` 才判定为多行；
+- 单行使用 `CENTER / CENTER`，实测内容中心锁定 Figma `absoluteBoundingBox` 中心；
+- 多行使用 `LEFT / TOP`，实测内容左上角锁定 Figma `absoluteBoundingBox` 左上角；
+- `lineHeight` 保留 Figma 的 `lineHeightPx`，不强制提升到 `fontSize`；
+- TTF Label 的 UITransform 高度约为 `(显式行数 + 0.26) × lineHeight`（再叠加描边扩展），是 Cocos 的 `BASELINE_RATIO` 度量结果，不代表节点位置发生偏移；BitmapFont 使用另一套度量路径。
+
+Figma 自动折行不会稳定提供每个视觉换行索引。若 `characters` 没有换行符，`NONE` 下无法无风险重现折行；分析面板会提示“请在 Figma 中插入换行符”。为了保证确定性，插件不猜测断行位置，也不伪装开启一个引擎实际忽略的自动换行开关。
+
+### 12.9 字体资源正确但字形仍有差异
+
+位置补偿只能保证 Cocos 实测文字相对 Figma 布局框的中心或左上基准一致。严格字形还原还要求项目字体文件与 Figma 的字体家族、字重和样式一致。当前字体映射以 `fontFamily` 为键，同一家族多个字重需手动选择最合适的项目字体；Cocos 3.8.7 的 TTF/SystemFont 路径不会应用 `Label.spacingX`，Figma `letterSpacing` 只有 BitmapFont 或自定义逐字排版方案才能严格还原。
 
 ## 13. 测试与质量门禁
 
@@ -422,7 +438,7 @@ npm test
 - Token 加密和明文不落盘；
 - 缓存哈希键不泄露 fileKey/nodeId。
 
-当前基线：`32` 项测试通过（截至 2026-08-11）。
+当前基线：`36` 项测试通过（截至 2026-08-11）。
 
 ## 14. 发布与版本策略
 
@@ -506,9 +522,18 @@ npm test
 ### 2026-08-11 · `1.0.22`
 
 - 按用户标准恢复所有文字为 `Label.Overflow.NONE`。
-- 单行文字默认关闭换行并设置水平/竖直居中；多行文字默认开启换行并设置左上对齐。
+- 初步实现单行水平/竖直居中及多行左上对齐。
 - Figma 文本框改为对齐参考框：单行保持中心，多行在字体测量后补偿左上位置，避免 NONE 自动尺寸改变布局基准。
 - 新增单行与多行对齐回归测试；32 项测试通过。
+
+### 2026-08-11 · `1.0.23`
+
+- 按 Cocos Creator 3.8.7 引擎实际语义修正 `NONE` 文本策略：移除无效的自动换行设置，所有 Label 明确使用 `enableWrapText = false`。
+- 仅把显式换行文本判定为多行，规范化 CRLF/CR/U+2028/U+2029；不再通过文本框高度或 `maxLines` 猜测多行。
+- 单行最终度量中心锁定 Figma 布局框中心；显式多行最终度量左上锁定 Figma 布局框左上。
+- 多行补偿在节点局部坐标中计算并按节点角度旋转，旋转文字同样保持原局部左上基准。
+- 对疑似 Figma 自动折行但没有显式换行的文本增加分析警告，避免静默产生错误布局。
+- 测试替身按 3.8.7 的 NONE 尺寸重算、基线扩展和描边扩展建模；新增自动折行警告、换行规范化、误判、映射字体最终度量和旋转补偿回归测试，36 项测试通过。
 
 ### `1.0.14` / `2f92870`
 

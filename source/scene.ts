@@ -187,27 +187,28 @@ function configureGraphics(node: any, spec: SceneNodeSpec, scale: number, cc: an
     drawGraphics(graphics, spec, scale, cc);
 }
 
-function isMultilineLabel(spec: SceneNodeSpec): boolean {
-    const characters = spec.characters ?? '';
-    if (/[\r\n\u2028\u2029]/.test(characters)) {
-        return true;
-    }
-    if ((spec.textStyle?.maxLines ?? 0) > 1) {
-        return true;
-    }
-    const lineHeight = spec.textStyle?.lineHeightPx ?? spec.textStyle?.fontSize ?? 16;
-    return lineHeight > 0 && spec.frame.height > lineHeight * 1.25;
+function normalizeLabelText(characters: string | undefined): string {
+    return (characters ?? '')
+        .replace(/\r\n/g, '\n')
+        .replace(/[\r\u2028\u2029]/g, '\n');
+}
+
+function isMultilineLabel(characters: string): boolean {
+    // Cocos Creator 3.8.7 disables automatic wrapping whenever overflow is
+    // NONE. Only explicit line feeds can therefore produce real line breaks.
+    return characters.includes('\n');
 }
 
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const { Label } = cc;
     const label = node.addComponent(Label);
     const style = spec.textStyle ?? {};
-    const multiline = isMultilineLabel(spec);
+    const characters = normalizeLabelText(spec.characters);
+    const multiline = isMultilineLabel(characters);
     label.fontSize = Math.max(1, (style.fontSize ?? 16) * scale);
     label.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
     label.spacingX = (style.letterSpacing ?? 0) * scale;
-    label.enableWrapText = multiline;
+    label.enableWrapText = false;
     label.overflow = Label.Overflow.NONE;
     label.horizontalAlign = multiline
         ? Label.HorizontalAlign.LEFT
@@ -215,7 +216,7 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
     label.verticalAlign = multiline
         ? Label.VerticalAlign.TOP
         : Label.VerticalAlign.CENTER;
-    label.string = spec.characters ?? '';
+    label.string = characters;
     const fill = visiblePaint(spec.fills);
     if (fill?.color) {
         label.color = toColor(cc.Color, fill.color, fill.opacity ?? 1);
@@ -235,22 +236,24 @@ function finalizeLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc
         return;
     }
     label.updateRenderData(true);
-    if (!isMultilineLabel(spec) || !spec.parentFrame) {
+    if (!isMultilineLabel(label.string)) {
         return;
     }
-    const measuredFrame: Rect = {
-        ...spec.frame,
-        width: transform.width / scale,
-        height: transform.height / scale,
-    };
-    const position = framePosition(
-        measuredFrame,
-        spec.parentFrame,
-        scale,
-        node.parent?.getComponent(cc.UITransform),
-        transform,
-    );
-    node.setPosition(new cc.Vec3(position.x, position.y, node.position?.z ?? 0));
+    // Keep the original Figma frame's local top-left point fixed after NONE
+    // replaces UITransform with the measured text size. Rotate the local size
+    // delta with the node so rotated multiline labels keep the same reference.
+    const localDeltaX = (transform.width - spec.frame.width * scale) / 2;
+    const localDeltaY = (spec.frame.height * scale - transform.height) / 2;
+    const radians = -spec.rotation * Math.PI / 180;
+    const cos = Math.cos(radians);
+    const sin = Math.sin(radians);
+    const deltaX = localDeltaX * cos - localDeltaY * sin;
+    const deltaY = localDeltaX * sin + localDeltaY * cos;
+    node.setPosition(new cc.Vec3(
+        (node.position?.x ?? 0) + deltaX,
+        (node.position?.y ?? 0) + deltaY,
+        node.position?.z ?? 0,
+    ));
 }
 
 function loadAsset(assetManager: any, uuid: string): Promise<any> {

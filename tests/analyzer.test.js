@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+    analyzeTree,
     inferAction,
     inferCocosLayoutMode,
     inferKind,
@@ -45,6 +46,24 @@ test('chooses editable Cocos components where fidelity is safe', () => {
     assert.equal(inferKind(node({})), 'node');
     assert.equal(inferKind(node({ name: 'common_btn_close' })), 'button');
     assert.equal(inferKind(node({ name: 'list_rewards' })), 'scrollView');
+});
+
+test('warns when Figma auto-wrapping cannot be reproduced by Label NONE', () => {
+    const [automatic] = analyzeTree([node({
+        type: 'TEXT',
+        characters: '这段文字没有手动换行',
+        absoluteBoundingBox: { x: 0, y: 0, width: 80, height: 44 },
+        style: { fontSize: 16, lineHeightPx: 18, textAutoResize: 'HEIGHT' },
+    })]);
+    const [explicit] = analyzeTree([node({
+        type: 'TEXT',
+        characters: '第一行\n第二行',
+        absoluteBoundingBox: { x: 0, y: 0, width: 80, height: 44 },
+        style: { fontSize: 16, lineHeightPx: 18, textAutoResize: 'HEIGHT' },
+    })]);
+
+    assert.match(automatic.warning, /NONE.*手动换行/);
+    assert.equal(explicit.warning, undefined);
 });
 
 test('uses Cocos Layout only when Figma auto-layout can be represented safely', () => {

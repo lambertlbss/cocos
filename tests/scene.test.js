@@ -69,11 +69,17 @@ class Label extends Component {
             return;
         }
         const lineHeight = Math.max(1, this.lineHeight ?? 1);
-        const explicitLines = String(this.string ?? '').split(/\r\n|[\n\r\u2028\u2029]/).length;
-        const inferredLines = this.enableWrapText
-            ? Math.max(1, Math.round(transform.height / lineHeight))
-            : 1;
-        transform.setContentSize(transform.width, lineHeight * Math.max(explicitLines, inferredLines));
+        const lines = String(this.string ?? '').split('\n');
+        const outline = this.enableOutline ? Math.max(0, this.outlineWidth ?? 0) : 0;
+        const widthFactor = this.font?.widthFactor ?? 0.5;
+        const measuredWidth = Math.max(
+            0,
+            ...lines.map((line) => Array.from(line).length * (this.fontSize ?? 1) * widthFactor),
+        );
+        transform.setContentSize(
+            measuredWidth + outline * 2,
+            (lines.length + 0.26) * lineHeight + outline * 2,
+        );
     }
 }
 Label.HorizontalAlign = { LEFT: 0, CENTER: 1, RIGHT: 2 };
@@ -195,7 +201,7 @@ function makeSpec(overrides = {}) {
         action: overrides.action ?? 'generate',
         kind: overrides.kind ?? 'node',
         frame: overrides.frame ?? { x: 0, y: 0, width: 100, height: 80 },
-        rotation: 0,
+        rotation: overrides.rotation ?? 0,
         opacity: 1,
         visible: true,
         clipsContent: overrides.clipsContent ?? false,
@@ -254,7 +260,7 @@ function fakeCocos() {
             Size: class Size {},
             assetManager: {
                 loadAny(_request, callback) {
-                    callback(null, { width: 24, height: 16 });
+                    callback(null, { width: 24, height: 16, widthFactor: 0.75 });
                 },
             },
         },
@@ -375,7 +381,7 @@ test('uses NONE and centers a single-line Label on the Figma reference frame', a
     assert.equal(label.horizontalAlign, Label.HorizontalAlign.CENTER);
     assert.equal(label.verticalAlign, Label.VerticalAlign.CENTER);
     assert.equal(label.lineHeight, 18);
-    assert.deepEqual(transform.contentSize, { width: 40, height: 18 });
+    assert.deepEqual(transform.contentSize, { width: 20, height: 26.68 });
     assert.deepEqual(
         { x: title.position.x, y: title.position.y },
         { x: -20, y: 25 },
@@ -395,7 +401,7 @@ test('uses NONE and keeps a multiline Label aligned to the Figma top-left', asyn
         })],
     });
     root.children[0].parentFrame = root.frame;
-    root.children[0].characters = '第一行第二行';
+    root.children[0].characters = '第一行\r\n第二行';
     root.children[0].textStyle = {
         fontSize: 16,
         lineHeightPx: 18,
@@ -408,14 +414,106 @@ test('uses NONE and keeps a multiline Label aligned to the Figma top-left', asyn
     const transform = description.getComponent(UITransform);
 
     assert.equal(label.overflow, Label.Overflow.NONE);
-    assert.equal(label.enableWrapText, true);
+    assert.equal(label.enableWrapText, false);
     assert.equal(label.horizontalAlign, Label.HorizontalAlign.LEFT);
     assert.equal(label.verticalAlign, Label.VerticalAlign.TOP);
-    assert.deepEqual(transform.contentSize, { width: 40, height: 36 });
+    assert.equal(label.string, '第一行\n第二行');
+    assert.equal(transform.width, 24);
+    assert.ok(Math.abs(transform.height - 40.68) < 1e-9);
+    assert.equal(description.position.x - transform.width / 2, -40);
+    assert.ok(Math.abs(description.position.y + transform.height / 2 - 35) < 1e-9);
+});
+
+test('does not misclassify a single line from maxLines or a tall Figma frame', async () => {
+    const root = makeSpec({
+        name: 'TextRoot',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:198',
+            name: 'TallTitle',
+            figmaType: 'TEXT',
+            kind: 'label',
+            frame: { x: 10, y: 5, width: 60, height: 40 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    root.children[0].characters = '仍是单行';
+    root.children[0].textStyle = {
+        fontSize: 16,
+        lineHeightPx: 18,
+        textAutoResize: 'HEIGHT',
+        maxLines: 3,
+    };
+    const environment = await importWithFakeCocos(root);
+    const title = environment.canvas.children[0].children[0];
+    const label = title.getComponent(Label);
+
+    assert.equal(label.horizontalAlign, Label.HorizontalAlign.CENTER);
+    assert.equal(label.verticalAlign, Label.VerticalAlign.CENTER);
     assert.deepEqual(
-        { x: description.position.x, y: description.position.y },
-        { x: -20, y: 17 },
+        { x: title.position.x, y: title.position.y },
+        { x: -10, y: 15 },
     );
+});
+
+test('keeps a rotated multiline Label local top-left fixed after NONE measurement', async () => {
+    const root = makeSpec({
+        name: 'TextRoot',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:199',
+            name: 'RotatedDescription',
+            figmaType: 'TEXT',
+            kind: 'label',
+            frame: { x: 10, y: 5, width: 40, height: 40 },
+            rotation: 90,
+        })],
+    });
+    const description = root.children[0];
+    description.parentFrame = root.frame;
+    description.characters = '第一行\n第二行';
+    description.textStyle = { fontSize: 16, lineHeightPx: 18 };
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0].children[0];
+    const transform = imported.getComponent(UITransform);
+
+    const radians = -Math.PI / 2;
+    const rotate = ({ x, y }) => ({
+        x: x * Math.cos(radians) - y * Math.sin(radians),
+        y: x * Math.sin(radians) + y * Math.cos(radians),
+    });
+    const originalTopLeft = rotate({ x: -20, y: 20 });
+    const measuredTopLeft = rotate({ x: -transform.width / 2, y: transform.height / 2 });
+
+    assert.ok(Math.abs(imported.position.x + measuredTopLeft.x - (-20 + originalTopLeft.x)) < 1e-9);
+    assert.ok(Math.abs(imported.position.y + measuredTopLeft.y - (15 + originalTopLeft.y)) < 1e-9);
+});
+
+test('uses the mapped font final measurement before aligning multiline text', async () => {
+    const root = makeSpec({
+        name: 'TextRoot',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:200',
+            name: 'MappedDescription',
+            figmaType: 'TEXT',
+            kind: 'label',
+            frame: { x: 10, y: 5, width: 40, height: 40 },
+        })],
+    });
+    const description = root.children[0];
+    description.parentFrame = root.frame;
+    description.characters = '第一行\n第二行';
+    description.textStyle = { fontSize: 16, lineHeightPx: 18 };
+    description.fontUuid = 'mapped-font';
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0].children[0];
+    const transform = imported.getComponent(UITransform);
+
+    assert.equal(imported.getComponent(Label).font.widthFactor, 0.75);
+    assert.equal(transform.width, 36);
+    assert.equal(imported.position.x - transform.width / 2, -40);
+    assert.ok(Math.abs(imported.position.y + transform.height / 2 - 35) < 1e-9);
 });
 
 test('does not import a __FigmaBackground child for clipped containers', async () => {

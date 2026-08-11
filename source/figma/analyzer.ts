@@ -150,6 +150,13 @@ function warningFor(node: FigmaNode): string | undefined {
     if (isNamedSliceGroup(node)) {
         return '检测到 3/9 个 Rectangle 切片，将合并子树并优先复用同名资源';
     }
+    if (node.type === 'TEXT' && node.characters && !/[\r\n\u2028\u2029]/.test(node.characters)) {
+        const lineHeight = node.style?.lineHeightPx ?? node.style?.fontSize ?? 0;
+        const frameHeight = node.absoluteBoundingBox?.height ?? 0;
+        if (lineHeight > 0 && frameHeight > lineHeight * 1.25) {
+            return '文本疑似由 Figma 自动换行；NONE 模式只识别手动换行，请在 Figma 中插入换行符';
+        }
+    }
     if (CONTAINER_TYPES.has(node.type) && node.children.length
         && (hasVisibleImage(node) || hasComplexEffects(node) || hasComplexPaint(node))) {
         return '复杂容器将优先保留可编辑子节点，背景会近似处理';
