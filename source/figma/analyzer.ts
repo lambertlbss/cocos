@@ -25,6 +25,14 @@ const VECTOR_TYPES = new Set([
 ]);
 
 const SLICE_RECTANGLE_NAME = /^Rectangle(?:[\s_-]*\d+)?$/i;
+const FIGMA_SCROLL_DIRECTIONS = new Set([
+    'HORIZONTAL_SCROLLING',
+    'VERTICAL_SCROLLING',
+    'HORIZONTAL_AND_VERTICAL_SCROLLING',
+    'HORIZONTAL',
+    'VERTICAL',
+    'BOTH',
+]);
 
 export function isVectorNode(node: Pick<FigmaNode, 'type'>): boolean {
     return VECTOR_TYPES.has(node.type);
@@ -88,8 +96,11 @@ export function inferKind(node: FigmaNode): NodeKind {
     if (node.type === 'TEXT') {
         return 'label';
     }
-    if ((node.overflowDirection && node.overflowDirection !== 'NONE')
-        || /(^|_)(list|scroll)(_|$)|列表|滚动/i.test(node.name)) {
+    // A name or clipping rectangle is not proof of interactive scrolling.
+    // Only Figma's explicit prototype overflow setting may change the Cocos
+    // hierarchy to ScrollView -> view -> content in automatic mode.
+    const overflowDirection = node.overflowDirection?.trim().toUpperCase() ?? '';
+    if (FIGMA_SCROLL_DIRECTIONS.has(overflowDirection)) {
         return 'scrollView';
     }
     if (/(^|_)btn_|button|按钮/i.test(node.name)) {

@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.24`
+> 当前插件版本：`1.0.25`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-11  
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -109,7 +109,7 @@ flowchart TD
 - 建树阶段普通节点直接使用 Cocos 默认中心锚点 `(0.5, 0.5)`，不再先创建左上锚点节点再进行二次转换。
 - `framePosition` 根据父节点实际锚点、父 UITransform 尺寸、节点尺寸和 Figma Frame 边界直接计算本地中心位置，避免导入后再次遍历和修改节点。
 - Graphics 图形直接以节点中心绘制；Sprite、Label、Mask 和 Layout 使用同一套中心锚点坐标。
-- ScrollView 的 `view/content` 是 Cocos 滚动布局辅助节点，保留左上锚点；其业务子节点在创建时直接按中心锚点计算。
+- ScrollView 的 `view/content` 辅助节点同样使用中心锚点；view 与滚动根节点中心重合，content 在创建业务子节点前先确定最终尺寸，并通过 `((contentWidth - viewWidth) / 2, (viewHeight - contentHeight) / 2)` 保持两者左上边界重合。
 - Frame Prefab 根节点使用中心锚点，并在 640×1136 Canvas 参考边界中心放置。
 
 ## 4. 目录与模块地图
@@ -204,6 +204,7 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 - 含子节点的 Frame/Group/Component/Instance 默认保留容器层级；
 - 图片填充、复杂效果、不支持的渐变/描边等情况走 PNG；
 - 可安全表达的 Auto Layout 才映射为 Cocos Layout；
+- 智能模式只在 Figma `overflowDirection` 为已知横向、纵向或双向滚动枚举时映射 ScrollView；`NONE`、未知值、节点名称或 `clipsContent` 不会改变组件类型，普通裁剪容器映射 Mask；
 - 三宫/九宫候选按子节点名和几何覆盖关系识别，默认不强制开启切片。
 
 面板“智能”预设会对矢量节点强制使用 `render`。面板文案中：
@@ -395,7 +396,7 @@ Frame Prefab 导入完成后不会保存已销毁临时根节点 UUID；普通�
 
 ### 12.7 导入节点锚点位于左上
 
-旧版本在整个导入树中保留 `(0, 1)` 左上锚点，原因是直接复用 Figma 的左上坐标。当前版本在建树时直接使用 `(0.5, 0.5)`，根据父节点实际锚点和尺寸计算中心位置，不再依赖导入完成后的二次归一化。若 Cocos 仍显示左上锚点，先确认扩展已重新构建并重启，且项目加载的是最新 `dist/scene.js`。
+旧版本在整个导入树中保留 `(0, 1)` 左上锚点，后续版本仍曾为 ScrollView 自动生成的 `view/content` 单独保留左上锚点。当前版本已统一为 `(0.5, 0.5)`：普通节点根据父节点尺寸直接换算中心位置；滚动节点先计算 content 最终尺寸，再补偿其中心位置以保持左上边界不变。若 Cocos 仍显示左上锚点，先确认扩展已重新构建并重启，且项目加载的是最新 `dist/scene.js`；最新代码中已没有主动写入 `(0, 1)` 的导入路径。
 
 ### 12.8 文字节点偏移或高度异常
 
@@ -421,6 +422,10 @@ Figma 自动折行不会稳定提供每个视觉换行索引。若 `characters` 
 
 Cocos Creator 3.8.7 的 `ScrollView.content` 类型是 `Node`，而 `ScrollView.view` 是只读 getter：引擎通过 `content.parent` 自动取得视口的 `UITransform`。插件不得给 `view` 赋值，也不得把 `content` 的 `UITransform` 传给 `content`。正确建树顺序为 `view.addChild(content)`，再执行 `scroll.content = content`；随后读取 `scroll.view` 应得到 `view` 的 `UITransform`。
 
+### 12.11 带 `list` 名称的普通容器整体偏移半宽/半高
+
+历史智能规则会仅凭 `list_` / `scroll_` 名称把普通 Frame 或 Instance 改造成 ScrollView，再把左上锚点的 view 放在中心锚点父节点的 `(0, 0)`，导致整个子树向右、向下偏移半个视口尺寸。当前规则只接受 Figma 已知的滚动方向枚举；`NONE`、未知值、`clipsContent` 和名称都不会自动改变结构。实际 ScrollView 的 view/content 也已改为中心锚点并保留左上边界，因此手动选择 ScrollView 时不会再次出现同类偏移；增量导入会清除旧误判或旧报错中留下的空 view/content、`__FigmaContent` 辅助层。
+
 ## 13. 测试与质量门禁
 
 标准命令：
@@ -439,10 +444,12 @@ npm test
 - PNG/SVG、渐变和本地同名资源；
 - 字体匹配；
 - Cocos Sprite/Mask/ScrollView/Prefab 根布局；
+- 普通节点与 ScrollView 辅助节点的中心锚点、内容扩容和坐标补偿；
+- 增量导入时 Mask/Graphics、Label/LabelOutline 的延迟销毁生命周期；
 - Token 加密和明文不落盘；
 - 缓存哈希键不泄露 fileKey/nodeId。
 
-当前基线：`36` 项测试通过（截至 2026-08-11）。
+当前基线：`51` 项测试通过（截至 2026-08-11）。
 
 ## 14. 发布与版本策略
 
@@ -465,7 +472,8 @@ npm test
 | Frame 链接生成 Prefab | 用户希望复制链接即得到独立 Prefab | 最外层 Frame 为根，自动打开 |
 | 不读取 Cocos 选中节点 | 避免导入到错误场景/Prefab或产生残影 | 普通导入固定 Canvas 根 |
 | 同名资源复用首个命中 | 避免后缀泛滥和重复资源 | 确定性查找，不追加随机名 |
-| ScrollView 使用标准三层结构 | 与 Cocos 常用结构兼容 | ScrollView → view → content |
+| ScrollView 使用标准三层结构 | 与 Cocos 常用结构兼容 | ScrollView → view → content，三层均为中心锚点 |
+| ScrollView 智能识别只接受已知滚动枚举 | 名称、裁剪和未知属性不代表交互滚动，误判会改写层级和坐标 | 横向、纵向或双向滚动枚举才自动映射；其余可手动选择 |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
 
@@ -544,6 +552,19 @@ npm test
 - 修复 ScrollView 标准结构的组件引用：`scroll.content` 改为绑定 content 节点，不再错误传入 `UITransform`。
 - 删除对只读 `scroll.view` 的赋值，由 Cocos 3.8.7 根据 `content.parent` 自动解析 view。
 - 测试替身加入与 3.8.7 一致的 content 类型检查和只读 view getter，原有 ScrollView 层级测试扩展为组件引用回归测试；36 项测试通过。
+
+### 2026-08-11 · `1.0.25`
+
+- 修复普通 `panel_list` / `list_tabs` 等节点仅因名称被误判为 ScrollView，导致子树整体偏移的问题；智能识别现只使用 Figma 明确的滚动溢出属性。
+- ScrollView 自动生成的 view/content 改用中心锚点，content 在子节点创建前预计算最终尺寸并补偿位置，保证可见区域与 Figma 坐标完全一致。
+- 单轴滚动只扩展对应内容轴，裁剪但不滚动的容器继续使用普通 Node/Layout + Mask。
+- 增量导入时若节点从旧版误判 ScrollView 恢复为普通容器，会自动移除遗留 view/content 并把业务子节点恢复到正确父层级。
+- 重复导入仍有有效 Auto Layout 时直接复用 content 的 Layout，取消布局时才移除，避免 Cocos 延迟销毁让新布局在帧末一起消失；双轴滚动用 content 实际尺寸换算局部坐标，但 CENTER/MAX/STRETCH 的布局可用区仍以 Figma 视口尺寸为准，避免扩容改变设计对齐。
+- 增量导入会复用本轮仍需要的 Layout、Mask、ScrollView 和渲染组件；切换互斥渲染组件时等待 Cocos 完成延迟销毁后再创建，避免同一帧删除/重建导致组件冲突或帧末消失。
+- 清理旧版 `LabelOutline` 时先等待其 `onDisable()` 完成，再配置 Label 内置描边或切换渲染器；取消 Mask 但继续使用 Graphics 时重建 Graphics，避免 Mask 的延迟 `onDisable()` 在帧末把新画面禁用。
+- 复用 Label 时显式重置默认字体、白色和描边状态，防止增量导入继承上一次的组件属性。
+- 滚动方向按已知枚举、忽略大小写解析，未知值不会触发智能 ScrollView；手动 ScrollView 的未知方向安全回退为纵向。
+- 新增真实列表命名、中心锚点、大内容坐标合成、横纵单轴边界、Layout 对齐与变化、结构组件复用、延迟销毁渲染切换、异常方向、旧辅助节点清理及旧组件迁移回归测试；51 项测试通过。
 
 ### `1.0.14` / `2f92870`
 

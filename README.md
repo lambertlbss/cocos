@@ -48,11 +48,11 @@
 
 节点类型使用 Cocos 组件语义：`Node`、`Sprite`、`Label`、`Button`、`ScrollView`、`Layout`。滚动节点使用 `ScrollView → view（Mask）→ content（Layout）` 标准结构。
 
-普通导入节点在建树时直接使用 Cocos 默认中心锚点 `(0.5, 0.5)`，插件会依据父节点实际锚点、尺寸和原始 Figma 左上坐标计算中心位置，不经过导入后的二次调整；ScrollView 的 `view/content` 保留左上锚点以兼容滚动内容布局。
+所有导入节点以及 ScrollView 自动生成的 `view/content` 都在建树时直接使用 Cocos 默认中心锚点 `(0.5, 0.5)`。插件会依据父节点实际锚点、尺寸和原始 Figma 左上坐标计算中心位置，不经过导入后的二次调整；当滚动内容大于视口时，会先确定 content 最终尺寸并补偿位置，使它的左上边界始终与 view 对齐。
 
 “智能”和“分层高保真”都会保留容器层级；后者只把叶子节点渲染为 PNG / SVG。只有手动把带子节点的容器设为“PNG 整层”或“合并子树”时，子节点才不会单独生成。
 
-可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪映射为 `Mask`，明确的溢出或 `list_` / `scroll_` 命名映射为 `ScrollView`。Figma Constraints 暂不自动映射为 `Widget`，导入后由用户在 Cocos 中手动配置。
+可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪只映射为 `Mask`；智能模式只有在 Figma 明确设置滚动溢出方向时才映射为 `ScrollView`，`list_`、`scroll_` 等业务命名不会擅自改变节点层级。需要预留运行时滚动但设计稿没有设置溢出时，可在节点策略中手动选择 `ScrollView`。Figma Constraints 暂不自动映射为 `Widget`，导入后由用户在 Cocos 中手动配置。
 
 ## Token 安全
 

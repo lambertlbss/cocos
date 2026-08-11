@@ -9,6 +9,7 @@ let nextUuid = 1;
 class Component {
     constructor() {
         this.node = null;
+        this.enabled = true;
     }
 }
 
@@ -92,7 +93,9 @@ Mask.Type = { GRAPHICS_RECT: 0, ELLIPSE: 1, RECT: 0 };
 class Canvas extends Component {}
 class Camera extends Component {}
 class LabelOutline extends Component {}
-class Layout extends Component {}
+class Layout extends Component {
+    updateLayout() {}
+}
 Layout.Type = { HORIZONTAL: 0, VERTICAL: 1, GRID: 2 };
 Layout.AxisDirection = { HORIZONTAL: 0, VERTICAL: 1 };
 Layout.ResizeMode = { NONE: 0 };
@@ -195,8 +198,32 @@ class FakeNode {
         return component;
     }
 
-    removeComponent(Type) {
-        this.components = this.components.filter((component) => !(component instanceof Type));
+    removeComponent(value) {
+        const remove = () => {
+            if (value instanceof LabelOutline) {
+                const label = this.getComponent(Label);
+                if (label) {
+                    label.enableOutline = false;
+                }
+            }
+            if (value instanceof Mask) {
+                const graphics = this.getComponent(Graphics);
+                if (graphics) {
+                    graphics.enabled = false;
+                }
+            }
+            this.components = this.components.filter((component) =>
+                component !== value
+                && !(typeof value === 'function' && component instanceof value));
+        };
+        if (value instanceof Label && this.getComponent(LabelOutline)) {
+            return;
+        }
+        if (FakeNode.deferComponentRemoval) {
+            setTimeout(remove, 0);
+        } else {
+            remove();
+        }
     }
 
     setPosition(value, y = 0, z = 0) {
@@ -207,6 +234,7 @@ class FakeNode {
 
     setRotationFromEuler() {}
 }
+FakeNode.deferComponentRemoval = false;
 
 function makeSpec(overrides = {}) {
     return {
@@ -217,13 +245,13 @@ function makeSpec(overrides = {}) {
         kind: overrides.kind ?? 'node',
         frame: overrides.frame ?? { x: 0, y: 0, width: 100, height: 80 },
         rotation: overrides.rotation ?? 0,
-        opacity: 1,
+        opacity: overrides.opacity ?? 1,
         visible: true,
         clipsContent: overrides.clipsContent ?? false,
         cornerRadii: [0, 0, 0, 0],
         fills: overrides.fills ?? [],
-        strokes: [],
-        strokeWeight: 0,
+        strokes: overrides.strokes ?? [],
+        strokeWeight: overrides.strokeWeight ?? 0,
         layout: {
             itemSpacing: 0,
             counterSpacing: 0,
@@ -231,9 +259,14 @@ function makeSpec(overrides = {}) {
             paddingRight: 0,
             paddingTop: 0,
             paddingBottom: 0,
+            ...(overrides.layout ?? {}),
         },
         children: overrides.children ?? [],
         sprite: overrides.sprite,
+        overflowDirection: overrides.overflowDirection,
+        characters: overrides.characters,
+        textStyle: overrides.textStyle,
+        fontUuid: overrides.fontUuid,
     };
 }
 
@@ -271,7 +304,14 @@ function fakeCocos() {
                     this.z = z;
                 }
             },
-            Color: class Color {},
+            Color: class Color {
+                constructor(r = 0, g = 0, b = 0, a = 255) {
+                    this.r = r;
+                    this.g = g;
+                    this.b = b;
+                    this.a = a;
+                }
+            },
             Size: class Size {},
             assetManager: {
                 loadAny(_request, callback) {
@@ -606,7 +646,7 @@ test('converts child nodes to center anchors without changing their Figma placem
     );
 });
 
-test('keeps ScrollView helpers top-left while importing content nodes with center anchors', async () => {
+test('uses center anchors for ScrollView helpers without changing child placement', async () => {
     const root = makeSpec({
         name: 'Scroll',
         kind: 'scrollView',
@@ -626,13 +666,710 @@ test('keeps ScrollView helpers top-left while importing content nodes with cente
     const scroll = imported.getComponent(ScrollView);
 
     assert.deepEqual(imported.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
-    assert.deepEqual(view.getComponent(UITransform).anchorPoint, { x: 0, y: 1 });
-    assert.deepEqual(content.getComponent(UITransform).anchorPoint, { x: 0, y: 1 });
+    assert.deepEqual(view.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
+    assert.deepEqual(content.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
+    assert.deepEqual(
+        { x: view.position.x, y: view.position.y },
+        { x: 0, y: 0 },
+    );
+    assert.deepEqual(
+        { x: content.position.x, y: content.position.y },
+        { x: 0, y: 0 },
+    );
     assert.equal(scroll.content, content);
     assert.equal(scroll.view, view.getComponent(UITransform));
     assert.deepEqual(child.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
     assert.deepEqual(
         { x: child.position.x, y: child.position.y },
-        { x: 20, y: -10 },
+        { x: -30, y: 30 },
     );
+});
+
+test('keeps an oversized centered ScrollView content aligned to the viewport top-left', async () => {
+    const root = makeSpec({
+        name: 'Scroll',
+        kind: 'scrollView',
+        overflowDirection: 'HORIZONTAL_AND_VERTICAL_SCROLLING',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:196',
+            name: 'Overflow item',
+            frame: { x: 90, y: 70, width: 30, height: 30 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const view = imported.getChildByName('view');
+    const content = view.getChildByName('content');
+    const child = content.children[0];
+
+    assert.deepEqual(content.getComponent(UITransform).contentSize, { width: 120, height: 100 });
+    assert.deepEqual(
+        { x: content.position.x, y: content.position.y },
+        { x: 10, y: -10 },
+    );
+    assert.deepEqual(
+        { x: child.position.x, y: child.position.y },
+        { x: 45, y: -35 },
+    );
+    assert.deepEqual(
+        {
+            x: content.position.x + child.position.x,
+            y: content.position.y + child.position.y,
+        },
+        { x: 55, y: -45 },
+    );
+});
+
+test('does not expand the cross axis of a single-axis ScrollView', async () => {
+    const root = makeSpec({
+        name: 'VerticalScroll',
+        kind: 'scrollView',
+        overflowDirection: 'VERTICAL_SCROLLING',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:197',
+            name: 'Clipped item',
+            frame: { x: 90, y: 70, width: 30, height: 30 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const view = imported.getChildByName('view');
+    const content = view.getChildByName('content');
+    const scroll = imported.getComponent(ScrollView);
+
+    assert.deepEqual(content.getComponent(UITransform).contentSize, { width: 100, height: 100 });
+    assert.deepEqual(
+        { x: content.position.x, y: content.position.y },
+        { x: 0, y: -10 },
+    );
+    assert.equal(scroll.horizontal, false);
+    assert.equal(scroll.vertical, true);
+});
+
+test('supports a horizontal-only ScrollView without expanding its vertical axis', async () => {
+    const root = makeSpec({
+        name: 'HorizontalScroll',
+        kind: 'scrollView',
+        overflowDirection: 'HORIZONTAL_SCROLLING',
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:199',
+            name: 'Clipped item',
+            frame: { x: 90, y: 70, width: 30, height: 30 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const content = imported.getChildByName('view').getChildByName('content');
+    const scroll = imported.getComponent(ScrollView);
+
+    assert.deepEqual(content.getComponent(UITransform).contentSize, { width: 120, height: 80 });
+    assert.deepEqual(
+        { x: content.position.x, y: content.position.y },
+        { x: 10, y: 0 },
+    );
+    assert.equal(scroll.horizontal, true);
+    assert.equal(scroll.vertical, false);
+});
+
+test('uses the centered content size for ScrollView counter-axis alignment', async () => {
+    const root = makeSpec({
+        name: 'BothAxesScroll',
+        kind: 'scrollView',
+        overflowDirection: 'HORIZONTAL_AND_VERTICAL_SCROLLING',
+        layout: {
+            mode: 'VERTICAL',
+            paddingLeft: 90,
+            counterAlign: 'MIN',
+        },
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:198',
+            name: 'Wide offset item',
+            frame: { x: 90, y: 70, width: 30, height: 30 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const content = imported.getChildByName('view').getChildByName('content');
+    const child = content.children[0];
+
+    assert.deepEqual(content.getComponent(UITransform).contentSize, { width: 120, height: 100 });
+    assert.equal(child.position.x, 45);
+    assert.equal(content.position.x + child.position.x, 55);
+});
+
+test('keeps CENTER counter-alignment relative to the Figma viewport after content expansion', async () => {
+    const root = makeSpec({
+        name: 'CenteredBothAxesScroll',
+        kind: 'scrollView',
+        overflowDirection: 'HORIZONTAL_AND_VERTICAL_SCROLLING',
+        layout: {
+            mode: 'VERTICAL',
+            counterAlign: 'CENTER',
+        },
+        frame: { x: 0, y: 0, width: 100, height: 80 },
+        children: [
+            makeSpec({
+                figmaId: '15:201',
+                name: 'Wide item',
+                frame: { x: -10, y: 0, width: 120, height: 20 },
+            }),
+            makeSpec({
+                figmaId: '15:202',
+                name: 'Centered item',
+                frame: { x: 40, y: 30, width: 20, height: 20 },
+            }),
+        ],
+    });
+    for (const child of root.children) {
+        child.parentFrame = root.frame;
+    }
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    const content = imported.getChildByName('view').getChildByName('content');
+    const centered = content.children.find((child) => child.name === 'Centered item');
+
+    assert.deepEqual(content.getComponent(UITransform).contentSize, { width: 110, height: 80 });
+    assert.equal(content.position.x, 5);
+    assert.equal(centered.position.x, -5);
+    assert.equal(content.position.x + centered.position.x, 0);
+});
+
+test('reuses content Layout across reimports and clears it when auto-layout is removed', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    const firstRoot = makeSpec({
+        figmaId: '15:220',
+        name: 'Scroll',
+        kind: 'scrollView',
+        layout: { mode: 'VERTICAL' },
+    });
+    try {
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        const content = imported.getChildByName('view').getChildByName('content');
+        const firstScroll = imported.getComponent(ScrollView);
+        const firstLayout = content.getComponent(Layout);
+        assert.ok(firstLayout);
+
+        const secondRoot = makeSpec({
+            figmaId: '15:220',
+            name: 'Scroll',
+            kind: 'scrollView',
+            layout: { mode: 'HORIZONTAL' },
+        });
+        const second = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+        assert.equal(imported.getComponent(ScrollView), firstScroll);
+        assert.equal(content.getComponent(Layout), firstLayout);
+        assert.equal(firstLayout.type, Layout.Type.HORIZONTAL);
+
+        const thirdRoot = makeSpec({
+            figmaId: '15:220',
+            name: 'Scroll',
+            kind: 'scrollView',
+        });
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: thirdRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: second.nodeMap,
+            centerInCanvas: true,
+            roots: [thirdRoot],
+        });
+
+        assert.equal(content.getComponent(Layout), null);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('reuses ordinary Layout and Mask components across incremental imports', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    const makeClippedLayout = () => {
+        const root = makeSpec({
+            figmaId: '15:230',
+            name: 'panel_list',
+            clipsContent: true,
+            layout: { mode: 'HORIZONTAL' },
+            children: [makeSpec({
+                figmaId: '15:231',
+                name: 'Header',
+                frame: { x: 0, y: 0, width: 100, height: 20 },
+            })],
+        });
+        root.children[0].parentFrame = root.frame;
+        return root;
+    };
+    try {
+        const firstRoot = makeClippedLayout();
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        const firstMask = imported.getComponent(Mask);
+        const firstGraphics = imported.getComponent(Graphics);
+        const firstLayout = imported.getComponent(Layout);
+
+        const secondRoot = makeClippedLayout();
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+
+        assert.equal(imported.getComponent(Mask), firstMask);
+        assert.equal(imported.getComponent(Graphics), firstGraphics);
+        assert.equal(imported.getComponent(Layout), firstLayout);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('waits for Cocos deferred renderer removal before adding an incompatible renderer', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    FakeNode.deferComponentRemoval = true;
+    try {
+        const spriteRoot = makeSpec({
+            figmaId: '15:240',
+            name: 'ChangingRenderer',
+            action: 'render',
+            kind: 'sprite',
+            sprite: { uuid: 'sprite-frame', url: 'db://assets/image.png', sliced: false },
+        });
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: spriteRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [spriteRoot],
+        });
+        const imported = environment.canvas.children[0];
+        assert.ok(imported.getComponent(Sprite));
+
+        const graphicsRoot = makeSpec({
+            figmaId: '15:240',
+            name: 'ChangingRenderer',
+            fills: [{ type: 'SOLID', visible: true, color: { r: 1, g: 0, b: 0 } }],
+        });
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: graphicsRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [graphicsRoot],
+        });
+
+        assert.equal(imported.getComponent(Sprite), null);
+        assert.ok(imported.getComponent(Graphics));
+    } finally {
+        FakeNode.deferComponentRemoval = false;
+        Module._load = originalLoad;
+    }
+});
+
+test('removes obsolete ScrollView helpers when a reimported node becomes a normal container', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    const firstRoot = makeSpec({
+        figmaId: '15:210',
+        name: 'list_rewards',
+        kind: 'scrollView',
+        children: [makeSpec({
+            figmaId: '15:211',
+            name: 'Reward',
+            frame: { x: 10, y: 5, width: 20, height: 10 },
+        })],
+    });
+    firstRoot.children[0].parentFrame = firstRoot.frame;
+    try {
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        assert.ok(imported.getChildByName('view'));
+        imported.getComponent(ScrollView)._content = null;
+        const legacy = new FakeNode('__FigmaContent');
+        imported.addChild(legacy);
+
+        const secondRoot = makeSpec({
+            figmaId: '15:210',
+            name: 'list_rewards',
+            kind: 'node',
+            children: [makeSpec({
+                figmaId: '15:211',
+                name: 'Reward',
+                frame: { x: 10, y: 5, width: 20, height: 10 },
+            })],
+        });
+        secondRoot.children[0].parentFrame = secondRoot.frame;
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+
+        assert.equal(imported.getComponent(ScrollView), null);
+        assert.equal(imported.getChildByName('view'), null);
+        assert.equal(imported.getChildByName('__FigmaContent'), null);
+        assert.equal(imported.children.length, 1);
+        assert.equal(imported.children[0].name, 'Reward');
+        assert.deepEqual(imported.children[0].getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
+        assert.deepEqual(
+            { x: imported.children[0].position.x, y: imported.children[0].position.y },
+            { x: -30, y: 30 },
+        );
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('recreates Graphics after removing a deferred Mask so the renderer stays enabled', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const firstRoot = makeSpec({
+            figmaId: '15:250',
+            name: 'ClippedContainer',
+            clipsContent: true,
+            children: [makeSpec({ figmaId: '15:251', name: 'Child' })],
+        });
+        firstRoot.children[0].parentFrame = firstRoot.frame;
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        const oldGraphics = imported.getComponent(Graphics);
+        assert.ok(imported.getComponent(Mask));
+        assert.ok(oldGraphics);
+
+        FakeNode.deferComponentRemoval = true;
+        const secondRoot = makeSpec({
+            figmaId: '15:250',
+            name: 'ClippedContainer',
+            fills: [{ type: 'SOLID', visible: true, color: { r: 1, g: 0, b: 0 } }],
+            children: [makeSpec({ figmaId: '15:251', name: 'Child' })],
+        });
+        secondRoot.children[0].parentFrame = secondRoot.frame;
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+
+        const graphics = imported.getComponent(Graphics);
+        assert.equal(imported.getComponent(Mask), null);
+        assert.ok(graphics);
+        assert.notEqual(graphics, oldGraphics);
+        assert.equal(graphics.enabled, true);
+    } finally {
+        FakeNode.deferComponentRemoval = false;
+        Module._load = originalLoad;
+    }
+});
+
+test('waits for obsolete LabelOutline before configuring built-in Label outline', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const firstRoot = makeSpec({
+            figmaId: '15:260',
+            name: 'Title',
+            figmaType: 'TEXT',
+            kind: 'label',
+            characters: '标题',
+            textStyle: { fontSize: 18, lineHeightPx: 20 },
+        });
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        const label = imported.getComponent(Label);
+        imported.addComponent(LabelOutline);
+
+        FakeNode.deferComponentRemoval = true;
+        const secondRoot = makeSpec({
+            figmaId: '15:260',
+            name: 'Title',
+            figmaType: 'TEXT',
+            kind: 'label',
+            characters: '标题',
+            textStyle: { fontSize: 18, lineHeightPx: 20 },
+            strokes: [{ type: 'SOLID', visible: true, color: { r: 0, g: 0, b: 0 } }],
+            strokeWeight: 2,
+        });
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+
+        assert.equal(imported.getComponent(Label), label);
+        assert.equal(imported.getComponent(LabelOutline), null);
+        assert.equal(label.enableOutline, true);
+        assert.equal(label.outlineWidth, 2);
+    } finally {
+        FakeNode.deferComponentRemoval = false;
+        Module._load = originalLoad;
+    }
+});
+
+test('removes legacy LabelOutline before changing Label into Sprite', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const firstRoot = makeSpec({
+            figmaId: '15:270',
+            name: 'ChangingText',
+            figmaType: 'TEXT',
+            kind: 'label',
+            characters: '旧文字',
+            textStyle: { fontSize: 18, lineHeightPx: 20 },
+        });
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        imported.addComponent(LabelOutline);
+
+        FakeNode.deferComponentRemoval = true;
+        const secondRoot = makeSpec({
+            figmaId: '15:270',
+            name: 'ChangingText',
+            action: 'render',
+            kind: 'sprite',
+            sprite: { uuid: 'sprite-frame', url: 'db://assets/text.png', sliced: false },
+        });
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+
+        assert.equal(imported.getComponent(LabelOutline), null);
+        assert.equal(imported.getComponent(Label), null);
+        assert.ok(imported.getComponent(Sprite));
+    } finally {
+        FakeNode.deferComponentRemoval = false;
+        Module._load = originalLoad;
+    }
+});
+
+test('resets reused Label font and color when the new Figma text has no mapping or fill', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const firstRoot = makeSpec({
+            figmaId: '15:280',
+            name: 'StatefulText',
+            figmaType: 'TEXT',
+            kind: 'label',
+            characters: '文字',
+            textStyle: { fontSize: 18, lineHeightPx: 20 },
+            fontUuid: 'mapped-font',
+            fills: [{ type: 'SOLID', visible: true, color: { r: 1, g: 0, b: 0 } }],
+        });
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        const label = imported.getComponent(Label);
+        assert.ok(label.font);
+        assert.equal(label.color.r, 255);
+        assert.equal(label.color.g, 0);
+
+        const secondRoot = makeSpec({
+            figmaId: '15:280',
+            name: 'StatefulText',
+            figmaType: 'TEXT',
+            kind: 'label',
+            characters: '文字',
+            textStyle: { fontSize: 18, lineHeightPx: 20 },
+        });
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+
+        assert.equal(imported.getComponent(Label), label);
+        assert.equal(label.font, null);
+        assert.deepEqual(
+            { r: label.color.r, g: label.color.g, b: label.color.b, a: label.color.a },
+            { r: 255, g: 255, b: 255, a: 255 },
+        );
+    } finally {
+        Module._load = originalLoad;
+    }
 });

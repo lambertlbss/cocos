@@ -45,7 +45,52 @@ test('chooses editable Cocos components where fidelity is safe', () => {
     assert.equal(inferKind(node({ layoutMode: 'HORIZONTAL' })), 'layout');
     assert.equal(inferKind(node({})), 'node');
     assert.equal(inferKind(node({ name: 'common_btn_close' })), 'button');
-    assert.equal(inferKind(node({ name: 'list_rewards' })), 'scrollView');
+    assert.equal(inferKind(node({ name: 'scroll_rewards' })), 'node');
+    assert.equal(inferKind(node({ name: 'list_rewards' })), 'node');
+    assert.equal(inferKind(node({ overflowDirection: 'vertical_scrolling' })), 'scrollView');
+    assert.equal(inferKind(node({ overflowDirection: 'none' })), 'node');
+    assert.equal(inferKind(node({ overflowDirection: 'UNKNOWN' })), 'node');
+});
+
+test('does not mistake ordinary list-named layout containers for ScrollViews', () => {
+    assert.equal(inferKind(node({
+        name: 'panel_listcontainer',
+        clipsContent: false,
+        overflowDirection: 'NONE',
+    })), 'node');
+    assert.equal(inferKind(node({
+        name: 'list_tabs',
+        type: 'INSTANCE',
+        clipsContent: false,
+        overflowDirection: 'NONE',
+        layoutMode: 'HORIZONTAL',
+    })), 'layout');
+    assert.equal(inferKind(node({
+        name: 'panel_list',
+        clipsContent: true,
+        overflowDirection: 'NONE',
+        layoutMode: 'HORIZONTAL',
+        children: [{
+            id: '1:2',
+            name: 'panel_header',
+            type: 'FRAME',
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 20 },
+        }],
+    })), 'layout');
+});
+
+test('does not infer ScrollView from clipping, overflow geometry, or a scroll-like name', () => {
+    assert.equal(inferKind(node({
+        name: 'scroll_rewards',
+        clipsContent: true,
+        overflowDirection: 'NONE',
+        children: [{
+            id: '1:2',
+            name: 'Reward items',
+            type: 'FRAME',
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 160 },
+        }],
+    })), 'node');
 });
 
 test('warns when Figma auto-wrapping cannot be reproduced by Label NONE', () => {

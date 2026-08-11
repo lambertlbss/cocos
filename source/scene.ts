@@ -73,13 +73,72 @@ function findCanvas(root: any, Canvas: any): any | null {
     return null;
 }
 
-function removeGeneratedComponents(node: any, classes: any[]): void {
+function removeGeneratedComponents(
+    node: any,
+    classes: any[],
+    preserved: Set<any>,
+    renderClasses: any[],
+): boolean {
+    let removedRenderComponent = false;
     for (const type of classes) {
+        if (preserved.has(type)) {
+            continue;
+        }
         const component = node.getComponent(type);
         if (component) {
+            if (renderClasses.some((renderType) => component instanceof renderType)) {
+                removedRenderComponent = true;
+            }
             node.removeComponent(component);
         }
     }
+    return removedRenderComponent;
+}
+
+async function removeObsoleteLabelOutline(node: any, cc: any): Promise<void> {
+    const outline = node.getComponent(cc.LabelOutline);
+    if (!outline) {
+        return;
+    }
+    // LabelOutline was used by older importer versions. Cocos destroys
+    // components at the end of the frame and its onDisable() writes back to
+    // Label.enableOutline, so let that lifecycle finish before either
+    // reconfiguring or removing the Label component.
+    node.removeComponent(outline);
+    await waitForDeferredComponentRemoval();
+}
+
+function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
+    const desired = new Set<any>();
+    const clipsChildren = clipsGeneratedChildren(spec);
+    if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
+        desired.add(cc.Label);
+    } else if (spec.sprite) {
+        desired.add(cc.Sprite);
+    } else if (!RASTER_VECTOR_TYPES.has(spec.figmaType)) {
+        desired.add(cc.Graphics);
+        if (clipsChildren) {
+            desired.add(cc.Mask);
+        }
+    }
+    const layoutMode = spec.layout?.mode;
+    if (spec.kind !== 'scrollView' && layoutMode && layoutMode !== 'NONE') {
+        desired.add(cc.Layout);
+    }
+    if (spec.kind === 'scrollView') {
+        desired.add(cc.ScrollView);
+    }
+    if (spec.kind === 'button') {
+        desired.add(cc.Button);
+    }
+    if (spec.opacity < 0.999) {
+        desired.add(cc.UIOpacity);
+    }
+    return desired;
+}
+
+function waitForDeferredComponentRemoval(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function removeGeneratedBackground(node: any): void {
@@ -89,6 +148,39 @@ function removeGeneratedBackground(node: any): void {
     }
     background.removeFromParent();
     background.destroy();
+}
+
+function removeObsoleteScrollHelpers(node: any, spec: SceneNodeSpec, cc: any): void {
+    if (spec.kind === 'scrollView') {
+        return;
+    }
+    const preserveChildren = spec.children.length > 0;
+    const legacy = node.getChildByName('__FigmaContent');
+    if (legacy) {
+        if (preserveChildren) {
+            for (const child of [...legacy.children]) {
+                child.parent = node;
+            }
+        }
+        legacy.removeFromParent();
+        legacy.destroy();
+    }
+    const scroll = node.getComponent(cc.ScrollView);
+    const view = node.getChildByName('view');
+    const content = view?.getChildByName('content');
+    if (!scroll || !view || !content
+        || (scroll.content !== content && scroll.content != null)) {
+        return;
+    }
+    if (preserveChildren) {
+        for (const child of [...content.children]) {
+            child.parent = node;
+        }
+    }
+    content.removeFromParent();
+    content.destroy();
+    view.removeFromParent();
+    view.destroy();
 }
 
 function framePosition(
@@ -182,7 +274,8 @@ function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any
 }
 
 function configureGraphics(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
-    const graphics = node.addComponent(cc.Graphics);
+    const graphics = node.getComponent(cc.Graphics) ?? node.addComponent(cc.Graphics);
+    graphics.enabled = true;
     graphics.clear();
     drawGraphics(graphics, spec, scale, cc);
 }
@@ -201,7 +294,7 @@ function isMultilineLabel(characters: string): boolean {
 
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const { Label } = cc;
-    const label = node.addComponent(Label);
+    const label = node.getComponent(Label) ?? node.addComponent(Label);
     const style = spec.textStyle ?? {};
     const characters = normalizeLabelText(spec.characters);
     const multiline = isMultilineLabel(characters);
@@ -217,6 +310,8 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
         ? Label.VerticalAlign.TOP
         : Label.VerticalAlign.CENTER;
     label.string = characters;
+    label.enableOutline = false;
+    label.color = toColor(cc.Color, { r: 1, g: 1, b: 1, a: 1 });
     const fill = visiblePaint(spec.fills);
     if (fill?.color) {
         label.color = toColor(cc.Color, fill.color, fill.opacity ?? 1);
@@ -273,7 +368,7 @@ async function configureSprite(node: any, spec: SceneNodeSpec, scale: number, cc
         return;
     }
     const { Sprite, UITransform, assetManager } = cc;
-    const sprite = node.addComponent(Sprite);
+    const sprite = node.getComponent(Sprite) ?? node.addComponent(Sprite);
     sprite.sizeMode = Sprite.SizeMode.CUSTOM;
     sprite.type = spec.sprite.sliced ? Sprite.Type.SLICED : Sprite.Type.SIMPLE;
     sprite.spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
@@ -288,7 +383,7 @@ function configureOpacity(node: any, spec: SceneNodeSpec, cc: any): void {
     if (spec.opacity >= 0.999) {
         return;
     }
-    const opacity = node.addComponent(cc.UIOpacity);
+    const opacity = node.getComponent(cc.UIOpacity) ?? node.addComponent(cc.UIOpacity);
     opacity.opacity = Math.round(Math.max(0, Math.min(1, spec.opacity)) * 255);
 }
 
@@ -366,13 +461,19 @@ function applyCounterAlignment(
     if (!mode || !alignment || !['HORIZONTAL', 'VERTICAL'].includes(mode)) {
         return;
     }
-    const parentWidth = spec.frame.width * scale;
-    const parentHeight = spec.frame.height * scale;
+    const parentTransform = parent.getComponent(cc.UITransform);
+    const parentWidth = Number(parentTransform?.contentSize?.width) > 0
+        ? Number(parentTransform.contentSize.width)
+        : spec.frame.width * scale;
+    const parentHeight = Number(parentTransform?.contentSize?.height) > 0
+        ? Number(parentTransform.contentSize.height)
+        : spec.frame.height * scale;
+    const layoutWidth = spec.frame.width * scale;
+    const layoutHeight = spec.frame.height * scale;
     const left = spec.layout!.paddingLeft * scale;
     const right = spec.layout!.paddingRight * scale;
     const top = spec.layout!.paddingTop * scale;
     const bottom = spec.layout!.paddingBottom * scale;
-    const parentTransform = parent.getComponent(cc.UITransform);
     const parentAnchor = parentTransform?.anchorPoint ?? { x: 0.5, y: 0.5 };
     for (const childSpec of spec.children) {
         const uuid = nodeMap[childSpec.figmaId];
@@ -383,12 +484,12 @@ function applyCounterAlignment(
         }
         const position = child.position.clone();
         if (mode === 'HORIZONTAL') {
-            const available = Math.max(0, parentHeight - top - bottom);
+            const available = Math.max(0, layoutHeight - top - bottom);
             let topOffset = top;
             if (alignment === 'CENTER') {
                 topOffset = top + (available - transform.height) / 2;
             } else if (alignment === 'MAX') {
-                topOffset = parentHeight - bottom - transform.height;
+                topOffset = layoutHeight - bottom - transform.height;
             } else {
                 if (alignment === 'STRETCH') {
                     transform.setContentSize(transform.width, available);
@@ -398,12 +499,12 @@ function applyCounterAlignment(
                 - topOffset
                 - transform.height * (1 - (transform.anchorPoint?.y ?? 0.5));
         } else {
-            const available = Math.max(0, parentWidth - left - right);
+            const available = Math.max(0, layoutWidth - left - right);
             let leftOffset = left;
             if (alignment === 'CENTER') {
                 leftOffset = left + (available - transform.width) / 2;
             } else if (alignment === 'MAX') {
-                leftOffset = parentWidth - right - transform.width;
+                leftOffset = layoutWidth - right - transform.width;
             } else {
                 if (alignment === 'STRETCH') {
                     transform.setContentSize(available, transform.height);
@@ -418,6 +519,11 @@ function applyCounterAlignment(
 }
 
 function configureClip(node: any, spec: SceneNodeSpec, cc: any): void {
+    const graphics = node.getComponent(cc.Graphics);
+    if (graphics) {
+        graphics.enabled = true;
+        graphics.clear();
+    }
     const mask = node.getComponent(cc.Mask) ?? node.addComponent(cc.Mask);
     mask.type = spec.figmaType === 'ELLIPSE'
         ? cc.Mask.Type.ELLIPSE
@@ -433,7 +539,7 @@ function clipsGeneratedChildren(spec: SceneNodeSpec): boolean {
 
 function configureButton(node: any, spec: SceneNodeSpec, cc: any): void {
     if (spec.kind === 'button') {
-        const button = node.addComponent(cc.Button);
+        const button = node.getComponent(cc.Button) ?? node.addComponent(cc.Button);
         button.target = node;
         button.transition = cc.Button.Transition.SCALE;
         button.zoomScale = 0.9;
@@ -445,13 +551,14 @@ function configureScroll(
     node: any,
     spec: SceneNodeSpec,
     transform: any,
+    scale: number,
     cc: any,
 ): any {
     if (spec.kind !== 'scrollView') {
         return node;
     }
     const { Node, UITransform, Mask, ScrollView } = cc;
-    const scroll = node.addComponent(ScrollView);
+    const scroll = node.getComponent(ScrollView) ?? node.addComponent(ScrollView);
     let view = node.getChildByName('view');
     if (!view) {
         view = new Node('view');
@@ -459,7 +566,7 @@ function configureScroll(
         node.addChild(view);
     }
     const viewTransform = view.getComponent(UITransform) ?? view.addComponent(UITransform);
-    viewTransform.setAnchorPoint(0, 1);
+    viewTransform.setAnchorPoint(0.5, 0.5);
     viewTransform.setContentSize(transform.contentSize.width, transform.contentSize.height);
     view.setPosition(0, 0, 0);
     const mask = view.getComponent(Mask) ?? view.addComponent(Mask);
@@ -471,9 +578,13 @@ function configureScroll(
         view.addChild(content);
     }
     const contentTransform = content.getComponent(UITransform) ?? content.addComponent(UITransform);
-    contentTransform.setAnchorPoint(0, 1);
-    contentTransform.setContentSize(transform.contentSize.width, transform.contentSize.height);
-    content.setPosition(0, 0, 0);
+    const previousLayout = content.getComponent(cc.Layout);
+    const nextLayoutMode = spec.layout?.mode;
+    if (previousLayout && (!nextLayoutMode || nextLayoutMode === 'NONE')) {
+        content.removeComponent(previousLayout);
+    }
+    contentTransform.setAnchorPoint(0.5, 0.5);
+    sizeAndPositionScrollContent(content, contentTransform, spec, transform, scale);
     const legacy = node.getChildByName('__FigmaContent');
     if (legacy && legacy !== content) {
         for (const child of [...legacy.children]) {
@@ -483,11 +594,59 @@ function configureScroll(
     }
     // Cocos Creator 3.8.7 expects the content Node here. ScrollView.view is a
     // getter derived from content.parent and must never be assigned directly.
+    if (scroll.content === content) {
+        scroll.content = null;
+    }
     scroll.content = content;
-    const direction = spec.overflowDirection ?? 'VERTICAL_SCROLLING';
-    scroll.horizontal = direction === 'HORIZONTAL_SCROLLING' || direction === 'HORIZONTAL_AND_VERTICAL_SCROLLING';
-    scroll.vertical = direction === 'VERTICAL_SCROLLING' || direction === 'HORIZONTAL_AND_VERTICAL_SCROLLING';
+    const axes = scrollAxes(spec);
+    scroll.horizontal = axes.horizontal;
+    scroll.vertical = axes.vertical;
     return content;
+}
+
+function scrollAxes(spec: SceneNodeSpec): { horizontal: boolean; vertical: boolean } {
+    const direction = spec.overflowDirection && spec.overflowDirection !== 'NONE'
+        ? spec.overflowDirection.trim().toUpperCase()
+        : 'VERTICAL_SCROLLING';
+    if (direction === 'HORIZONTAL' || direction === 'HORIZONTAL_SCROLLING') {
+        return { horizontal: true, vertical: false };
+    }
+    if (direction === 'BOTH'
+        || direction === 'HORIZONTAL_AND_VERTICAL'
+        || direction === 'HORIZONTAL_AND_VERTICAL_SCROLLING') {
+        return { horizontal: true, vertical: true };
+    }
+    return { horizontal: false, vertical: true };
+}
+
+function sizeAndPositionScrollContent(
+    content: any,
+    contentTransform: any,
+    spec: SceneNodeSpec,
+    viewport: any,
+    scale: number,
+): void {
+    const viewportWidth = Math.max(0, Number(viewport.contentSize?.width) || 0);
+    const viewportHeight = Math.max(0, Number(viewport.contentSize?.height) || 0);
+    const childRight = spec.children.map((child) =>
+        (child.frame.x - spec.frame.x + child.frame.width) * scale);
+    const childBottom = spec.children.map((child) =>
+        (child.frame.y - spec.frame.y + child.frame.height) * scale);
+    const axes = scrollAxes(spec);
+    const contentWidth = axes.horizontal
+        ? Math.max(viewportWidth, 0, ...childRight)
+        : viewportWidth;
+    const contentHeight = axes.vertical
+        ? Math.max(viewportHeight, 0, ...childBottom)
+        : viewportHeight;
+    contentTransform.setContentSize(contentWidth, contentHeight);
+    // Both helpers use Cocos' default center anchor. Move an oversized content
+    // node so its top-left still coincides with the viewport's top-left.
+    content.setPosition(
+        (contentWidth - viewportWidth) / 2,
+        (viewportHeight - contentHeight) / 2,
+        0,
+    );
 }
 
 function finalizeScroll(
@@ -505,15 +664,7 @@ function finalizeScroll(
     if (!transform) {
         return;
     }
-    const childRight = spec.children.map((child) =>
-        (child.frame.x - spec.frame.x + child.frame.width) * scale);
-    const childBottom = spec.children.map((child) =>
-        (child.frame.y - spec.frame.y + child.frame.height) * scale);
-    transform.setContentSize(
-        Math.max(viewport.contentSize.width, 0, ...childRight),
-        Math.max(viewport.contentSize.height, 0, ...childBottom),
-    );
-    content.setPosition(0, 0, 0);
+    sizeAndPositionScrollContent(content, transform, spec, viewport, scale);
 }
 
 function countSpecs(specs: SceneNodeSpec[]): number {
@@ -588,11 +739,11 @@ export const methods = {
         const directRoot = payload.roots.length === 1;
         const canvas = findCanvas(scene, Canvas);
         const generatedClasses = [
+            LabelOutline,
             Mask,
             Graphics,
             Sprite,
             Label,
-            LabelOutline,
             Layout,
             ScrollView,
             Button,
@@ -662,7 +813,27 @@ export const methods = {
             configureGeometry(node, spec, payload.scale, cc);
 
             if (spec.action !== 'transform') {
-                removeGeneratedComponents(node, generatedClasses);
+                removeObsoleteScrollHelpers(node, spec, cc);
+                await removeObsoleteLabelOutline(node, cc);
+                const preserved = desiredGeneratedComponents(spec, cc);
+                // Mask owns and disables its shared Graphics during the
+                // deferred onDisable phase. If clipping was removed but a
+                // normal Graphics renderer is still desired, recreate that
+                // renderer only after the old Mask lifecycle has completed.
+                if (!preserved.has(Mask)
+                    && node.getComponent(Mask)
+                    && preserved.has(Graphics)) {
+                    preserved.delete(Graphics);
+                }
+                const removedRenderComponent = removeGeneratedComponents(
+                    node,
+                    generatedClasses,
+                    preserved,
+                    [Graphics, Sprite, Label],
+                );
+                if (removedRenderComponent) {
+                    await waitForDeferredComponentRemoval();
+                }
                 removeGeneratedBackground(node);
                 configureGeometry(node, spec, payload.scale, cc);
                 const clipsChildren = clipsGeneratedChildren(spec);
@@ -671,6 +842,8 @@ export const methods = {
                     if (spec.fontUuid) {
                         const label = node.getComponent(Label);
                         label.font = await loadAsset(cc.assetManager, spec.fontUuid);
+                    } else {
+                        node.getComponent(Label).font = null;
                     }
                     finalizeLabelGeometry(node, spec, payload.scale, cc);
                 } else if (spec.sprite) {
@@ -689,14 +862,17 @@ export const methods = {
             const transform = node.getComponent(UITransform);
             const childParent = spec.action === 'transform'
                 ? node
-                : configureScroll(node, spec, transform, cc);
+                : configureScroll(node, spec, transform, payload.scale, cc);
             if (spec.action !== 'transform') {
                 configureLayout(childParent, spec, payload.scale, cc);
             }
             for (const child of spec.children) {
                 await build(child, childParent);
             }
-            const layout = childParent.getComponent(Layout);
+            const layoutMode = spec.layout?.mode;
+            const layout = layoutMode && layoutMode !== 'NONE'
+                ? childParent.getComponent(Layout)
+                : null;
             layout?.updateLayout();
             if (layout) {
                 applyCounterAlignment(childParent, spec, nodeMap, payload.scale, cc);
