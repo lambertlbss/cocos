@@ -354,6 +354,7 @@ test('configures text outline on Label and preserves the Figma text box geometry
     assert.equal(title.getComponent(LabelOutline), null);
     assert.equal(label.enableOutline, true);
     assert.equal(label.outlineWidth, 2);
+    assert.equal(label.overflow, Label.Overflow.CLAMP);
     assert.equal(label.lineHeight, 18);
     assert.deepEqual(transform.contentSize, { width: 40, height: 20 });
     assert.deepEqual(

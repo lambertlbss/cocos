@@ -195,11 +195,11 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
     label.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
     label.spacingX = (style.letterSpacing ?? 0) * scale;
     label.enableWrapText = style.textAutoResize !== 'WIDTH_AND_HEIGHT';
-    label.overflow = style.textAutoResize === 'HEIGHT'
-        ? Label.Overflow.RESIZE_HEIGHT
-        : style.textAutoResize === 'WIDTH_AND_HEIGHT'
-            ? Label.Overflow.NONE
-            : Label.Overflow.CLAMP;
+    // Figma has already supplied the final text frame dimensions. Cocos'
+    // NONE/RESIZE_HEIGHT modes recalculate UITransform from font metrics,
+    // which changes the center position and produces the reported 21.34px
+    // height instead of the Figma 17px box. Keep the imported box authoritative.
+    label.overflow = Label.Overflow.CLAMP;
     label.horizontalAlign = ({
         LEFT: Label.HorizontalAlign.LEFT,
         CENTER: Label.HorizontalAlign.CENTER,
