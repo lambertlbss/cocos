@@ -96,7 +96,22 @@ class Layout extends Component {}
 Layout.Type = { HORIZONTAL: 0, VERTICAL: 1, GRID: 2 };
 Layout.AxisDirection = { HORIZONTAL: 0, VERTICAL: 1 };
 Layout.ResizeMode = { NONE: 0 };
-class ScrollView extends Component {}
+class ScrollView extends Component {
+    get content() {
+        return this._content ?? null;
+    }
+
+    set content(value) {
+        if (value && typeof value.getComponent !== 'function') {
+            return;
+        }
+        this._content = value;
+    }
+
+    get view() {
+        return this._content?.parent?.getComponent(UITransform) ?? null;
+    }
+}
 class Button extends Component {}
 Button.Transition = { SCALE: 0 };
 class Widget extends Component {}
@@ -608,10 +623,13 @@ test('keeps ScrollView helpers top-left while importing content nodes with cente
     const view = imported.getChildByName('view');
     const content = view.getChildByName('content');
     const child = content.children[0];
+    const scroll = imported.getComponent(ScrollView);
 
     assert.deepEqual(imported.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
     assert.deepEqual(view.getComponent(UITransform).anchorPoint, { x: 0, y: 1 });
     assert.deepEqual(content.getComponent(UITransform).anchorPoint, { x: 0, y: 1 });
+    assert.equal(scroll.content, content);
+    assert.equal(scroll.view, view.getComponent(UITransform));
     assert.deepEqual(child.getComponent(UITransform).anchorPoint, { x: 0.5, y: 0.5 });
     assert.deepEqual(
         { x: child.position.x, y: child.position.y },

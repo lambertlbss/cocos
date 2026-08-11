@@ -481,8 +481,9 @@ function configureScroll(
         }
         legacy.destroy();
     }
-    scroll.content = contentTransform;
-    scroll.view = viewTransform;
+    // Cocos Creator 3.8.7 expects the content Node here. ScrollView.view is a
+    // getter derived from content.parent and must never be assigned directly.
+    scroll.content = content;
     const direction = spec.overflowDirection ?? 'VERTICAL_SCROLLING';
     scroll.horizontal = direction === 'HORIZONTAL_SCROLLING' || direction === 'HORIZONTAL_AND_VERTICAL_SCROLLING';
     scroll.vertical = direction === 'VERTICAL_SCROLLING' || direction === 'HORIZONTAL_AND_VERTICAL_SCROLLING';
