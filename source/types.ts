@@ -1,4 +1,7 @@
-export type ImportAction = 'ignore' | 'generate' | 'render' | 'svg' | 'merge' | 'transform';
+export type ImportAction = 'ignore' | 'generate' | 'render' | 'transform';
+
+/** 仅用于兼容旧面板热加载期间可能发来的动作值。 */
+export type LegacyImportAction = ImportAction | 'svg' | 'merge';
 
 export type NodeKind =
     | 'auto'
@@ -108,6 +111,8 @@ export interface TreeNodeDto {
     height: number;
     action: ImportAction;
     kind: NodeKind;
+    /** 智能模式是否应把该容器及其后代收口为当前节点的一张 PNG。 */
+    renderSubtree?: boolean;
     patchCandidate: boolean;
     warning?: string;
     children: TreeNodeDto[];

@@ -9,7 +9,9 @@ const {
     inferKind,
     isNamedSliceGroup,
     isPatchCandidate,
+    isStructuredNodeName,
     isVectorNode,
+    shouldRenderMessySubtree,
 } = require('../dist/figma/analyzer');
 const { parseNode } = require('../dist/figma/parser');
 const { analyzeSliceGrid } = require('../dist/figma/slicing');
@@ -91,6 +93,104 @@ test('does not infer ScrollView from clipping, overflow geometry, or a scroll-li
             absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 160 },
         }],
     })), 'node');
+});
+
+test('recognizes only strict multi-segment snake_case as a structured node name', () => {
+    for (const name of ['img_hongbao_bg_mini', 'panel_list', 'icon_01', 'UI_panel_bg']) {
+        assert.equal(isStructuredNodeName(name), true, name);
+    }
+    for (const name of [
+        'Group 91',
+        'Frame 92',
+        'Ellipse 5',
+        '减去顶层',
+        'img',
+        'img__bg',
+        '_img_bg',
+        'img_bg_',
+        'img-bg',
+        ' img_bg',
+    ]) {
+        assert.equal(isStructuredNodeName(name), false, name);
+    }
+});
+
+test('renders the nearest non-root structured boundary when its visible direct children are messy', () => {
+    const root = node({
+        name: 'panel_root',
+        children: [{
+            id: '11:1',
+            name: 'img_hongbao_bg_mini',
+            type: 'FRAME',
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 80 },
+            children: [{
+                id: '11:2',
+                name: 'Group 91',
+                type: 'GROUP',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 80 },
+                children: [{
+                    id: '11:3',
+                    name: 'Ellipse 5',
+                    type: 'ELLIPSE',
+                    absoluteBoundingBox: { x: 10, y: 10, width: 20, height: 20 },
+                }],
+            }],
+        }],
+    });
+    const [tree] = analyzeTree([root]);
+    const assetBoundary = tree.children[0];
+
+    assert.equal(tree.action, 'generate');
+    assert.equal(tree.renderSubtree, false);
+    assert.equal(shouldRenderMessySubtree(root, true), false);
+    assert.equal(assetBoundary.action, 'render');
+    assert.equal(assetBoundary.renderSubtree, true);
+    assert.match(assetBoundary.warning, /PNG 整层/);
+});
+
+test('does not flatten structured, hidden-noise, root, or explicit ScrollView containers', () => {
+    const hiddenNoise = node({
+        name: 'panel_content',
+        children: [
+            {
+                id: '12:1',
+                name: 'Group 91',
+                visible: false,
+                type: 'GROUP',
+                absoluteBoundingBox: { x: 0, y: 0, width: 10, height: 10 },
+            },
+            {
+                id: '12:2',
+                name: 'icon_reward',
+                type: 'FRAME',
+                absoluteBoundingBox: { x: 0, y: 0, width: 10, height: 10 },
+            },
+        ],
+    });
+    const rootMess = node({
+        name: 'img_root_bg',
+        children: [{
+            id: '12:3',
+            name: 'Group 91',
+            type: 'GROUP',
+            absoluteBoundingBox: { x: 0, y: 0, width: 10, height: 10 },
+        }],
+    });
+    const scroll = node({
+        name: 'list_rewards',
+        overflowDirection: 'VERTICAL_SCROLLING',
+        children: [{
+            id: '12:4',
+            name: 'Group 91',
+            type: 'GROUP',
+            absoluteBoundingBox: { x: 0, y: 0, width: 10, height: 10 },
+        }],
+    });
+
+    assert.equal(shouldRenderMessySubtree(hiddenNoise, false), false);
+    assert.equal(shouldRenderMessySubtree(rootMess, true), false);
+    assert.equal(shouldRenderMessySubtree(scroll, false), false);
+    assert.equal(analyzeTree([rootMess])[0].action, 'generate');
 });
 
 test('warns when Figma auto-wrapping cannot be reproduced by Label NONE', () => {
@@ -201,7 +301,7 @@ test('detects three- and nine-slice candidates without enabling them automatical
     assert.equal(isPatchCandidate(arbitraryChildren), false);
 });
 
-test('automatically merges parents containing three or nine Rectangle-named children', () => {
+test('automatically renders parents containing three or nine Rectangle-named children as one PNG', () => {
     for (const count of [3, 9]) {
         const candidate = node({
             children: Array.from({ length: count }, (_, index) => ({
@@ -212,8 +312,12 @@ test('automatically merges parents containing three or nine Rectangle-named chil
             })),
         });
         assert.equal(isNamedSliceGroup(candidate), true);
-        assert.equal(inferAction(candidate), 'merge');
+        assert.equal(inferAction(candidate), 'render');
         assert.equal(isPatchCandidate(candidate), true);
+        const [tree] = analyzeTree([candidate]);
+        assert.equal(tree.action, 'render');
+        assert.equal(tree.renderSubtree, true);
+        assert.match(tree.warning, /PNG 整层/);
     }
 
     const unrelated = node({
@@ -226,6 +330,27 @@ test('automatically merges parents containing three or nine Rectangle-named chil
     });
     assert.equal(isNamedSliceGroup(unrelated), false);
     assert.equal(inferAction(unrelated), 'generate');
+});
+
+test('keeps hidden named three- and nine-slice groups ignored', () => {
+    for (const count of [3, 9]) {
+        const candidate = node({
+            visible: false,
+            children: Array.from({ length: count }, (_, index) => ({
+                id: `hidden-${count}:${index}`,
+                name: index === 0 ? 'Rectangle' : `Rectangle ${index}`,
+                type: 'RECTANGLE',
+                absoluteBoundingBox: { x: index * 10, y: 0, width: 10, height: 10 },
+            })),
+        });
+        const [tree] = analyzeTree([candidate]);
+
+        assert.equal(isNamedSliceGroup(candidate), true);
+        assert.equal(inferAction(candidate), 'ignore');
+        assert.equal(tree.action, 'ignore');
+        assert.equal(tree.renderSubtree, false);
+        assert.equal(tree.warning, undefined);
+    }
 });
 
 test('derives asymmetric Cocos borders from a real nine-slice layout', () => {

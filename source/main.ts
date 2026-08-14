@@ -7,6 +7,11 @@ import { inferAction, inferCocosLayoutMode, inferKind, isVectorNode } from './fi
 import { parseDocument } from './figma/parser';
 import { analyzeSliceGrid } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
+import {
+    isTerminalAction,
+    kindForImportAction,
+    normalizeImportAction,
+} from './import-actions';
 import { AssetWriter, resolveAssetUuid, sanitizeAssetName } from './importer/assets';
 import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
 import type { FontAssetOption } from './importer/fonts';
@@ -26,6 +31,7 @@ import {
     type Rect,
     type SceneNodeSpec,
     type SpriteAssetSpec,
+    type TreeNodeDto,
 } from './types';
 
 const vault = new TokenVault(packageJSON.name);
@@ -324,12 +330,27 @@ function decisionForNode(node: FigmaNode, decisions: Map<string, Decision>): Dec
     return decision;
 }
 
-function decisionMap(overrides: ImportOverride[]): Map<string, Decision> {
-    return new Map(overrides.map((item) => [item.id, {
-        action: item.action,
-        kind: item.kind,
-        nineSlice: item.nineSlice,
-    }]));
+function decisionMap(overrides: ImportOverride[], tree: TreeNodeDto[]): Map<string, Decision> {
+    const decisions = new Map<string, Decision>();
+    const addDefaults = (nodes: TreeNodeDto[]) => {
+        for (const node of nodes) {
+            decisions.set(node.id, {
+                action: normalizeImportAction(node.action),
+                kind: node.kind,
+                nineSlice: false,
+            });
+            addDefaults(node.children);
+        }
+    };
+    addDefaults(tree);
+    for (const item of overrides ?? []) {
+        decisions.set(item.id, {
+            action: normalizeImportAction(item.action),
+            kind: item.kind,
+            nineSlice: item.nineSlice,
+        });
+    }
+    return decisions;
 }
 
 function collectAssetRequests(
@@ -341,18 +362,13 @@ function collectAssetRequests(
     const visit = (node: FigmaNode) => {
         const decision = decisionForNode(node, decisions);
         if (decision.action === 'ignore') {
-            node.children.forEach(visit);
             return;
         }
         if (node.type === 'TEXT') {
             node.children.forEach(visit);
             return;
         }
-        if (decision.nineSlice || decision.action === 'render' || decision.action === 'merge') {
-            png.push(node);
-            return;
-        }
-        if (decision.action === 'svg') {
+        if (decision.nineSlice || decision.action === 'render') {
             png.push(node);
             return;
         }
@@ -387,7 +403,6 @@ async function buildAssets(
     const promoteLocalParents = async (node: FigmaNode): Promise<void> => {
         const decision = decisionForNode(node, decisions);
         if (decision.action === 'ignore') {
-            await Promise.all(node.children.map(promoteLocalParents));
             return;
         }
         if (node.children.length && node.type !== 'TEXT') {
@@ -645,17 +660,15 @@ function makeSpec(
     }
     const frame = nodeFrame(node);
     const resolvedKind = decision.kind === 'auto' ? inferKind(node) : decision.kind;
-    const terminal = decision.nineSlice
-        || decision.action === 'render'
-        || decision.action === 'svg'
-        || decision.action === 'merge'
-        || decision.action === 'transform';
+    const bitmapTerminal = decision.nineSlice || decision.action === 'render';
+    const terminal = bitmapTerminal || isTerminalAction(decision.action);
+    const effectiveKind = kindForImportAction(resolvedKind, decision.action, decision.nineSlice);
     return {
         figmaId: node.id,
         name: node.name,
         figmaType: node.type,
         action: decision.action,
-        kind: decision.nineSlice ? 'sprite' : resolvedKind,
+        kind: effectiveKind,
         frame,
         parentFrame,
         rotation: node.rotation,
@@ -669,7 +682,7 @@ function makeSpec(
         characters: node.characters,
         textStyle: node.style,
         layout: {
-            mode: resolvedKind === 'layout' || resolvedKind === 'scrollView'
+            mode: effectiveKind === 'layout' || effectiveKind === 'scrollView'
                 ? inferredLayoutMode(node)
                 : undefined,
             sourceMode: node.layoutMode,
@@ -712,7 +725,7 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
     beginOperation();
     try {
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
-        const decisions = decisionMap(request.overrides);
+        const decisions = decisionMap(request.overrides, activeDocument.tree);
         const assets = await buildAssets(activeDocument, decisions, importSettings);
         const fonts = await resolveFonts(importSettings);
         const sourceRootFrames = activeDocument.roots.map(nodeFrame);

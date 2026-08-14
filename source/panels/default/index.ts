@@ -2,6 +2,14 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import packageJSON from '../../../package.json';
 import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
+import { normalizeImportAction } from '../../import-actions';
+import {
+    actionOptionsForNode,
+    effectiveKindForNode,
+    isVectorNodeType,
+    resolveEffectiveActions,
+    smartActionForNode,
+} from './model';
 import type {
     ImportAction,
     ImportOverride,
@@ -23,6 +31,7 @@ interface DocumentDto {
 interface PanelState {
     document: DocumentDto | null;
     settings: ImportSettings;
+    preferredActions: Map<string, ImportAction>;
     actions: Map<string, ImportAction>;
     kinds: Map<string, NodeKind>;
     patches: Set<string>;
@@ -40,14 +49,6 @@ let panelHost: any = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let importButtonResetTimer: ReturnType<typeof setTimeout> | null = null;
 
-const VECTOR_NODE_TYPES = new Set([
-    'VECTOR',
-    'BOOLEAN_OPERATION',
-    'STAR',
-    'LINE',
-    'REGULAR_POLYGON',
-]);
-
 const state: PanelState = {
     document: null,
     settings: {
@@ -62,6 +63,7 @@ const state: PanelState = {
         autoSave: false,
         fontMap: {},
     },
+    preferredActions: new Map(),
     actions: new Map(),
     kinds: new Map(),
     patches: new Set(),
@@ -149,10 +151,6 @@ function findNode(id: string, nodes = state.document?.tree ?? []): TreeNodeDto |
     return undefined;
 }
 
-function isVectorNodeType(type: string): boolean {
-    return VECTOR_NODE_TYPES.has(type);
-}
-
 function renderFontMap(): void {
     const list = element('#font-map-list');
     list.replaceChildren();
@@ -198,12 +196,13 @@ function renderFontMap(): void {
     }
 }
 
-function safeAction(_node: TreeNodeDto, action: ImportAction): ImportAction {
-    return action === 'svg' ? 'render' : action;
+function safeAction(_node: TreeNodeDto, action: unknown): ImportAction {
+    return normalizeImportAction(action);
 }
 
 function initializeDocument(document: DocumentDto): void {
     state.document = document;
+    state.preferredActions.clear();
     state.actions.clear();
     state.kinds.clear();
     state.patches.clear();
@@ -211,21 +210,12 @@ function initializeDocument(document: DocumentDto): void {
     state.collapsed.clear();
     state.suppressed.clear();
     for (const node of flatten(document.tree)) {
-        const inferred = safeAction(node, node.action);
-        const action = isVectorNodeType(node.type) && inferred !== 'ignore'
-            ? 'render'
-            : node.children.length && terminal(inferred) && inferred !== 'merge'
-                ? 'generate'
-                : inferred;
-        state.actions.set(node.id, action);
+        const action = smartActionForNode(node);
+        state.preferredActions.set(node.id, action);
         state.kinds.set(node.id, node.kind);
         state.defaults.set(node.id, { action, kind: node.kind });
     }
-    for (const node of flatten(document.tree)) {
-        if (state.actions.get(node.id) === 'merge' && !state.suppressed.has(node.id)) {
-            setAction(node, 'merge');
-        }
-    }
+    reconcileActions();
     root().querySelectorAll<HTMLElement>('[data-preset]').forEach((button) => {
         button.classList.toggle('active', button.dataset.preset === 'smart');
     });
@@ -402,31 +392,23 @@ function updateProgress(event: ProgressEvent): void {
     }
 }
 
-function terminal(action: ImportAction): boolean {
-    return action === 'render' || action === 'svg' || action === 'merge' || action === 'transform';
-}
-
 function descendants(node: TreeNodeDto): TreeNodeDto[] {
     return node.children.flatMap((child) => [child, ...descendants(child)]);
 }
 
+function reconcileActions(): void {
+    const effective = resolveEffectiveActions(
+        state.document?.tree ?? [],
+        state.preferredActions,
+        state.patches,
+    );
+    state.actions = effective.actions;
+    state.suppressed = effective.suppressed;
+}
+
 function setAction(node: TreeNodeDto, action: ImportAction): void {
-    action = safeAction(node, action);
-    state.actions.set(node.id, action);
-    if (terminal(action)) {
-        for (const child of descendants(node)) {
-            if (!state.suppressed.has(child.id)) {
-                state.suppressed.add(child.id);
-            }
-            state.actions.set(child.id, 'ignore');
-        }
-    } else if (action === 'generate') {
-        for (const child of descendants(node)) {
-            if (state.suppressed.delete(child.id)) {
-                state.actions.set(child.id, state.defaults.get(child.id)?.action ?? 'generate');
-            }
-        }
-    }
+    state.preferredActions.set(node.id, safeAction(node, action));
+    reconcileActions();
 }
 
 function matches(node: TreeNodeDto): boolean {
@@ -501,30 +483,43 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     copy.append(name, meta);
     main.append(collapse, dot, copy);
 
-    const actionOptions: Array<[string, string]> = [
-        ['ignore', '忽略'],
-        ['generate', '生成'],
-        ['render', isVectorNodeType(node.type) ? 'PNG Sprite' : 'PNG 整层'],
-        ['merge', '合并子树'],
-        ['transform', '更新'],
-    ];
+    const selectedAction = safeAction(node, state.actions.get(node.id) ?? node.action);
+    const actionOptions = actionOptionsForNode(node);
     const action = makeSelect(
         'action-select',
-        safeAction(node, state.actions.get(node.id) ?? node.action),
+        selectedAction,
         actionOptions,
         `${node.name} 导入方式`,
     );
     action.dataset.actionFor = node.id;
 
-    const kind = makeSelect('kind-select', state.kinds.get(node.id) ?? node.kind, [
-        ['auto', '自动'],
-        ['node', 'Node'],
-        ['sprite', 'Sprite'],
-        ['label', 'Label'],
-        ['button', 'Button'],
-        ['scrollView', 'ScrollView'],
-        ['layout', 'Layout'],
-    ], `${node.name} 节点类型`);
+    const selectedKind = state.kinds.get(node.id) ?? node.kind;
+    const effectiveKind = effectiveKindForNode(
+        node,
+        selectedKind,
+        selectedAction,
+        state.patches.has(node.id),
+    );
+    const kindOptions: Array<[string, string]> = selectedAction === 'render'
+        ? [
+            ['sprite', 'Sprite'],
+            ['button', 'Button'],
+        ]
+        : [
+            ['auto', '自动'],
+            ['node', 'Node'],
+            ['sprite', 'Sprite'],
+            ['label', 'Label'],
+            ['button', 'Button'],
+            ['scrollView', 'ScrollView'],
+            ['layout', 'Layout'],
+        ];
+    const kind = makeSelect(
+        'kind-select',
+        effectiveKind,
+        kindOptions,
+        `${node.name} 节点类型`,
+    );
     kind.dataset.kindFor = node.id;
 
     const patch = document.createElement('label');
@@ -558,7 +553,7 @@ function renderTree(): void {
         const title = document.createElement('strong');
         title.textContent = '还没有节点';
         const body = document.createElement('p');
-        body.textContent = '读取 Figma 链接后，可逐层选择生成、渲染、SVG 或更新。';
+        body.textContent = '读取 Figma 链接后，可逐层选择生成、PNG 整层或更新。';
         empty.append(glyph, title, body);
         tree.appendChild(empty);
         return;
@@ -614,36 +609,26 @@ function applyPreset(name: string): void {
         return;
     }
     const all = flatten(state.document.tree);
-    state.suppressed.clear();
     if (name === 'smart') {
         for (const node of all) {
             const original = state.defaults.get(node.id)!;
-            const action = safeAction(node, original.action);
-            state.actions.set(node.id, isVectorNodeType(node.type) && action !== 'ignore'
-                ? 'render'
-                : node.children.length && action !== 'merge'
-                    ? 'generate'
-                    : action);
+            state.preferredActions.set(node.id, original.action);
             state.kinds.set(node.id, original.kind);
-        }
-        for (const node of all) {
-            if (state.actions.get(node.id) === 'merge' && !state.suppressed.has(node.id)) {
-                setAction(node, 'merge');
-            }
         }
     } else if (name === 'editable') {
         for (const node of all) {
-            state.actions.set(node.id, isVectorNodeType(node.type) ? 'render' : 'generate');
+            state.preferredActions.set(node.id, isVectorNodeType(node.type) ? 'render' : 'generate');
         }
     } else {
         for (const node of all) {
-            state.actions.set(node.id, !node.visible
+            state.preferredActions.set(node.id, !node.visible
                 ? 'ignore'
                 : node.children.length
                     ? 'generate'
                     : 'render');
         }
     }
+    reconcileActions();
     root().querySelectorAll<HTMLElement>('[data-preset]').forEach((button) => {
         button.classList.toggle('active', button.dataset.preset === name);
     });
@@ -870,10 +855,13 @@ function bindEvents(): void {
             const node = findNode(target.dataset.actionFor);
             if (node) {
                 const action = target.value as ImportAction;
+                if (action !== 'render') {
+                    state.patches.delete(node.id);
+                }
                 setAction(node, action);
                 root().querySelectorAll<HTMLElement>('[data-preset]')
                     .forEach((button) => button.classList.remove('active'));
-                if (terminal(action) && node.children.length) {
+                if (action === 'render' && node.children.length) {
                     showToast(`“${node.name}”将作为整层导入，${descendants(node).length} 个子节点不会单独生成。`);
                 }
                 renderTree();
@@ -889,6 +877,7 @@ function bindEvents(): void {
                 }
             } else {
                 state.patches.delete(target.dataset.patchFor);
+                reconcileActions();
             }
             renderTree();
         }

@@ -152,6 +152,34 @@ class FakeNode {
         }
     }
 
+    worldPosition() {
+        let x = this.position.x;
+        let y = this.position.y;
+        let z = this.position.z;
+        let ancestor = this._parent;
+        while (ancestor) {
+            x += ancestor.position.x;
+            y += ancestor.position.y;
+            z += ancestor.position.z;
+            ancestor = ancestor.parent;
+        }
+        return { x, y, z };
+    }
+
+    setParent(value, keepWorldTransform = false) {
+        const world = keepWorldTransform ? this.worldPosition() : null;
+        this.parent = value;
+        this.lastKeepWorldTransform = keepWorldTransform;
+        if (world) {
+            const parentWorld = value?.worldPosition?.() ?? { x: 0, y: 0, z: 0 };
+            this.setPosition(
+                world.x - parentWorld.x,
+                world.y - parentWorld.y,
+                world.z - parentWorld.z,
+            );
+        }
+    }
+
     addChild(child) {
         child.parent = this;
     }
@@ -165,6 +193,15 @@ class FakeNode {
 
     destroy() {
         this.removeFromParent();
+        if (FakeNode.deferNodeDestruction) {
+            setTimeout(() => {
+                for (const child of [...this.children]) {
+                    child.destroy();
+                }
+                this.children = [];
+                this.destroyed = true;
+            }, 0);
+        }
     }
 
     getChildByName(name) {
@@ -235,6 +272,7 @@ class FakeNode {
     setRotationFromEuler() {}
 }
 FakeNode.deferComponentRemoval = false;
+FakeNode.deferNodeDestruction = false;
 
 function makeSpec(overrides = {}) {
     return {
@@ -368,6 +406,67 @@ test('does not add a clipping Mask to a terminal Sprite layer', async () => {
     assert.ok(imported.getComponent(Sprite));
     assert.equal(imported.getComponent(Mask), null);
     assert.equal(imported.getComponent(Graphics), null);
+});
+
+test('normalizes legacy merge and svg SceneSpecs to terminal Sprite or Button nodes', async () => {
+    const cases = [
+        {
+            action: 'merge',
+            kind: 'scrollView',
+            figmaType: 'FRAME',
+            expectedButton: false,
+        },
+        {
+            action: 'svg',
+            kind: 'button',
+            figmaType: 'FRAME',
+            expectedButton: true,
+        },
+        {
+            action: 'merge',
+            kind: 'label',
+            figmaType: 'TEXT',
+            expectedButton: false,
+        },
+    ];
+    for (const [index, legacy] of cases.entries()) {
+        const childId = `legacy-child-${index}`;
+        const environment = await importWithFakeCocos(makeSpec({
+            figmaId: `legacy-root-${index}`,
+            name: `Legacy ${legacy.action}`,
+            action: legacy.action,
+            kind: legacy.kind,
+            figmaType: legacy.figmaType,
+            layout: { mode: 'VERTICAL' },
+            sprite: { uuid: `legacy-sprite-${index}`, url: `db://assets/legacy-${index}.png`, sliced: false },
+            children: [makeSpec({ figmaId: childId, name: 'MustNotImport' })],
+        }));
+        const imported = environment.canvas.children[0];
+
+        assert.ok(imported.getComponent(Sprite), `${legacy.action} should use Sprite`);
+        assert.equal(imported.getComponent(Label), null);
+        assert.equal(imported.getComponent(Graphics), null);
+        assert.equal(imported.getComponent(ScrollView), null);
+        assert.equal(imported.getComponent(Layout), null);
+        assert.equal(Boolean(imported.getComponent(Button)), legacy.expectedButton);
+        assert.equal(imported.children.length, 0);
+        assert.equal(environment.result.nodeMap[childId], undefined);
+    }
+});
+
+test('does not build descendants carried by a terminal transform SceneSpec', async () => {
+    const childId = 'transform-child';
+    const environment = await importWithFakeCocos(makeSpec({
+        figmaId: 'transform-root',
+        name: 'TransformOnly',
+        action: 'transform',
+        kind: 'node',
+        children: [makeSpec({ figmaId: childId, name: 'MustNotImport' })],
+    }));
+    const imported = environment.canvas.children[0];
+
+    assert.equal(imported.children.length, 0);
+    assert.equal(environment.result.nodeMap[childId], undefined);
 });
 
 test('imports Figma vector nodes as Sprite instead of Graphics', async () => {
@@ -591,7 +690,7 @@ test('does not import a __FigmaBackground child for clipped containers', async (
 
 test('keeps the Figma node size when an existing sliced SpriteFrame is assigned', async () => {
     const environment = await importWithFakeCocos(makeSpec({
-        action: 'merge',
+        action: 'render',
         kind: 'sprite',
         frame: { x: 0, y: 0, width: 180, height: 72 },
         sprite: { uuid: 'sprite-frame', url: 'db://assets/panel.png', sliced: true },
@@ -1370,6 +1469,450 @@ test('resets reused Label font and color when the new Figma text has no mapping 
             { r: 255, g: 255, b: 255, a: 255 },
         );
     } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('removes stale imported descendants when a layered node becomes one PNG while preserving manual children', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const firstRoot = makeSpec({
+            figmaId: '15:290',
+            name: 'img_reward_bg',
+            children: [makeSpec({
+                figmaId: '15:291',
+                name: 'Group 91',
+                kind: 'scrollView',
+                overflowDirection: 'VERTICAL_SCROLLING',
+                frame: { x: 10, y: 10, width: 40, height: 30 },
+                children: [makeSpec({
+                    figmaId: '15:292',
+                    name: 'OldGeneratedItem',
+                    frame: { x: 10, y: 10, width: 20, height: 10 },
+                })],
+            })],
+        });
+        firstRoot.children[0].parentFrame = firstRoot.frame;
+        firstRoot.children[0].children[0].parentFrame = firstRoot.children[0].frame;
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        const oldChild = imported.children[0];
+        const oldView = oldChild.getChildByName('view');
+        const oldContent = oldView.getChildByName('content');
+        const manualChild = new FakeNode('ManualBadge');
+        oldContent.addChild(manualChild);
+
+        const secondRoot = makeSpec({
+            figmaId: '15:290',
+            name: 'img_reward_bg',
+            action: 'render',
+            kind: 'sprite',
+            sprite: { uuid: 'whole-layer', url: 'db://assets/img_reward_bg.png', sliced: false },
+            children: [],
+        });
+        const second = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+
+        assert.ok(imported.getComponent(Sprite));
+        assert.equal(oldChild.parent, null);
+        assert.equal(oldView.parent, null);
+        assert.equal(oldContent.parent, null);
+        assert.equal(manualChild.parent, imported);
+        assert.deepEqual(imported.children.map((child) => child.name), ['ManualBadge']);
+        assert.equal(second.nodeMap['15:291'], undefined);
+        assert.equal(second.nodeMap['15:292'], undefined);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('preserves manual children when the same nested ScrollView becomes one PNG', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const oldGeneratedSpec = makeSpec({
+            figmaId: '15:312',
+            name: 'OldGeneratedItem',
+            frame: { x: 14, y: 14, width: 20, height: 10 },
+        });
+        const firstTarget = makeSpec({
+            figmaId: '15:311',
+            name: 'img_reward_bg',
+            kind: 'scrollView',
+            overflowDirection: 'VERTICAL_SCROLLING',
+            frame: { x: 10, y: 10, width: 60, height: 40 },
+            children: [oldGeneratedSpec],
+        });
+        const firstRoot = makeSpec({
+            figmaId: '15:310',
+            name: 'ScreenRoot',
+            children: [firstTarget],
+        });
+        firstTarget.parentFrame = firstRoot.frame;
+        oldGeneratedSpec.parentFrame = firstTarget.frame;
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        const target = imported.getChildByName('img_reward_bg');
+        const oldView = target.getChildByName('view');
+        const oldContent = oldView.getChildByName('content');
+        const oldGenerated = oldContent.getChildByName('OldGeneratedItem');
+        oldContent.setPosition(7, -9, 0);
+
+        const manualChild = new FakeNode('ManualBadge');
+        manualChild.setPosition(3, 4, 0);
+        oldContent.addChild(manualChild);
+        const manualWorldBefore = manualChild.worldPosition();
+
+        const viewManual = new FakeNode('ViewOverlay');
+        viewManual.setPosition(-5, 6, 0);
+        oldView.addChild(viewManual);
+        const viewManualWorldBefore = viewManual.worldPosition();
+
+        const legacy = new FakeNode('__FigmaContent');
+        legacy.setPosition(-6, 8, 0);
+        target.addChild(legacy);
+        const legacyManual = new FakeNode('LegacyManualBadge');
+        legacyManual.setPosition(2, 5, 0);
+        legacy.addChild(legacyManual);
+        const legacyWorldBefore = legacyManual.worldPosition();
+
+        const background = new FakeNode('__FigmaBackground');
+        background.setPosition(4, -7, 0);
+        target.addChild(background);
+        const backgroundManual = new FakeNode('BackgroundManualBadge');
+        backgroundManual.setPosition(8, 3, 0);
+        background.addChild(backgroundManual);
+        const backgroundManualWorldBefore = backgroundManual.worldPosition();
+
+        const secondTarget = makeSpec({
+            figmaId: '15:311',
+            name: 'img_reward_bg',
+            action: 'render',
+            kind: 'sprite',
+            frame: firstTarget.frame,
+            sprite: { uuid: 'whole-layer', url: 'db://assets/img_reward_bg.png', sliced: false },
+            children: [],
+        });
+        const secondRoot = makeSpec({
+            figmaId: '15:310',
+            name: 'ScreenRoot',
+            children: [secondTarget],
+        });
+        secondTarget.parentFrame = secondRoot.frame;
+        FakeNode.deferNodeDestruction = true;
+        const second = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        assert.ok(target.getComponent(Sprite));
+        assert.equal(target.getComponent(ScrollView), null);
+        assert.equal(target.getChildByName('view'), null);
+        assert.equal(target.getChildByName('__FigmaContent'), null);
+        assert.equal(target.getChildByName('__FigmaBackground'), null);
+        assert.equal(oldView.parent, null);
+        assert.equal(oldContent.parent, null);
+        assert.equal(legacy.parent, null);
+        assert.equal(background.parent, null);
+        assert.equal(oldGenerated.parent, null);
+        assert.equal(oldGenerated.destroyed, true);
+        assert.equal(background.destroyed, true);
+        assert.equal(manualChild.parent, target);
+        assert.equal(viewManual.parent, target);
+        assert.equal(legacyManual.parent, target);
+        assert.equal(backgroundManual.parent, target);
+        assert.notEqual(manualChild.destroyed, true);
+        assert.notEqual(viewManual.destroyed, true);
+        assert.notEqual(legacyManual.destroyed, true);
+        assert.notEqual(backgroundManual.destroyed, true);
+        assert.equal(manualChild.lastKeepWorldTransform, true);
+        assert.equal(viewManual.lastKeepWorldTransform, true);
+        assert.equal(legacyManual.lastKeepWorldTransform, true);
+        assert.equal(backgroundManual.lastKeepWorldTransform, true);
+        assert.deepEqual(manualChild.worldPosition(), manualWorldBefore);
+        assert.deepEqual(viewManual.worldPosition(), viewManualWorldBefore);
+        assert.deepEqual(legacyManual.worldPosition(), legacyWorldBefore);
+        assert.deepEqual(backgroundManual.worldPosition(), backgroundManualWorldBefore);
+        assert.equal(second.nodeMap['15:312'], undefined);
+    } finally {
+        FakeNode.deferNodeDestruction = false;
+        Module._load = originalLoad;
+    }
+});
+
+test('does not delete an omitted mapped node outside a PNG whole-layer boundary', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const makeRoot = (includeOmitted) => {
+            const children = [makeSpec({
+                figmaId: '15:301',
+                name: 'KeptLayer',
+                frame: { x: 0, y: 0, width: 30, height: 20 },
+            })];
+            if (includeOmitted) {
+                children.push(makeSpec({
+                    figmaId: '15:302',
+                    name: 'OmittedLayer',
+                    frame: { x: 40, y: 0, width: 30, height: 20 },
+                }));
+            }
+            const root = makeSpec({
+                figmaId: '15:300',
+                name: 'panel_content',
+                children,
+            });
+            for (const child of root.children) {
+                child.parentFrame = root.frame;
+            }
+            return root;
+        };
+        const firstRoot = makeRoot(true);
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstRoot.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstRoot],
+        });
+        const imported = environment.canvas.children[0];
+        const omitted = imported.getChildByName('OmittedLayer');
+
+        const secondRoot = makeRoot(false);
+        const second = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondRoot],
+        });
+
+        assert.equal(omitted.parent, imported);
+        assert.equal(imported.getChildByName('OmittedLayer'), omitted);
+        assert.equal(second.nodeMap['15:302'], omitted.uuid);
+
+        const thirdRoot = makeRoot(true);
+        const third = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: thirdRoot.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: second.nodeMap,
+            centerInCanvas: true,
+            roots: [thirdRoot],
+        });
+
+        assert.equal(imported.getChildByName('OmittedLayer'), omitted);
+        assert.equal(
+            imported.children.filter((child) => child.name === 'OmittedLayer').length,
+            1,
+        );
+        assert.equal(third.nodeMap['15:302'], omitted.uuid);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('switches safely between direct and multi-root imports without orphaning old roots', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    const importRoots = (roots, existingMap, updateExisting) => methods.importDocument({
+        packageName: 'figma-importer-cocos',
+        fileKey: 'file-key',
+        rootName: 'Root Mode Test',
+        rootFrame: { x: 0, y: 0, width: 240, height: 120 },
+        scale: 1,
+        updateExisting,
+        existingMap,
+        centerInCanvas: false,
+        roots,
+    });
+    try {
+        const firstSpec = makeSpec({ figmaId: 'root:a', name: 'RootA' });
+        const first = await importRoots([firstSpec], {}, false);
+        const rootA = environment.canvas.getChildByName('RootA');
+        assert.equal(first.nodeMap.__root__, rootA.uuid);
+        assert.equal(first.nodeMap['root:a'], rootA.uuid);
+
+        const second = await importRoots([
+            makeSpec({ figmaId: 'root:a', name: 'RootA' }),
+            makeSpec({ figmaId: 'root:b', name: 'RootB' }),
+        ], first.nodeMap, true);
+        const wrapper = environment.canvas.children.find((node) => node.uuid === second.rootUuid);
+        const rootB = wrapper.getChildByName('RootB');
+
+        assert.notEqual(wrapper, rootA);
+        assert.equal(wrapper.parent, environment.canvas);
+        assert.notEqual(wrapper.parent, wrapper);
+        assert.equal(rootA.parent, wrapper);
+        assert.equal(rootB.parent, wrapper);
+        assert.equal(second.nodeMap.__root__, wrapper.uuid);
+        assert.equal(second.nodeMap['root:a'], rootA.uuid);
+
+        wrapper.setPosition(20, -30, 0);
+        rootB.setPosition(40, 5, 0);
+        const siblingManual = new FakeNode('SiblingManual');
+        siblingManual.setPosition(3, 7, 0);
+        rootB.addChild(siblingManual);
+        const siblingManualWorld = siblingManual.worldPosition();
+        const wrapperManual = new FakeNode('WrapperManual');
+        wrapperManual.setPosition(-4, 9, 0);
+        wrapper.addChild(wrapperManual);
+        const wrapperManualWorld = wrapperManual.worldPosition();
+
+        FakeNode.deferNodeDestruction = true;
+        const third = await importRoots([
+            makeSpec({ figmaId: 'root:a', name: 'RootA' }),
+        ], second.nodeMap, true);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        assert.equal(third.rootUuid, rootA.uuid);
+        assert.equal(rootA.parent, environment.canvas);
+        assert.equal(wrapper.parent, null);
+        assert.equal(rootB.parent, null);
+        assert.equal(wrapper.destroyed, true);
+        assert.equal(rootB.destroyed, true);
+        assert.equal(environment.canvas.getChildByName('RootB'), null);
+        assert.equal(environment.canvas.children.includes(wrapper), false);
+        assert.equal(siblingManual.parent, environment.canvas);
+        assert.equal(wrapperManual.parent, environment.canvas);
+        assert.notEqual(siblingManual.destroyed, true);
+        assert.notEqual(wrapperManual.destroyed, true);
+        assert.deepEqual(siblingManual.worldPosition(), siblingManualWorld);
+        assert.deepEqual(wrapperManual.worldPosition(), wrapperManualWorld);
+        assert.equal(third.nodeMap.__root__, rootA.uuid);
+        assert.equal(third.nodeMap['root:b'], undefined);
+    } finally {
+        FakeNode.deferNodeDestruction = false;
+        Module._load = originalLoad;
+    }
+});
+
+test('restores reused roots when a direct-to-multi import fails', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    const importRoots = (roots, existingMap, updateExisting) => methods.importDocument({
+        packageName: 'figma-importer-cocos',
+        fileKey: 'file-key',
+        rootName: 'Failed Root Mode Test',
+        rootFrame: { x: 0, y: 0, width: 240, height: 120 },
+        scale: 1,
+        updateExisting,
+        existingMap,
+        centerInCanvas: false,
+        roots,
+    });
+    try {
+        const first = await importRoots([
+            makeSpec({ figmaId: 'root:stable', name: 'StableRoot' }),
+        ], {}, false);
+        const stableRoot = environment.canvas.getChildByName('StableRoot');
+        const manual = new FakeNode('StableManual');
+        stableRoot.addChild(manual);
+
+        FakeNode.deferNodeDestruction = true;
+        await assert.rejects(
+            importRoots([
+                makeSpec({ figmaId: 'root:stable', name: 'StableRoot' }),
+                makeSpec({
+                    figmaId: 'root:broken',
+                    name: 'BrokenPng',
+                    action: 'render',
+                    kind: 'sprite',
+                }),
+            ], first.nodeMap, true),
+            /没有绑定 SpriteFrame/,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        assert.equal(stableRoot.parent, environment.canvas);
+        assert.equal(manual.parent, stableRoot);
+        assert.notEqual(stableRoot.destroyed, true);
+        assert.notEqual(manual.destroyed, true);
+        assert.equal(
+            environment.canvas.children.some((child) => child.name.startsWith('Figma · ')),
+            false,
+        );
+    } finally {
+        FakeNode.deferNodeDestruction = false;
         Module._load = originalLoad;
     }
 });

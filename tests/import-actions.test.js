@@ -1,0 +1,143 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const {
+    blocksDescendants,
+    isTerminalAction,
+    kindForImportAction,
+    normalizeImportAction,
+} = require('../dist/import-actions');
+const {
+    actionOptionsForNode,
+    effectiveKindForNode,
+    resolveEffectiveActions,
+    smartActionForNode,
+} = require('../dist/panels/default/model');
+
+function treeNode(overrides = {}) {
+    return {
+        id: overrides.id ?? '1:1',
+        name: overrides.name ?? 'img_reward_bg',
+        type: overrides.type ?? 'FRAME',
+        visible: true,
+        width: 100,
+        height: 80,
+        action: overrides.action ?? 'generate',
+        kind: overrides.kind ?? 'node',
+        renderSubtree: overrides.renderSubtree ?? false,
+        patchCandidate: false,
+        children: overrides.children ?? [],
+    };
+}
+
+test('normalizes legacy merge and svg actions to the single PNG render action', () => {
+    assert.equal(normalizeImportAction('merge'), 'render');
+    assert.equal(normalizeImportAction('svg'), 'render');
+    assert.equal(normalizeImportAction('render'), 'render');
+    assert.equal(normalizeImportAction('unknown'), 'generate');
+    assert.equal(isTerminalAction('merge'), true);
+    assert.equal(isTerminalAction('render'), true);
+    assert.equal(isTerminalAction('generate'), false);
+    assert.equal(blocksDescendants('ignore'), true);
+    assert.equal(blocksDescendants('generate'), false);
+    assert.equal(kindForImportAction('scrollView', 'render'), 'sprite');
+    assert.equal(kindForImportAction('layout', 'render'), 'sprite');
+    assert.equal(kindForImportAction('button', 'render'), 'button');
+});
+
+test('smart mode preserves only explicitly recommended container PNG subtrees', () => {
+    const child = treeNode({ id: '1:2', name: 'Group 91' });
+    assert.equal(smartActionForNode(treeNode({
+        action: 'render',
+        renderSubtree: true,
+        children: [child],
+    })), 'render');
+    assert.equal(smartActionForNode(treeNode({
+        action: 'render',
+        renderSubtree: false,
+        children: [child],
+    })), 'generate');
+    assert.equal(smartActionForNode(treeNode({
+        action: 'merge',
+        children: [child],
+    })), 'render');
+});
+
+test('panel exposes PNG whole-layer without a duplicate merge-subtree option', () => {
+    const containerOptions = actionOptionsForNode(treeNode());
+    assert.deepEqual(containerOptions.map(([value]) => value), [
+        'ignore',
+        'generate',
+        'render',
+        'transform',
+    ]);
+    assert.equal(containerOptions.find(([value]) => value === 'render')[1], 'PNG 整层');
+
+    const vectorOptions = actionOptionsForNode(treeNode({ type: 'ELLIPSE' }));
+    assert.equal(vectorOptions.find(([value]) => value === 'render')[1], 'PNG Sprite');
+
+    const autoButton = treeNode({ name: 'common_btn_close', kind: 'button' });
+    assert.equal(effectiveKindForNode(autoButton, 'auto', 'render'), 'button');
+    assert.equal(effectiveKindForNode(autoButton, 'auto', 'generate'), 'button');
+});
+
+test('restores nested PNG boundaries and keeps their descendants suppressed', () => {
+    const leaf = treeNode({ id: '1:3', name: 'Ellipse 5', type: 'ELLIPSE' });
+    const inner = treeNode({
+        id: '1:2',
+        name: 'img_reward_icon',
+        action: 'render',
+        renderSubtree: true,
+        children: [leaf],
+    });
+    const outer = treeNode({
+        id: '1:1',
+        name: 'img_reward_panel',
+        action: 'render',
+        renderSubtree: true,
+        children: [inner],
+    });
+    const preferred = new Map([
+        [outer.id, 'render'],
+        [inner.id, 'render'],
+        [leaf.id, 'render'],
+    ]);
+
+    let effective = resolveEffectiveActions([outer], preferred);
+    assert.equal(effective.actions.get(inner.id), 'ignore');
+    assert.equal(effective.actions.get(leaf.id), 'ignore');
+
+    preferred.set(outer.id, 'generate');
+    effective = resolveEffectiveActions([outer], preferred);
+    assert.equal(effective.actions.get(outer.id), 'generate');
+    assert.equal(effective.actions.get(inner.id), 'render');
+    assert.equal(effective.actions.get(leaf.id), 'ignore');
+    assert.equal(effective.suppressed.has(inner.id), false);
+    assert.equal(effective.suppressed.has(leaf.id), true);
+
+    const patched = resolveEffectiveActions(
+        [outer],
+        new Map([
+            [outer.id, 'generate'],
+            [inner.id, 'generate'],
+            [leaf.id, 'render'],
+        ]),
+        new Set([outer.id]),
+    );
+    assert.equal(patched.actions.get(outer.id), 'render');
+    assert.equal(patched.actions.get(inner.id), 'ignore');
+    assert.equal(patched.actions.get(leaf.id), 'ignore');
+
+    const ignored = resolveEffectiveActions(
+        [outer],
+        new Map([
+            [outer.id, 'ignore'],
+            [inner.id, 'generate'],
+            [leaf.id, 'render'],
+        ]),
+    );
+    assert.equal(ignored.actions.get(outer.id), 'ignore');
+    assert.equal(ignored.actions.get(inner.id), 'ignore');
+    assert.equal(ignored.actions.get(leaf.id), 'ignore');
+});

@@ -1,4 +1,9 @@
 import { join } from 'path';
+import {
+    isTerminalAction,
+    kindForImportAction,
+    normalizeImportAction,
+} from './import-actions';
 import type { FigmaColor, FigmaPaint, Rect, SceneNodeSpec } from './types';
 
 module.paths.push(join(Editor.App.path, 'node_modules'));
@@ -60,6 +65,148 @@ function findByUuid(root: any, uuid: string): any | null {
     return null;
 }
 
+function setParentKeepingWorld(node: any, parent: any): void {
+    if (typeof node.setParent === 'function') {
+        node.setParent(parent, true);
+    } else {
+        node.parent = parent;
+    }
+}
+
+function isGeneratedHelperNode(child: any, parent: any, cc: any): boolean {
+    if (child.name === BACKGROUND_NODE_NAME || child.name === '__FigmaContent') {
+        return true;
+    }
+    if (child.name === 'view' && parent.getComponent?.(cc.ScrollView)) {
+        return true;
+    }
+    return child.name === 'content'
+        && parent.name === 'view'
+        && parent.parent?.getComponent?.(cc.ScrollView);
+}
+
+function removeMappedNodeTree(
+    node: any,
+    survivorParent: any,
+    staleUuids: Set<string>,
+    cc: any,
+): number {
+    let removed = 1;
+    for (const child of [...node.children]) {
+        if (staleUuids.has(child.uuid) || isGeneratedHelperNode(child, node, cc)) {
+            removed += removeMappedNodeTree(child, survivorParent, staleUuids, cc);
+        } else if (survivorParent) {
+            setParentKeepingWorld(child, survivorParent);
+        }
+    }
+    node.active = false;
+    node.removeFromParent();
+    node.destroy();
+    return removed;
+}
+
+function normalizeSceneSpec(spec: SceneNodeSpec): SceneNodeSpec {
+    const action = normalizeImportAction(spec.action as unknown);
+    const kind = kindForImportAction(spec.kind, action);
+    const children = Array.isArray(spec.children) ? spec.children : [];
+    return {
+        ...spec,
+        action,
+        kind,
+        children: isTerminalAction(action)
+            ? []
+            : children.map((child) => normalizeSceneSpec(child)),
+    };
+}
+
+function flattensDescendants(spec: SceneNodeSpec): boolean {
+    return spec.action === 'render'
+        || (spec.action === 'generate' && Boolean(spec.sprite) && spec.children.length === 0);
+}
+
+function removeFlattenedMappedDescendants(
+    importRoot: any,
+    existingMap: Record<string, string>,
+    currentMap: Record<string, string>,
+    specs: SceneNodeSpec[],
+    cc: any,
+): number {
+    const retainedUuids = new Set(Object.values(currentMap));
+    const boundaryIds: string[] = [];
+    const collectBoundaries = (nodes: SceneNodeSpec[]) => {
+        for (const spec of nodes) {
+            if (flattensDescendants(spec)) {
+                boundaryIds.push(spec.figmaId);
+                continue;
+            }
+            collectBoundaries(spec.children);
+        }
+    };
+    collectBoundaries(specs);
+    const boundaries = boundaryIds
+        .map((figmaId) => currentMap[figmaId])
+        .filter((uuid): uuid is string => Boolean(uuid))
+        .map((uuid) => findByUuid(importRoot, uuid))
+        .filter((node): node is any => Boolean(node));
+    if (!boundaries.length) {
+        return 0;
+    }
+    const staleNodes = new Map<string, any>();
+    for (const [figmaId, uuid] of Object.entries(existingMap)) {
+        if (figmaId === '__root__' || retainedUuids.has(uuid)) {
+            continue;
+        }
+        for (const boundary of boundaries) {
+            const node = findByUuid(boundary, uuid);
+            if (node && node !== boundary) {
+                staleNodes.set(node.uuid, node);
+                break;
+            }
+        }
+    }
+    if (!staleNodes.size) {
+        return 0;
+    }
+    const staleUuids = new Set(staleNodes.keys());
+    let removed = 0;
+    for (const node of staleNodes.values()) {
+        if (!node.parent || staleUuids.has(node.parent.uuid)) {
+            continue;
+        }
+        removed += removeMappedNodeTree(node, node.parent, staleUuids, cc);
+    }
+    return removed;
+}
+
+function mergePreservedMappings(
+    importRoot: any,
+    existingMap: Record<string, string>,
+    currentMap: Record<string, string>,
+): void {
+    for (const [figmaId, uuid] of Object.entries(existingMap)) {
+        if (figmaId === '__root__' || currentMap[figmaId]) {
+            continue;
+        }
+        if (findByUuid(importRoot, uuid)) {
+            currentMap[figmaId] = uuid;
+        }
+    }
+}
+
+function salvageExistingMappedNodes(
+    container: any,
+    survivorParent: any,
+    existingUuids: Set<string>,
+): void {
+    for (const child of [...container.children]) {
+        if (existingUuids.has(child.uuid)) {
+            setParentKeepingWorld(child, survivorParent);
+        } else {
+            salvageExistingMappedNodes(child, survivorParent, existingUuids);
+        }
+    }
+}
+
 function findCanvas(root: any, Canvas: any): any | null {
     if (root.getComponent(Canvas)) {
         return root;
@@ -111,10 +258,10 @@ async function removeObsoleteLabelOutline(node: any, cc: any): Promise<void> {
 function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
     const desired = new Set<any>();
     const clipsChildren = clipsGeneratedChildren(spec);
-    if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
-        desired.add(cc.Label);
-    } else if (spec.sprite) {
+    if (spec.action === 'render' || spec.sprite) {
         desired.add(cc.Sprite);
+    } else if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
+        desired.add(cc.Label);
     } else if (!RASTER_VECTOR_TYPES.has(spec.figmaType)) {
         desired.add(cc.Graphics);
         if (clipsChildren) {
@@ -122,10 +269,13 @@ function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
         }
     }
     const layoutMode = spec.layout?.mode;
-    if (spec.kind !== 'scrollView' && layoutMode && layoutMode !== 'NONE') {
+    if (spec.action === 'generate'
+        && spec.kind !== 'scrollView'
+        && layoutMode
+        && layoutMode !== 'NONE') {
         desired.add(cc.Layout);
     }
-    if (spec.kind === 'scrollView') {
+    if (spec.action === 'generate' && spec.kind === 'scrollView') {
         desired.add(cc.ScrollView);
     }
     if (spec.kind === 'button') {
@@ -146,6 +296,9 @@ function removeGeneratedBackground(node: any): void {
     if (!background) {
         return;
     }
+    for (const child of [...background.children]) {
+        setParentKeepingWorld(child, node);
+    }
     background.removeFromParent();
     background.destroy();
 }
@@ -154,13 +307,21 @@ function removeObsoleteScrollHelpers(node: any, spec: SceneNodeSpec, cc: any): v
     if (spec.kind === 'scrollView') {
         return;
     }
-    const preserveChildren = spec.children.length > 0;
+    // A flattened node has no new child specs by design. Keep every existing
+    // child alive until removeFlattenedMappedDescendants can distinguish old
+    // Figma-mapped nodes from user-authored nodes. Otherwise destroying the
+    // helper would recursively destroy manual children at Cocos' deferred
+    // destruction boundary.
+    const preserveChildren = spec.children.length > 0 || flattensDescendants(spec);
+    const moveChildrenToNode = (container: any) => {
+        for (const child of [...container.children]) {
+            setParentKeepingWorld(child, node);
+        }
+    };
     const legacy = node.getChildByName('__FigmaContent');
     if (legacy) {
         if (preserveChildren) {
-            for (const child of [...legacy.children]) {
-                child.parent = node;
-            }
+            moveChildrenToNode(legacy);
         }
         legacy.removeFromParent();
         legacy.destroy();
@@ -173,8 +334,11 @@ function removeObsoleteScrollHelpers(node: any, spec: SceneNodeSpec, cc: any): v
         return;
     }
     if (preserveChildren) {
-        for (const child of [...content.children]) {
-            child.parent = node;
+        moveChildrenToNode(content);
+        for (const child of [...view.children]) {
+            if (child !== content) {
+                setParentKeepingWorld(child, node);
+            }
         }
     }
     content.removeFromParent();
@@ -735,8 +899,9 @@ export const methods = {
         if (!scene) {
             throw new Error('当前没有打开的场景。');
         }
+        const roots = payload.roots.map((root) => normalizeSceneSpec(root));
         const fallbackParent = findCanvas(scene, Canvas) ?? scene;
-        const directRoot = payload.roots.length === 1;
+        const directRoot = roots.length === 1;
         const canvas = findCanvas(scene, Canvas);
         const generatedClasses = [
             LabelOutline,
@@ -752,20 +917,39 @@ export const methods = {
         const nodeMap: Record<string, string> = {};
         let created = 0;
         let updated = 0;
-        const totalNodes = Math.max(1, countSpecs(payload.roots));
+        const totalNodes = Math.max(1, countSpecs(roots));
         let completedNodes = 0;
 
+        const existingRootUuid = payload.updateExisting
+            ? payload.existingMap.__root__
+            : undefined;
+        let existingRootNode = existingRootUuid
+            ? findByUuid(scene, existingRootUuid)
+            : null;
+        if (existingRootNode?.getComponent(Camera)) {
+            existingRootNode = null;
+        }
+        // In a direct-root import, __root__ aliases the Figma root UUID. In a
+        // multi-root import it identifies a synthetic wrapper and must never be
+        // reused as one of its own children when the root count changes.
+        const existingRootWasDirect = Boolean(existingRootUuid
+            && Object.entries(payload.existingMap).some(([figmaId, uuid]) =>
+                figmaId !== '__root__' && uuid === existingRootUuid));
+        const previousDirectRoot = existingRootWasDirect ? existingRootNode : null;
+        const previousWrapper = !existingRootWasDirect ? existingRootNode : null;
         const mappedRootUuid = directRoot
-            ? payload.existingMap[payload.roots[0].figmaId]
-            : payload.existingMap.__root__;
+            ? payload.existingMap[roots[0].figmaId]
+            : (!existingRootWasDirect ? existingRootUuid : undefined);
         let importRoot = payload.updateExisting && mappedRootUuid
             ? findByUuid(scene, mappedRootUuid)
             : null;
         if (importRoot?.getComponent(Camera)) {
             importRoot = null;
         }
-        const legacyWrapper = directRoot && importRoot?.parent?.name.startsWith('Figma · ')
-            ? importRoot.parent
+        const legacyWrapper = directRoot
+            ? previousWrapper ?? (importRoot?.parent?.name.startsWith('Figma · ')
+                ? importRoot.parent
+                : null)
             : null;
         const reusedImportRoot = Boolean(importRoot);
         const parent = fallbackParent;
@@ -788,7 +972,7 @@ export const methods = {
             importRoot.setPosition(0, 0, 0);
             nodeMap.__root__ = importRoot.uuid;
         } else if (!importRoot) {
-            importRoot = new Node(cleanName(payload.roots[0].name));
+            importRoot = new Node(cleanName(roots[0].name));
             parent.addChild(importRoot);
         }
 
@@ -837,7 +1021,12 @@ export const methods = {
                 removeGeneratedBackground(node);
                 configureGeometry(node, spec, payload.scale, cc);
                 const clipsChildren = clipsGeneratedChildren(spec);
-                if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
+                if (spec.action === 'render' || spec.sprite) {
+                    if (!spec.sprite) {
+                        throw new Error(`PNG 整层节点“${spec.name}”没有绑定 SpriteFrame，资源可能未成功导入。`);
+                    }
+                    await configureSprite(node, spec, payload.scale, cc);
+                } else if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
                     configureLabel(node, spec, payload.scale, cc);
                     if (spec.fontUuid) {
                         const label = node.getComponent(Label);
@@ -846,8 +1035,6 @@ export const methods = {
                         node.getComponent(Label).font = null;
                     }
                     finalizeLabelGeometry(node, spec, payload.scale, cc);
-                } else if (spec.sprite) {
-                    await configureSprite(node, spec, payload.scale, cc);
                 } else if (RASTER_VECTOR_TYPES.has(spec.figmaType)) {
                     throw new Error(`矢量节点“${spec.name}”没有绑定 SpriteFrame，PNG 资源可能未成功导入。`);
                 } else if (clipsChildren) {
@@ -863,14 +1050,14 @@ export const methods = {
             const childParent = spec.action === 'transform'
                 ? node
                 : configureScroll(node, spec, transform, payload.scale, cc);
-            if (spec.action !== 'transform') {
+            if (spec.action === 'generate') {
                 configureLayout(childParent, spec, payload.scale, cc);
             }
             for (const child of spec.children) {
                 await build(child, childParent);
             }
             const layoutMode = spec.layout?.mode;
-            const layout = layoutMode && layoutMode !== 'NONE'
+            const layout = spec.action === 'generate' && layoutMode && layoutMode !== 'NONE'
                 ? childParent.getComponent(Layout)
                 : null;
             layout?.updateLayout();
@@ -890,8 +1077,17 @@ export const methods = {
         };
 
         try {
-            for (const root of payload.roots) {
+            for (const root of roots) {
                 await build(root, directRoot ? parent : importRoot, directRoot ? importRoot : undefined);
+            }
+            if (payload.updateExisting) {
+                removeFlattenedMappedDescendants(
+                    importRoot,
+                    payload.existingMap,
+                    nodeMap,
+                    roots,
+                    cc,
+                );
             }
             if (directRoot) {
                 nodeMap.__root__ = importRoot.uuid;
@@ -899,12 +1095,34 @@ export const methods = {
                     centerInCanvas(importRoot, canvas, UITransform, cc.Vec3);
                 }
             }
-            if (legacyWrapper && legacyWrapper !== importRoot && !legacyWrapper.children.length) {
-                legacyWrapper.removeFromParent();
-                legacyWrapper.destroy();
+            const retainedUuids = new Set(Object.values(nodeMap));
+            const staleTransitionUuids = new Set(
+                Object.entries(payload.existingMap)
+                    .filter(([figmaId, uuid]) => figmaId !== '__root__' && !retainedUuids.has(uuid))
+                    .map(([, uuid]) => uuid),
+            );
+            if (legacyWrapper && legacyWrapper !== importRoot && legacyWrapper.parent) {
+                removeMappedNodeTree(legacyWrapper, parent, staleTransitionUuids, cc);
             }
+            if (previousDirectRoot
+                && previousDirectRoot !== importRoot
+                && !retainedUuids.has(previousDirectRoot.uuid)
+                && previousDirectRoot.parent) {
+                removeMappedNodeTree(
+                    previousDirectRoot,
+                    directRoot ? parent : importRoot,
+                    staleTransitionUuids,
+                    cc,
+                );
+            }
+            mergePreservedMappings(importRoot, payload.existingMap, nodeMap);
         } catch (error) {
             if (!reusedImportRoot) {
+                salvageExistingMappedNodes(
+                    importRoot,
+                    parent,
+                    new Set(Object.values(payload.existingMap)),
+                );
                 importRoot.removeFromParent();
                 importRoot.destroy();
             }

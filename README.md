@@ -1,6 +1,6 @@
 # Figma Importer for Cocos Creator
 
-面向 Cocos Creator 3.8.7 的 Figma UI 导入扩展。它可以把 Figma 文件或单个节点转换为可编辑的 Cocos UI 节点树，也可以按节点选择 PNG、SVG、合并渲染、九宫格或增量更新。
+面向 Cocos Creator 3.8.7 的 Figma UI 导入扩展。它可以把 Figma 文件或单个节点转换为可编辑的 Cocos UI 节点树，也可以按节点选择 PNG 整层、九宫格或增量更新。
 
 完整架构、数据流、安全约束、故障记录和后续变更规则见 [插件技术知识库](./FIGMA_IMPORTER_KNOWLEDGE_BASE.md)。
 
@@ -37,12 +37,11 @@
 ## 节点策略
 
 - 生成：转换为 `UITransform`、`Graphics`、`Label`、`Layout`、`Button`、`ScrollView`、`Mask` 等可编辑组件。
-- PNG：由 Figma 渲染后导入 `SpriteFrame`，适合图片填充、阴影和复杂效果。
+- PNG 整层：由 Figma 把当前节点及其子树渲染为一张 PNG，再导入 `SpriteFrame`；该节点的设计子层不会重复生成。
 - 矢量节点：面板显示为“PNG Sprite”，通过 Figma PNG 渲染后导入 `Sprite`，不会用 `cc.Graphics` 近似任意矢量路径；它只渲染当前矢量节点，不会压平父节点子树。
-- 合并：把当前节点及其子树合并为一张 PNG。
 - 更新：只更新已映射节点的几何与可见性。
 - 九宫格：把识别到的三宫/九宫节点导入为 `Sprite.Type.SLICED`，切片边界写入 SpriteFrame 元数据。
-- 忽略：不创建当前节点；其未被抑制的子节点仍可独立导入。
+- 忽略：不创建当前节点及其整棵子树。
 
 文字节点始终按 Cocos `Label` 导入，不会因为渐变、阴影或复杂填充而导出 PNG 切图。字体描边直接写入 `Label.enableOutline`、`Label.outlineColor` 和 `Label.outlineWidth`，不再添加额外的 `LabelOutline` 组件。所有文字使用 `Label.Overflow.NONE`：无显式换行符的单行文字按 Figma 参考框水平、竖直居中；包含显式换行符的多行文字按参考框左上对齐。插件先加载映射字体，再让 Cocos 完成最终字体度量和位置补偿。Cocos 3.8.7 在 `NONE` 下会强制关闭自动换行，因此 Figma 自动折行但没有手动换行符的文本会在面板显示警告。启用本地同名资源目录时，如果一个容器节点自身命中同名 PNG 资源，会把该资源作为整层 Sprite 使用，并跳过其内部子节点导入。
 
@@ -50,7 +49,7 @@
 
 所有导入节点以及 ScrollView 自动生成的 `view/content` 都在建树时直接使用 Cocos 默认中心锚点 `(0.5, 0.5)`。插件会依据父节点实际锚点、尺寸和原始 Figma 左上坐标计算中心位置，不经过导入后的二次调整；当滚动内容大于视口时，会先确定 content 最终尺寸并补偿位置，使它的左上边界始终与 view 对齐。
 
-“智能”和“分层高保真”都会保留容器层级；后者只把叶子节点渲染为 PNG / SVG。只有手动把带子节点的容器设为“PNG 整层”或“合并子树”时，子节点才不会单独生成。
+“PNG 整层”是唯一的子树压平动作，旧版“合并子树”配置会自动兼容为“PNG 整层”。智能模式默认保留容器层级，但会识别设计素材边界：非最外层容器自身为严格的多段 `snake_case`（如 `img_hongbao_bg_mini`），且至少一个直接可见子层不是同类结构化命名（如 `Group 91`、`Frame 92`、`Ellipse 5`）时，在该容器处自动改为 PNG 整层。只检查直接子层，最外层节点、隐藏噪声和 Figma 明确设置的 ScrollView 不参与此规则，避免祖先级联压平或破坏滚动功能。分层高保真仍保留容器，只渲染叶子节点。
 
 可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪只映射为 `Mask`；智能模式只有在 Figma 明确设置滚动溢出方向时才映射为 `ScrollView`，`list_`、`scroll_` 等业务命名不会擅自改变节点层级。需要预留运行时滚动但设计稿没有设置溢出时，可在节点策略中手动选择 `ScrollView`。Figma Constraints 暂不自动映射为 `Widget`，导入后由用户在 Cocos 中手动配置。
 

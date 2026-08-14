@@ -25,6 +25,7 @@ const VECTOR_TYPES = new Set([
 ]);
 
 const SLICE_RECTANGLE_NAME = /^Rectangle(?:[\s_-]*\d+)?$/i;
+const STRUCTURED_NODE_NAME = /^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$/;
 const FIGMA_SCROLL_DIRECTIONS = new Set([
     'HORIZONTAL_SCROLLING',
     'VERTICAL_SCROLLING',
@@ -36,6 +37,10 @@ const FIGMA_SCROLL_DIRECTIONS = new Set([
 
 export function isVectorNode(node: Pick<FigmaNode, 'type'>): boolean {
     return VECTOR_TYPES.has(node.type);
+}
+
+export function isStructuredNodeName(name: string): boolean {
+    return name === name.trim() && STRUCTURED_NODE_NAME.test(name);
 }
 
 export function isNamedSliceGroup(node: FigmaNode): boolean {
@@ -120,7 +125,7 @@ export function inferAction(node: FigmaNode): ImportAction {
         return 'ignore';
     }
     if (isNamedSliceGroup(node)) {
-        return 'merge';
+        return 'render';
     }
     if (node.type === 'TEXT') {
         // Text remains an editable Cocos Label. Even when Figma reports fills,
@@ -147,11 +152,27 @@ export function inferAction(node: FigmaNode): ImportAction {
     return 'render';
 }
 
+export function shouldRenderMessySubtree(node: FigmaNode, isRoot: boolean): boolean {
+    if (isRoot
+        || node.visible === false
+        || !CONTAINER_TYPES.has(node.type)
+        || !isStructuredNodeName(node.name)) {
+        return false;
+    }
+    const overflowDirection = node.overflowDirection?.trim().toUpperCase() ?? '';
+    if (FIGMA_SCROLL_DIRECTIONS.has(overflowDirection)) {
+        return false;
+    }
+    const visibleChildren = node.children.filter((child) => child.visible !== false);
+    return visibleChildren.length > 0
+        && visibleChildren.some((child) => !isStructuredNodeName(child.name));
+}
+
 export function isPatchCandidate(node: FigmaNode): boolean {
     return isNamedSliceGroup(node) || Boolean(analyzeSliceGrid(node));
 }
 
-function warningFor(node: FigmaNode): string | undefined {
+function warningFor(node: FigmaNode, renderMessySubtree: boolean): string | undefined {
     if (!node.absoluteBoundingBox) {
         return '缺少边界信息，将按 0×0 导入';
     }
@@ -159,7 +180,10 @@ function warningFor(node: FigmaNode): string | undefined {
         return `混合模式 ${node.blendMode} 将近似处理`;
     }
     if (isNamedSliceGroup(node)) {
-        return '检测到 3/9 个 Rectangle 切片，将合并子树并优先复用同名资源';
+        return '检测到 3/9 个 Rectangle 切片，将按 PNG 整层导入并优先复用同名资源';
+    }
+    if (renderMessySubtree) {
+        return '当前结构化节点包含未结构化的直接子层，智能模式将按 PNG 整层导入';
     }
     if (node.type === 'TEXT' && node.characters && !/[\r\n\u2028\u2029]/.test(node.characters)) {
         const lineHeight = node.style?.lineHeightPx ?? node.style?.fontSize ?? 0;
@@ -175,8 +199,12 @@ function warningFor(node: FigmaNode): string | undefined {
     return undefined;
 }
 
-function toTree(node: FigmaNode): TreeNodeDto {
+function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
     const frame = node.absoluteBoundingBox;
+    const inferredAction = inferAction(node);
+    const renderMessySubtree = shouldRenderMessySubtree(node, isRoot);
+    const renderSubtree = inferredAction !== 'ignore'
+        && (isNamedSliceGroup(node) || renderMessySubtree);
     return {
         id: node.id,
         name: node.name,
@@ -184,14 +212,15 @@ function toTree(node: FigmaNode): TreeNodeDto {
         visible: node.visible,
         width: frame?.width ?? 0,
         height: frame?.height ?? 0,
-        action: inferAction(node),
+        action: renderSubtree ? 'render' : inferredAction,
         kind: inferKind(node),
+        renderSubtree,
         patchCandidate: isPatchCandidate(node),
-        warning: warningFor(node),
-        children: node.children.map(toTree),
+        warning: inferredAction === 'ignore' ? undefined : warningFor(node, renderMessySubtree),
+        children: node.children.map((child) => toTree(child, false)),
     };
 }
 
 export function analyzeTree(roots: FigmaNode[]): TreeNodeDto[] {
-    return roots.map(toTree);
+    return roots.map((root) => toTree(root, true));
 }

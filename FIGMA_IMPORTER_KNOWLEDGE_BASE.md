@@ -2,9 +2,9 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.25`
+> 当前插件版本：`1.0.26`
 > 当前文档状态：持续维护  
-> 最近审计：2026-08-11  
+> 最近审计：2026-08-14
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
 
 ## 1. 文档目的
@@ -119,6 +119,7 @@ source/
 ├─ main.ts                         主进程、导入编排、消息方法
 ├─ scene.ts                        Cocos 场景脚本、节点/组件构建
 ├─ types.ts                        Figma、策略、场景规格、设置类型
+├─ import-actions.ts               动作归一、终端动作与 Sprite 类型收口
 ├─ figma/
 │  ├─ client.ts                    Figma REST API、重试、取消
 │  ├─ parser.ts                    不可信 JSON → 规范化 FigmaNode
@@ -133,7 +134,9 @@ source/
 │  └─ svg.ts                       渐变 SVG/PNG 生成
 ├─ security/
 │  └─ token-vault.ts               Token 加密、会话内存回退
-└─ panels/default/index.ts         默认面板逻辑
+└─ panels/default/
+   ├─ index.ts                     默认面板交互逻辑
+   └─ model.ts                     可测试的智能动作与选项模型
 
 static/
 ├─ template/default/index.html     面板结构
@@ -165,11 +168,11 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 | 动作 | 含义 | 是否遍历子节点 |
 |---|---|---|
 | `generate` | 生成可编辑 Cocos 节点/组件 | 是，容器通常保留层级 |
-| `render` | 当前节点导出 PNG，绑定 Sprite | 终止当前节点的资源导出；子节点是否继续由策略决定 |
-| `svg` | 兼容旧设置，内部归一为 `render` | 同 `render` |
-| `merge` | 当前节点及子树合并为一张 PNG | 否，子树不单独生成 |
+| `render` | 当前节点及其子树导出为一张 PNG，绑定 Sprite | 否，子树不单独生成 |
 | `transform` | 只更新映射节点的几何/可见性 | 按已有节点更新 |
-| `ignore` | 忽略当前节点 | 未被抑制的子节点仍可遍历 |
+| `ignore` | 忽略当前节点及其整棵子树 | 否 |
+
+`merge` 和 `svg` 不再是当前 `ImportAction`，仅由 `normalizeImportAction()` 作为旧面板热加载兼容值接收，并统一转换为 `render`。面板只展示一个“PNG 整层”，避免两个动作产生相同结果却让用户误以为存在差异。
 
 `NodeKind`：`node`、`sprite`、`label`、`button`、`scrollView`、`layout`、`auto` 等。
 
@@ -202,6 +205,9 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 - Figma 矢量类型 `VECTOR`、`BOOLEAN_OPERATION`、`STAR`、`LINE`、`REGULAR_POLYGON`、`RECTANGLE`、`ELLIPSE` 始终为 `render`；
 - 矢量节点最终为 PNG Sprite，不使用 `cc.Graphics` 近似任意路径；
 - 含子节点的 Frame/Group/Component/Instance 默认保留容器层级；
+- 智能模式将严格多段 `snake_case` 视为可收口的资源边界：非最外层、非显式 ScrollView 的可见容器，如果至少一个直接可见子层不是同类结构化命名，则当前容器自动 `render` 为 PNG 整层；
+- 该规则只检查直接子层，隐藏子层不计入，并通过 `TreeNodeDto.renderSubtree` 让面板保留分析器的终端决策，避免深层噪声导致多个祖先级联压平；
+- 面板分别保存“用户/预设希望使用的动作”和“考虑父级终端动作后的有效动作”；每次切换动作都会从根节点重新计算抑制关系。外层 PNG 整层改回“生成”后，内层自动 PNG 边界会恢复，而该内层边界的后代仍保持忽略；
 - 图片填充、复杂效果、不支持的渐变/描边等情况走 PNG；
 - 可安全表达的 Auto Layout 才映射为 Cocos Layout；
 - 智能模式只在 Figma `overflowDirection` 为已知横向、纵向或双向滚动枚举时映射 ScrollView；`NONE`、未知值、节点名称或 `clipsContent` 不会改变组件类型，普通裁剪容器映射 Mask；
@@ -210,7 +216,7 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 面板“智能”预设会对矢量节点强制使用 `render`。面板文案中：
 
 - 矢量节点显示“PNG Sprite”；
-- 容器手动整层渲染才显示“PNG 整层”；
+- 容器手动整层渲染或命名规则自动收口时显示“PNG 整层”；
 - “PNG Sprite”不是父树合并，只代表当前矢量节点自身的 PNG。
 
 ### 6.3 资源准备
@@ -233,6 +239,12 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 - 单 Frame 链接：创建独立根节点，使用最外层 Frame 名称；
 - 多根节点文件：创建 `Figma · 文件名` 包装节点，并按横向间隔排列；
 - `updateExisting` 仅使用插件保存的 UUID 映射，不读取当前选中节点；
+- 增量导入从分层节点切换为 PNG 整层时，会删除旧 `nodeMaps` 中已不再生成的 Figma 子节点；未被插件映射的用户手工子节点会保留并按世界坐标迁移到仍存在的父节点；
+- 旧 ScrollView 变为 PNG 整层前，`view/content` 和旧版 `__FigmaContent` 中的子节点会先迁出辅助层；随后只删除旧 Figma 映射节点，避免辅助层销毁时连带删除用户手工节点；
+- `view` 直属手工节点以及 `__FigmaBackground` 内手工后代也会在辅助节点销毁前使用 `setParent(..., true)` 迁出，保证延迟销毁阶段不丢节点且世界坐标不变；
+- 本轮未重建但仍保留在导入根下的旧映射会合并回新 `nodeMap`，后续恢复该 Figma 节点时复用原 UUID，不会创建重名副本；
+- 单根与多根导入之间切换时，会区分“直接 Figma 根”和“合成包装根”，不会把旧根挂到自身；切回单根时清理旧包装与映射兄弟，同时迁出其中未映射的用户节点；
+- Scene Script 会独立归一旧 `merge/svg` 动作并收口最终 kind，即使 Cocos 热重载期间主进程与 Scene Script 版本短暂不一致，也不会重新生成空 Layout/ScrollView；
 - Cocos 节点名使用 Figma 名称，经过文件系统/节点名安全清理。
 
 ### 6.5 Frame Prefab 导入生命周期
@@ -350,6 +362,9 @@ Frame Prefab 导入完成后不会保存已销毁临时根节点 UUID；普通�
 - Frame Prefab 导入后提示“已创建并打开预制体”；
 - 不再显示“导入到当前选中节点”选项；
 - 矢量节点在树中显示“PNG Sprite”，避免误解为父层整层合并；
+- 子树压平只显示“PNG 整层”，不再提供结果相同的“合并子树”选项；
+- PNG 整层节点的类型下拉只显示实际可生成的 `Sprite` / `Button`；切回“生成”时恢复原有 Node/Layout/ScrollView 等类型；
+- `ignore` 明确忽略整棵子树；九宫/三宫勾选会在面板有效动作中强制 PNG 并抑制后代，避免界面统计与实际 SceneSpec 不一致；
 - 错误提示必须包含可定位的阶段和资源路径，但不能泄露 Token。
 
 ## 12. 已知问题与诊断手册
@@ -426,6 +441,10 @@ Cocos Creator 3.8.7 的 `ScrollView.content` 类型是 `Node`，而 `ScrollView.
 
 历史智能规则会仅凭 `list_` / `scroll_` 名称把普通 Frame 或 Instance 改造成 ScrollView，再把左上锚点的 view 放在中心锚点父节点的 `(0, 0)`，导致整个子树向右、向下偏移半个视口尺寸。当前规则只接受 Figma 已知的滚动方向枚举；`NONE`、未知值、`clipsContent` 和名称都不会自动改变结构。实际 ScrollView 的 view/content 也已改为中心锚点并保留左上边界，因此手动选择 ScrollView 时不会再次出现同类偏移；增量导入会清除旧误判或旧报错中留下的空 view/content、`__FigmaContent` 辅助层。
 
+### 12.12 结构化资源节点为何自动变成 PNG 整层
+
+智能模式把 `img_hongbao_bg_mini`、`panel_reward_bg` 这类至少包含两个 ASCII 段的严格 `snake_case` 名称视为设计素材边界。当它不是导入根节点，且直接可见子层出现 `Group 91`、`Frame 92`、`Ellipse 5`、中文散名等非结构化名称时，插件在当前边界收口为 PNG 整层。最外层节点、隐藏噪声、没有子层的节点和 Figma 明确声明滚动方向的 ScrollView 不触发；如果每个直接可见子层也都是结构化名称，则继续分层。选择 PNG 整层后，最终 kind 会收口为 Sprite（Button 保留 Button + Sprite），不会生成空 Layout 或 ScrollView。
+
 ## 13. 测试与质量门禁
 
 标准命令：
@@ -440,16 +459,21 @@ npm test
 - Figma URL 和 node id 解析；
 - 多页面文档解析和缺失边界保护；
 - 节点动作、矢量/基础形状 PNG 策略和安全 Layout 降级；
+- 结构化命名识别、非根混乱子树 PNG 收口、旧 merge/svg 动作归一和面板选项；
+- 嵌套 PNG 边界的动作恢复与后代抑制重算；
 - 三宫/九宫候选与真实边界；
 - PNG/SVG、渐变和本地同名资源；
 - 字体匹配；
 - Cocos Sprite/Mask/ScrollView/Prefab 根布局；
 - 普通节点与 ScrollView 辅助节点的中心锚点、内容扩容和坐标补偿；
 - 增量导入时 Mask/Graphics、Label/LabelOutline 的延迟销毁生命周期；
+- 分层节点改为 PNG 整层时的旧映射子节点清理与手工子节点保留；
+- 旧 ScrollView 直接改为 PNG 整层时的辅助层清理、手工节点迁移和旧 SceneSpec 兼容；
+- 保留映射回填、节点恢复不重复、单根/多根双向切换及失败回滚；
 - Token 加密和明文不落盘；
 - 缓存哈希键不泄露 fileKey/nodeId。
 
-当前基线：`51` 项测试通过（截至 2026-08-11）。
+当前基线：`66` 项测试通过（截至 2026-08-14）。
 
 ## 14. 发布与版本策略
 
@@ -474,6 +498,8 @@ npm test
 | 同名资源复用首个命中 | 避免后缀泛滥和重复资源 | 确定性查找，不追加随机名 |
 | ScrollView 使用标准三层结构 | 与 Cocos 常用结构兼容 | ScrollView → view → content，三层均为中心锚点 |
 | ScrollView 智能识别只接受已知滚动枚举 | 名称、裁剪和未知属性不代表交互滚动，误判会改写层级和坐标 | 横向、纵向或双向滚动枚举才自动映射；其余可手动选择 |
+| 混乱设计层在最近的结构化边界收口 | 自动生成的 Group/Frame/形状层通常没有运行时编辑价值，继续分层会制造大量噪声 | 非根严格 snake_case 容器遇到未结构化直接可见子层时使用 PNG 整层；显式 ScrollView 除外 |
+| 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
 
@@ -566,6 +592,17 @@ npm test
 - 滚动方向按已知枚举、忽略大小写解析，未知值不会触发智能 ScrollView；手动 ScrollView 的未知方向安全回退为纵向。
 - 新增真实列表命名、中心锚点、大内容坐标合成、横纵单轴边界、Layout 对齐与变化、结构组件复用、延迟销毁渲染切换、异常方向、旧辅助节点清理及旧组件迁移回归测试；51 项测试通过。
 
+### 2026-08-14 · `1.0.26`
+
+- 新增严格多段 `snake_case` 资源边界识别：非最外层容器只要存在未结构化的直接可见子层，智能模式就在最近边界自动设置 PNG 整层；隐藏噪声和显式 ScrollView 不触发。
+- 删除面板“合并子树”，三/九 Rectangle 自动收口改用 `render`；旧 `merge/svg` 请求仍在主进程入口兼容归一为 PNG 整层。
+- 面板模型新增可测试的智能动作、动作选项和终端抑制重算；RECTANGLE、ELLIPSE 与其他矢量类型统一显示“PNG Sprite”，PNG 整层只显示实际有效的 Sprite/Button 类型。
+- `ignore` 统一为忽略整棵子树；九宫/三宫选择参与有效动作重算；Auto 按钮在 PNG 模式下与主进程一致显示 Button + Sprite。
+- PNG 整层的最终节点类型强制收口为 Sprite，Button 保留 Button + Sprite，不再生成空 Layout/ScrollView。
+- 增量导入从分层或旧 ScrollView 切换为 PNG 整层时自动清理旧映射子树，同时迁移并保留用户手工添加的未映射子节点；保留映射会继续写回，Scene Script 同时增加旧动作的独立防御性归一。
+- 修复单根/多根双向切换、自父循环、旧包装残留和失败导入回滚；迁移 `view` 直属节点及背景辅助层手工后代时保持世界坐标。
+- 新增命名边界、根节点保护、隐藏噪声、隐藏三/九宫、ScrollView 保护、嵌套终端抑制、旧动作兼容、面板选项、根模式切换和增量清理回归测试；66 项测试通过。
+
 ### `1.0.14` / `2f92870`
 
 - Figma `RECTANGLE`、`ELLIPSE` 等基础形状加入矢量 PNG 路径。
@@ -617,5 +654,7 @@ npm test
 - Frame Prefab 命名、根节点 UITransform、Canvas 居中和自动打开已形成完整流程。
 - 普通导入不读取当前选中节点，减少误导入和残影风险。
 - 矢量与基础形状默认 PNG Sprite，不依赖 `cc.Graphics`。
+- 智能模式可在最近的结构化资源边界自动收口混乱设计子层，且不会压平最外层或显式 ScrollView。
+- 子树压平对用户仅暴露“PNG 整层”，旧动作值在入口兼容归一。
 - 资源、缓存、字体、三/九宫和滚动节点均有明确实现入口和测试覆盖。
 - 仍需在真实 Cocos Creator 3.8.7 中持续回归：连续导入、当前 Prefab 已有未保存修改、Asset DB 慢导入、旧版本残留场景缓存。
