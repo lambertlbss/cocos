@@ -48,6 +48,10 @@ export function isNamedSliceGroup(node: FigmaNode): boolean {
         && node.children.every((child) => SLICE_RECTANGLE_NAME.test(child.name.trim()));
 }
 
+export function hasManualExport(node: Pick<FigmaNode, 'hasExportSettings'>): boolean {
+    return node.hasExportSettings;
+}
+
 function hasVisibleImage(node: FigmaNode): boolean {
     return node.fills.some((fill) => fill.visible !== false && fill.type === 'IMAGE');
 }
@@ -124,14 +128,15 @@ export function inferAction(node: FigmaNode): ImportAction {
     if (!node.visible) {
         return 'ignore';
     }
-    if (isNamedSliceGroup(node)) {
-        return 'render';
-    }
     if (node.type === 'TEXT') {
         // Text remains an editable Cocos Label. Even when Figma reports fills,
-        // shadows, or other paint data, exporting a bitmap would lose the text
-        // semantics and make the imported UI impossible to edit.
+        // shadows, export settings, or other paint data, exporting a bitmap
+        // would lose the text semantics and make the imported UI impossible
+        // to edit.
         return 'generate';
+    }
+    if (hasManualExport(node) || isNamedSliceGroup(node)) {
+        return 'render';
     }
     if (CONTAINER_TYPES.has(node.type)) {
         if (node.children.length) {
@@ -172,9 +177,16 @@ export function isPatchCandidate(node: FigmaNode): boolean {
     return isNamedSliceGroup(node) || Boolean(analyzeSliceGrid(node));
 }
 
-function warningFor(node: FigmaNode, renderMessySubtree: boolean): string | undefined {
+function warningFor(
+    node: FigmaNode,
+    renderManualExportSubtree: boolean,
+    renderMessySubtree: boolean,
+): string | undefined {
     if (!node.absoluteBoundingBox) {
         return '缺少边界信息，将按 0×0 导入';
+    }
+    if (renderManualExportSubtree) {
+        return '检测到 Figma Export 设置，智能模式将按 PNG 整层导入；Figma 的格式、后缀和倍率不沿用';
     }
     if (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode)) {
         return `混合模式 ${node.blendMode} 将近似处理`;
@@ -202,9 +214,12 @@ function warningFor(node: FigmaNode, renderMessySubtree: boolean): string | unde
 function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
     const frame = node.absoluteBoundingBox;
     const inferredAction = inferAction(node);
+    const renderManualExportSubtree = inferredAction !== 'ignore'
+        && node.type !== 'TEXT'
+        && hasManualExport(node);
     const renderMessySubtree = shouldRenderMessySubtree(node, isRoot);
     const renderSubtree = inferredAction !== 'ignore'
-        && (isNamedSliceGroup(node) || renderMessySubtree);
+        && (renderManualExportSubtree || isNamedSliceGroup(node) || renderMessySubtree);
     return {
         id: node.id,
         name: node.name,
@@ -216,7 +231,9 @@ function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
         kind: inferKind(node),
         renderSubtree,
         patchCandidate: isPatchCandidate(node),
-        warning: inferredAction === 'ignore' ? undefined : warningFor(node, renderMessySubtree),
+        warning: inferredAction === 'ignore'
+            ? undefined
+            : warningFor(node, renderManualExportSubtree, renderMessySubtree),
         children: node.children.map((child) => toTree(child, false)),
     };
 }

@@ -80,6 +80,8 @@ export interface FigmaNode {
     strokeWeight: number;
     strokeAlign?: string;
     effects: FigmaEffect[];
+    /** 当前节点是否在 Figma Export 面板中配置过至少一个导出项。 */
+    hasExportSettings: boolean;
     characters?: string;
     style?: FigmaTextStyle;
     layoutMode?: string;

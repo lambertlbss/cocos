@@ -7,6 +7,7 @@ const {
     inferAction,
     inferCocosLayoutMode,
     inferKind,
+    hasManualExport,
     isNamedSliceGroup,
     isPatchCandidate,
     isStructuredNodeName,
@@ -52,6 +53,98 @@ test('chooses editable Cocos components where fidelity is safe', () => {
     assert.equal(inferKind(node({ overflowDirection: 'vertical_scrolling' })), 'scrollView');
     assert.equal(inferKind(node({ overflowDirection: 'none' })), 'node');
     assert.equal(inferKind(node({ overflowDirection: 'UNKNOWN' })), 'node');
+});
+
+test('treats manual Figma Export as an explicit PNG whole-layer boundary', () => {
+    const exportSettings = [{
+        format: 'PDF',
+        suffix: '-print',
+        constraint: { type: 'WIDTH', value: 512 },
+    }];
+    const structuredRoot = node({
+        name: 'panel_export',
+        exportSettings,
+        children: [{
+            id: 'export:1',
+            name: 'panel_content',
+            type: 'FRAME',
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+        }],
+    });
+    const [rootTree] = analyzeTree([structuredRoot]);
+
+    assert.equal(hasManualExport(structuredRoot), true);
+    assert.equal(inferAction(structuredRoot), 'render');
+    assert.equal(rootTree.action, 'render');
+    assert.equal(rootTree.renderSubtree, true);
+    assert.match(rootTree.warning, /Figma Export.*PNG 整层/);
+
+    const scrollHost = node({
+        name: 'panel_host',
+        children: [{
+            id: 'export:2',
+            name: 'scroll_rewards',
+            type: 'FRAME',
+            overflowDirection: 'VERTICAL_SCROLLING',
+            exportSettings,
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+            children: [{
+                id: 'export:3',
+                name: 'panel_content',
+                type: 'FRAME',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 200 },
+            }],
+        }],
+    });
+    const scrollTree = analyzeTree([scrollHost])[0].children[0];
+    assert.equal(scrollTree.kind, 'scrollView');
+    assert.equal(scrollTree.action, 'render');
+    assert.equal(scrollTree.renderSubtree, true);
+    assert.match(scrollTree.warning, /PNG 整层/);
+
+    const hidden = node({
+        visible: false,
+        exportSettings,
+        children: [{
+            id: 'export:4',
+            name: 'panel_content',
+            type: 'FRAME',
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+        }],
+    });
+    const [hiddenTree] = analyzeTree([hidden]);
+    assert.equal(inferAction(hidden), 'ignore');
+    assert.equal(hiddenTree.action, 'ignore');
+    assert.equal(hiddenTree.renderSubtree, false);
+    assert.equal(hiddenTree.warning, undefined);
+
+    const exportedText = node({
+        type: 'TEXT',
+        characters: 'Editable text',
+        exportSettings,
+        absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 20 },
+    });
+    const [textTree] = analyzeTree([exportedText]);
+    assert.equal(hasManualExport(exportedText), true);
+    assert.equal(inferAction(exportedText), 'generate');
+    assert.equal(textTree.action, 'generate');
+    assert.equal(textTree.renderSubtree, false);
+
+    const emptyExport = node({
+        name: 'panel_plain',
+        exportSettings: [],
+        children: [{
+            id: 'export:5',
+            name: 'panel_content',
+            type: 'FRAME',
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+        }],
+    });
+    const [emptyTree] = analyzeTree([emptyExport]);
+    assert.equal(hasManualExport(emptyExport), false);
+    assert.equal(inferAction(emptyExport), 'generate');
+    assert.equal(emptyTree.action, 'generate');
+    assert.equal(emptyTree.renderSubtree, false);
 });
 
 test('does not mistake ordinary list-named layout containers for ScrollViews', () => {

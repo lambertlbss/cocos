@@ -143,6 +143,7 @@ export function parseNode(value: unknown): FigmaNode | null {
         strokeWeight: Math.max(0, numberValue(input.strokeWeight)),
         strokeAlign: stringValue(input.strokeAlign) || undefined,
         effects: arrayValue(input.effects).map(parseEffect),
+        hasExportSettings: arrayValue(input.exportSettings).length > 0,
         characters: typeof input.characters === 'string' ? input.characters : undefined,
         style: input.style ? parseTextStyle(input.style) : undefined,
         layoutMode: stringValue(input.layoutMode) || undefined,

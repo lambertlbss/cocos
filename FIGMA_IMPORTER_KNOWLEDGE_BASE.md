@@ -2,9 +2,9 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.26`
+> 当前插件版本：`1.0.27`
 > 当前文档状态：持续维护  
-> 最近审计：2026-08-14
+> 最近审计：2026-08-20
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
 
 ## 1. 文档目的
@@ -157,9 +157,10 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 - `absoluteBoundingBox`、旋转、圆角、约束；
 - `fills`、`strokes`、`effects`、透明度；
 - `children`、Auto Layout 属性、溢出方向；
+- `hasExportSettings`：由原始 `exportSettings` 是否为非空数组派生；
 - 文本内容与 `style.fontFamily`。
 
-`parseDocument()` 还建立 `nodeById` 和字体集合，主进程后续按 node id 获取图片和资源。
+`parseDocument()` 还建立 `nodeById` 和字体集合，主进程后续按 node id 获取图片和资源。插件只保留“是否人工设置过 Export”这一策略信号，不保留未使用的格式、后缀和尺寸约束元数据。
 
 ### 5.2 节点策略类型
 
@@ -199,9 +200,11 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 
 ### 6.2 节点动作决策
 
-默认决策在 `analyzer.ts`，主进程的 `decisionForNode()` 会再次做不可覆盖的安全约束：
+智能默认决策在 `analyzer.ts`，优先级和规则如下。主进程的 `decisionForNode()` 只会对未选择 `ignore` 的 TEXT 与矢量动作再次收紧；隐藏与手动 Export 均是可由用户修改的智能默认策略：
 
-- `TEXT` 始终为 `generate`，导入为 Cocos `Label`，不导出文字切图；
+- `TEXT` 除显式 `ignore` 外始终为 `generate`，导入为 Cocos `Label`，不导出文字切图；
+- 隐藏节点在智能模式中默认 `ignore`；可见非 `TEXT` 节点只要原始 `exportSettings` 是非空数组，就视为设计者显式指定的资源边界，智能模式默认 `render` 为 PNG 整层并抑制其设计子树；
+- 手动 Export 规则同样作用于导入根节点和明确滚动方向的 ScrollView，不受结构化命名自动规则的根节点/ScrollView 保护限制；缺失、空数组或非数组 Export 设置不触发；
 - Figma 矢量类型 `VECTOR`、`BOOLEAN_OPERATION`、`STAR`、`LINE`、`REGULAR_POLYGON`、`RECTANGLE`、`ELLIPSE` 始终为 `render`；
 - 矢量节点最终为 PNG Sprite，不使用 `cc.Graphics` 近似任意路径；
 - 含子节点的 Frame/Group/Component/Instance 默认保留容器层级；
@@ -230,6 +233,8 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 5. 没有本地命中时才调用 Figma Images API；
 6. 下载图片写入项目缓存，再由 `AssetWriter` 生成项目资源和 SpriteFrame UUID；
 7. 同一项目输出目录下同名节点使用首次导入资源，不在文件名中追加随机 UUID 或倍率后缀。
+
+Figma Export 中的 format（JPG/PNG/SVG/PDF）、suffix 和 constraint（SCALE/WIDTH/HEIGHT）只用于表明设计者人工设置过资源边界。整层资源始终走插件统一的 PNG 路径，下载与缓存继续使用 `ImportSettings.scale`；默认值为 `1`，不会读取或叠加 Figma Export 自带倍率、目标宽度或目标高度。
 
 ### 6.4 场景构建
 
@@ -445,6 +450,12 @@ Cocos Creator 3.8.7 的 `ScrollView.content` 类型是 `Node`，而 `ScrollView.
 
 智能模式把 `img_hongbao_bg_mini`、`panel_reward_bg` 这类至少包含两个 ASCII 段的严格 `snake_case` 名称视为设计素材边界。当它不是导入根节点，且直接可见子层出现 `Group 91`、`Frame 92`、`Ellipse 5`、中文散名等非结构化名称时，插件在当前边界收口为 PNG 整层。最外层节点、隐藏噪声、没有子层的节点和 Figma 明确声明滚动方向的 ScrollView 不触发；如果每个直接可见子层也都是结构化名称，则继续分层。选择 PNG 整层后，最终 kind 会收口为 Sprite（Button 保留 Button + Sprite），不会生成空 Layout 或 ScrollView。
 
+### 12.13 Figma 手动 Export 为何自动变成 PNG 整层
+
+Figma 节点的 `exportSettings` 为非空数组，表示设计者明确把该节点当作可导出的资源边界。对可见非 `TEXT` 节点，智能模式因此默认选择“PNG 整层”并抑制其设计子树；这条显式意图规则不受结构化命名、是否为导入根节点或是否声明 ScrollView 滚动方向限制。隐藏节点在智能模式中仍默认 `ignore`，文字仍导入为可编辑 `Label`，缺失、空数组或非数组 Export 设置不会触发。
+
+插件不会照搬 Export 条目的输出细节。JPG/PNG/SVG/PDF、文件名后缀以及 SCALE/WIDTH/HEIGHT 约束都只用于确认“人工设置过 Export”；实际资源固定走 PNG，并使用插件导入倍率，默认 `1`。因此 Figma 中的 @2x、固定宽度或固定高度不会导致 Cocos 资源被二次缩放。
+
 ## 13. 测试与质量门禁
 
 标准命令：
@@ -460,6 +471,7 @@ npm test
 - 多页面文档解析和缺失边界保护；
 - 节点动作、矢量/基础形状 PNG 策略和安全 Layout 降级；
 - 结构化命名识别、非根混乱子树 PNG 收口、旧 merge/svg 动作归一和面板选项；
+- Figma Export 标记解析、显式 PNG 整层边界、根节点/ScrollView 生效以及 hidden/TEXT/空 Export 优先级；
 - 嵌套 PNG 边界的动作恢复与后代抑制重算；
 - 三宫/九宫候选与真实边界；
 - PNG/SVG、渐变和本地同名资源；
@@ -473,7 +485,7 @@ npm test
 - Token 加密和明文不落盘；
 - 缓存哈希键不泄露 fileKey/nodeId。
 
-当前基线：`66` 项测试通过（截至 2026-08-14）。
+当前基线：`68` 项测试通过（截至 2026-08-20）。
 
 ## 14. 发布与版本策略
 
@@ -482,9 +494,15 @@ npm test
 3. `npm test`；
 4. 在实际 Cocos Creator 3.8.7 项目重启插件验证；
 5. 更新本文档的变更记录；
-6. 提交中文变更说明并推送 `main`。
+6. 提交中文变更说明，并将同一个 `main` 提交推送到两个指定 Git 远端；两个远端都成功才算发布完成。
 
 版本递增原因：Cocos 可能继续加载旧主进程；版本变化可让面板检测到主进程/面板不一致并提示重启。
+
+### 14.1 双远端推送规则
+
+- 后续用户要求“推送”“传 Git”或发布时，必须把同一个提交分别推送到两个指定 Git 地址，不得只推一个远端后宣称完成；
+- 当前本地已确认 `origin` 为 `https://github.com/lambertlbss/cocos.git`；
+- 第二远端为 `dobest`：`https://code.dobest.com/Tools/cocos.git`。后续推送应依次验证 `origin/main` 与 `dobest/main` 都已接收同一提交。
 
 ## 15. 设计决策记录
 
@@ -499,6 +517,7 @@ npm test
 | ScrollView 使用标准三层结构 | 与 Cocos 常用结构兼容 | ScrollView → view → content，三层均为中心锚点 |
 | ScrollView 智能识别只接受已知滚动枚举 | 名称、裁剪和未知属性不代表交互滚动，误判会改写层级和坐标 | 横向、纵向或双向滚动枚举才自动映射；其余可手动选择 |
 | 混乱设计层在最近的结构化边界收口 | 自动生成的 Group/Frame/形状层通常没有运行时编辑价值，继续分层会制造大量噪声 | 非根严格 snake_case 容器遇到未结构化直接可见子层时使用 PNG 整层；显式 ScrollView 除外 |
+| Figma 手动 Export 作为显式资源边界 | 设计者已明确声明节点应整体输出，继续拆分会违背设计语义 | 可见非 TEXT 节点默认 PNG 整层，根节点和显式 ScrollView 也生效；格式、后缀和尺寸约束不改变插件 PNG/倍率策略 |
 | 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
@@ -506,6 +525,14 @@ npm test
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-20 · `1.0.27`
+
+- 从 Figma 原始 `exportSettings` 派生手动 Export 标记；可见非文字节点只要 Export 数组非空，智能模式即默认 PNG 整层并抑制设计子树。
+- 手动 Export 作为显式意图可作用于导入根节点和明确滚动方向的 ScrollView；隐藏节点仍在智能模式中默认忽略，文字仍为可编辑 Label，空或非数组 Export 不触发。
+- Export 格式、后缀和 SCALE/WIDTH/HEIGHT 约束不进入插件数据模型；实际资源固定走 PNG，并使用插件导入倍率（默认 `1`）。
+- 补充解析、节点策略及边界优先级回归测试；`68` 项测试通过。
+- 记录双远端发布要求：未来同一提交必须推送到两个 Git 地址，全部成功后才可报告推送完成。
 
 ### 2026-08-10 · 知识库初始化
 
@@ -655,6 +682,8 @@ npm test
 - 普通导入不读取当前选中节点，减少误导入和残影风险。
 - 矢量与基础形状默认 PNG Sprite，不依赖 `cc.Graphics`。
 - 智能模式可在最近的结构化资源边界自动收口混乱设计子层，且不会压平最外层或显式 ScrollView。
+- Figma 手动 Export 已形成更高优先级的显式资源边界：可见非文字节点自动 PNG 整层，根节点和显式 ScrollView 同样生效；隐藏、文字与空 Export 的边界行为明确。
+- Figma Export 的格式、后缀及尺寸约束不会改变插件输出：整层资源固定 PNG，倍率继续由插件设置控制并默认 `1`。
 - 子树压平对用户仅暴露“PNG 整层”，旧动作值在入口兼容归一。
 - 资源、缓存、字体、三/九宫和滚动节点均有明确实现入口和测试覆盖。
 - 仍需在真实 Cocos Creator 3.8.7 中持续回归：连续导入、当前 Prefab 已有未保存修改、Asset DB 慢导入、旧版本残留场景缓存。

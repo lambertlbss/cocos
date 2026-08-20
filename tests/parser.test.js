@@ -61,3 +61,36 @@ test('guards missing bounds and sorts gradient stops', () => {
     assert.equal(node.absoluteBoundingBox, undefined);
     assert.deepEqual(node.fills[0].gradientStops.map((stop) => stop.position), [0, 1]);
 });
+
+test('records manual Figma Export presence without retaining unused format metadata', () => {
+    const exported = parseNode({
+        id: '2:1',
+        name: 'Exported frame',
+        type: 'FRAME',
+        exportSettings: [{
+            format: 'SVG',
+            suffix: '@2x',
+            constraint: { type: 'SCALE', value: 2 },
+        }],
+    });
+    const empty = parseNode({
+        id: '2:2',
+        name: 'Empty export settings',
+        type: 'FRAME',
+        exportSettings: [],
+    });
+    const malformed = parseNode({
+        id: '2:3',
+        name: 'Malformed export settings',
+        type: 'FRAME',
+        exportSettings: { format: 'PNG' },
+    });
+
+    assert.ok(exported);
+    assert.ok(empty);
+    assert.ok(malformed);
+    assert.equal(exported.hasExportSettings, true);
+    assert.equal(empty.hasExportSettings, false);
+    assert.equal(malformed.hasExportSettings, false);
+    assert.equal(Object.hasOwn(exported, 'exportSettings'), false);
+});

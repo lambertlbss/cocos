@@ -51,6 +51,8 @@
 
 “PNG 整层”是唯一的子树压平动作，旧版“合并子树”配置会自动兼容为“PNG 整层”。智能模式默认保留容器层级，但会识别设计素材边界：非最外层容器自身为严格的多段 `snake_case`（如 `img_hongbao_bg_mini`），且至少一个直接可见子层不是同类结构化命名（如 `Group 91`、`Frame 92`、`Ellipse 5`）时，在该容器处自动改为 PNG 整层。只检查直接子层，最外层节点、隐藏噪声和 Figma 明确设置的 ScrollView 不参与此规则，避免祖先级联压平或破坏滚动功能。分层高保真仍保留容器，只渲染叶子节点。
 
+Figma 中手动配置了非空 Export 设置的可见非文字节点，会被视为设计者明确指定的资源边界：智能模式默认选择“PNG 整层”并抑制其设计子树。该显式规则同样作用于最外层节点和 Figma 明确设置的 ScrollView；隐藏节点在智能模式下仍默认“忽略”，文字节点仍保持可编辑 `Label`，空 Export 数组不触发。Export 中的 JPG/PNG/SVG/PDF 格式、后缀及 SCALE/WIDTH/HEIGHT 约束仅用于表明“人工设置过 Export”，插件实际统一请求 PNG，并使用插件“导入倍率”（默认 `1`），不会套用 Figma Export 自带倍率。
+
 可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪只映射为 `Mask`；智能模式只有在 Figma 明确设置滚动溢出方向时才映射为 `ScrollView`，`list_`、`scroll_` 等业务命名不会擅自改变节点层级。需要预留运行时滚动但设计稿没有设置溢出时，可在节点策略中手动选择 `ScrollView`。Figma Constraints 暂不自动映射为 `Widget`，导入后由用户在 Cocos 中手动配置。
 
 ## Token 安全
