@@ -106,6 +106,31 @@
           "getPreview"
         ]
       },
+      "roundtrip-detect": {
+        "methods": [
+          "roundtripDetect"
+        ]
+      },
+      "roundtrip-preview": {
+        "methods": [
+          "roundtripPreview"
+        ]
+      },
+      "roundtrip-pair": {
+        "methods": [
+          "roundtripPair"
+        ]
+      },
+      "roundtrip-apply": {
+        "methods": [
+          "roundtripApply"
+        ]
+      },
+      "roundtrip-cancel": {
+        "methods": [
+          "roundtripCancel"
+        ]
+      },
       "import-selection": {
         "methods": [
           "importSelection"

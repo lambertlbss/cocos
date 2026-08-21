@@ -28,6 +28,33 @@ interface DocumentDto {
     fontAssets?: FontAssetOption[];
 }
 
+interface RoundtripDetectDto {
+    figmaVersion: string;
+    managedRoots: Array<{ nodeId: string; name: string; prefabUuid?: string; error?: string }>;
+    selectedRootId?: string;
+}
+
+interface RoundtripPreviewDto {
+    previewToken?: string;
+    pairToken?: string;
+    pairRequired: boolean;
+    pairEligible: boolean;
+    figmaVersion: string;
+    surfaceId: string;
+    prefabUuid: string;
+    assetUrl: string;
+    ledgerGeneration: number;
+    blockers: string[];
+    plan: {
+        apply: unknown[];
+        preserveCocos: unknown[];
+        converged: unknown[];
+        conflicts: unknown[];
+        unsupported: unknown[];
+        readonlyUnchanged: unknown[];
+    };
+}
+
 interface PanelState {
     document: DocumentDto | null;
     settings: ImportSettings;
@@ -48,6 +75,8 @@ interface PanelState {
 let panelHost: any = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let importButtonResetTimer: ReturnType<typeof setTimeout> | null = null;
+let roundtripPreviewToken: string | undefined;
+let roundtripPairToken: string | undefined;
 
 const state: PanelState = {
     document: null,
@@ -308,6 +337,11 @@ function setBusy(value: boolean): void {
     element<HTMLButtonElement>('#save-token').disabled = value;
     element<HTMLButtonElement>('#pick-asset-folder').disabled = value;
     element<HTMLButtonElement>('#pick-prefab-folder').disabled = value;
+    element<HTMLButtonElement>('#roundtrip-detect').disabled = value;
+    element<HTMLButtonElement>('#roundtrip-preview').disabled = value
+        || element<HTMLSelectElement>('#roundtrip-root').value === '';
+    element<HTMLButtonElement>('#roundtrip-pair').disabled = value || !roundtripPairToken;
+    element<HTMLButtonElement>('#roundtrip-apply').disabled = value || !roundtripPreviewToken;
     for (let index = 0; index < 3; index += 1) {
         element<HTMLButtonElement>(`#pick-local-resource-folder-${index}`).disabled = value;
         element<HTMLButtonElement>(`#clear-local-resource-folder-${index}`).disabled = value;
@@ -316,6 +350,40 @@ function setBusy(value: boolean): void {
         || !state.document
         || !state.runtimeCompatible;
     element('#cancel-import').classList.toggle('is-hidden', !value);
+}
+
+function resetRoundtripTokens(): void {
+    roundtripPreviewToken = undefined;
+    roundtripPairToken = undefined;
+    element<HTMLButtonElement>('#roundtrip-pair').disabled = true;
+    element<HTMLButtonElement>('#roundtrip-apply').disabled = true;
+}
+
+function roundtripSource(): string | null {
+    const source = element<HTMLInputElement>('#source-url').value.trim();
+    if (!source) {
+        showToast('请输入 Figma 文件或节点链接。', true);
+        return null;
+    }
+    return source;
+}
+
+function renderRoundtripPreview(preview: RoundtripPreviewDto): void {
+    roundtripPreviewToken = preview.previewToken;
+    roundtripPairToken = preview.pairToken;
+    const lines = [
+        `目标：${preview.assetUrl}`,
+        `Prefab：${preview.prefabUuid}`,
+        `Surface：${preview.surfaceId} · Figma ${preview.figmaVersion} · Ledger ${preview.ledgerGeneration}`,
+        `将修改 ${preview.plan.apply.length} 项 · 保留 Cocos ${preview.plan.preserveCocos.length} 项 · 已收敛 ${preview.plan.converged.length} 项`,
+        `冲突 ${preview.plan.conflicts.length} 项 · 不支持 ${preview.plan.unsupported.length} 项 · 只读未改 ${preview.plan.readonlyUnchanged.length} 项`,
+        preview.pairRequired
+            ? preview.pairEligible ? '首次使用：证据一致，请先确认配对 Surface（只写 ledger，不改 Prefab）。' : '首次使用：Pair 证据不一致，需从当前 Prefab 重新导出。'
+            : preview.blockers.length ? `阻断：${preview.blockers.join(', ')}` : '预览通过，可原子应用整个不可变计划。',
+    ];
+    element('#roundtrip-summary').textContent = lines.join('\n');
+    element<HTMLButtonElement>('#roundtrip-pair').disabled = !roundtripPairToken;
+    element<HTMLButtonElement>('#roundtrip-apply').disabled = !roundtripPreviewToken;
 }
 
 function updateTargetHint(): void {
@@ -708,6 +776,93 @@ function bindEvents(): void {
         showToast('已清除保存的 Figma 凭据。');
     });
 
+    element('#roundtrip-detect').addEventListener('click', async () => {
+        const source = roundtripSource();
+        if (!source) return;
+        resetRoundtripTokens();
+        setBusy(true);
+        try {
+            const detected = await request<RoundtripDetectDto>('roundtrip-detect', source);
+            const select = element<HTMLSelectElement>('#roundtrip-root');
+            select.replaceChildren();
+            for (const root of detected.managedRoots) {
+                const option = document.createElement('option');
+                option.value = root.nodeId;
+                option.textContent = root.error
+                    ? `${root.name} · 协议损坏`
+                    : `${root.name} · ${root.prefabUuid ?? '未知 Prefab'}`;
+                option.disabled = Boolean(root.error);
+                select.append(option);
+            }
+            select.value = detected.selectedRootId
+                ?? detected.managedRoots.find((root) => !root.error)?.nodeId
+                ?? '';
+            select.disabled = detected.managedRoots.length === 0;
+            element('#roundtrip-summary').textContent = detected.managedRoots.length
+                ? `检测到 ${detected.managedRoots.length} 个 managed root · Figma ${detected.figmaVersion}。选择目标后生成只读预览。`
+                : '未检测到 managed root。';
+        } catch (error) {
+            showToast(errorMessage(error, 'Round-trip 检测失败。'), true);
+        } finally {
+            setBusy(false);
+        }
+    });
+
+    element('#roundtrip-root').addEventListener('change', () => {
+        resetRoundtripTokens();
+        element<HTMLButtonElement>('#roundtrip-preview').disabled =
+            element<HTMLSelectElement>('#roundtrip-root').value === '';
+    });
+
+    element('#roundtrip-preview').addEventListener('click', async () => {
+        const source = roundtripSource();
+        const rootId = element<HTMLSelectElement>('#roundtrip-root').value;
+        if (!source || !rootId) return;
+        resetRoundtripTokens();
+        setBusy(true);
+        try {
+            renderRoundtripPreview(await request<RoundtripPreviewDto>('roundtrip-preview', source, rootId));
+        } catch (error) {
+            showToast(errorMessage(error, 'Round-trip 预览失败。'), true);
+        } finally {
+            setBusy(false);
+        }
+    });
+
+    element('#roundtrip-pair').addEventListener('click', async () => {
+        if (!roundtripPairToken) return;
+        const token = roundtripPairToken;
+        resetRoundtripTokens();
+        setBusy(true);
+        try {
+            const paired = await request<{ generation: number; baselineHash: string }>('roundtrip-pair', token);
+            element('#roundtrip-summary').textContent = `配对完成 · Ledger generation ${paired.generation}\nBaseline ${paired.baselineHash}\n请重新生成变更预览。`;
+            showToast('Surface 已配对；未修改 Prefab。');
+        } catch (error) {
+            showToast(errorMessage(error, 'Round-trip Pair 失败。'), true);
+        } finally {
+            setBusy(false);
+        }
+    });
+
+    element('#roundtrip-apply').addEventListener('click', async () => {
+        if (!roundtripPreviewToken) return;
+        const token = roundtripPreviewToken;
+        resetRoundtripTokens();
+        setBusy(true);
+        try {
+            const receipt = await request<{ txnId: string; prefabPostimageHash: string }>('roundtrip-apply', token);
+            element('#roundtrip-summary').textContent = `事务已提交 · ${receipt.txnId}\nPostimage ${receipt.prefabPostimageHash}\n请重新预览以确认 0 patch。`;
+            showToast('Round-trip 已原子应用到原 Prefab。');
+        } catch (error) {
+            showToast(errorMessage(error, 'Round-trip 应用失败，事务已回滚。'), true);
+        } finally {
+            setBusy(false);
+        }
+    });
+
+    element('#roundtrip-cancel').addEventListener('click', () => request('roundtrip-cancel'));
+
     element('#fetch-document').addEventListener('click', async () => {
         const source = element<HTMLInputElement>('#source-url').value.trim();
         if (!source) {
@@ -732,6 +887,7 @@ function bindEvents(): void {
             element<HTMLButtonElement>('#fetch-document').click();
         }
     });
+    element<HTMLInputElement>('#source-url').addEventListener('input', resetRoundtripTokens);
     element('#pick-asset-folder').addEventListener('click', async () => {
         try {
             const current = element<HTMLInputElement>('#asset-folder').value;

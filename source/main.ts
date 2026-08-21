@@ -18,6 +18,9 @@ import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
 import { TokenVault } from './security/token-vault';
+import { RoundtripService } from './roundtrip/service';
+import { recoverInterruptedTransactions } from './roundtrip/recovery';
+import { editorReimporter } from './roundtrip/transaction';
 import {
     DEFAULT_SETTINGS,
     type DocumentSession,
@@ -37,7 +40,9 @@ import {
 const vault = new TokenVault(packageJSON.name);
 let activeDocument: DocumentSession | null = null;
 let activeController: AbortController | null = null;
+let roundtripController: AbortController | null = null;
 let settingsCache: ImportSettings | null = null;
+let roundtripRecoveryBlocker: string | null = null;
 
 interface Decision {
     action: ImportAction;
@@ -167,8 +172,28 @@ async function saveSettings(value: unknown): Promise<ImportSettings> {
     return settingsCache;
 }
 
-async function client(): Promise<FigmaClient> {
-    return new FigmaClient(await vault.get(), activeController?.signal);
+async function client(signal: AbortSignal | undefined = activeController?.signal): Promise<FigmaClient> {
+    return new FigmaClient(await vault.get(), signal);
+}
+
+async function roundtripService(signal?: AbortSignal): Promise<RoundtripService> {
+    const creatorVersion = (Editor.App as unknown as { version?: string }).version ?? 'unknown';
+    return new RoundtripService({
+        client: await client(signal),
+        projectRoot: Editor.Project.path,
+        creatorVersion,
+    });
+}
+
+function beginRoundtripOperation(): AbortController {
+    roundtripController?.abort();
+    const controller = new AbortController();
+    roundtripController = controller;
+    return controller;
+}
+
+function finishRoundtripOperation(controller: AbortController): void {
+    if (roundtripController === controller) roundtripController = null;
 }
 
 function beginOperation(): void {
@@ -1015,6 +1040,48 @@ export const methods: Record<string, (...args: any[]) => any> = {
         }
     },
 
+    async roundtripDetect(sourceUrl: string, explicitRootId?: string) {
+        const controller = beginRoundtripOperation();
+        try {
+            return await (await roundtripService(controller.signal)).detect(sourceUrl, explicitRootId);
+        } finally {
+            finishRoundtripOperation(controller);
+        }
+    },
+
+    async roundtripPreview(sourceUrl: string, explicitRootId?: string) {
+        const controller = beginRoundtripOperation();
+        try {
+            return await (await roundtripService(controller.signal)).preview(sourceUrl, explicitRootId);
+        } finally {
+            finishRoundtripOperation(controller);
+        }
+    },
+
+    async roundtripPair(pairToken: string) {
+        if (roundtripRecoveryBlocker) throw new Error(roundtripRecoveryBlocker);
+        const controller = beginRoundtripOperation();
+        try {
+            return await (await roundtripService(controller.signal)).pair(pairToken);
+        } finally {
+            finishRoundtripOperation(controller);
+        }
+    },
+
+    async roundtripApply(previewToken: string) {
+        if (roundtripRecoveryBlocker) throw new Error(roundtripRecoveryBlocker);
+        const controller = beginRoundtripOperation();
+        try {
+            return await (await roundtripService(controller.signal)).apply(previewToken);
+        } finally {
+            finishRoundtripOperation(controller);
+        }
+    },
+
+    roundtripCancel() {
+        roundtripController?.abort();
+    },
+
     async importSelection(request: ImportRequest) {
         return performImport(request);
     },
@@ -1026,6 +1093,16 @@ export const methods: Record<string, (...args: any[]) => any> = {
 
 export async function load(): Promise<void> {
     await vault.initialize();
+    try {
+        const recovered = await recoverInterruptedTransactions(Editor.Project.path, editorReimporter);
+        const active = recovered.filter((result) => result.status === 'active-owner');
+        roundtripRecoveryBlocker = active.length
+            ? `检测到 ${active.length} 个仍由活动进程持有的 Round-trip 事务，暂时禁止 Pair/Apply。`
+            : null;
+    } catch (error) {
+        roundtripRecoveryBlocker = `Round-trip 启动恢复失败：${error instanceof Error ? error.message : '未知错误'}`;
+        console.error(roundtripRecoveryBlocker);
+    }
 }
 
 export function unload(): void {

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "namespace": "cocosfigmabridge",
+  "generatedFor": "cocos-prefab-to-figma-plugin@0.9.0+roundtrip",
+  "files": [
+    { "path": "src/shared/canonical-json.ts", "sha256": "sha256:3ecfb050e07e670b3fe99ba9e4a2df55e3c19579f3b653164605c14ac14d2530" },
+    { "path": "src/shared/roundtrip-protocol.ts", "sha256": "sha256:8416cd941f17a6c750a73d8f8946454650d5bdb15bc0358c9809aad2d085225f" },
+    { "path": "src/shared/geometry-roundtrip.ts", "sha256": "sha256:75f5f1f29a5ff47a5027a54b342854c3fe016c276b13d46399725ee223c532f6" },
+    { "path": "src/shared/roundtrip-safety.ts", "sha256": "sha256:7884e7be38d7e5893cc4db92b8d3a91c0e72e8c71d4318928181fabb5fe72f41" },
+    { "path": "tests/fixtures/roundtrip/schema/roundtrip-v1.schema.json", "sha256": "sha256:479ec67852d759a6e1cc24cc810b4bb7c669b66d71044540beb587013ee15e87" },
+    { "path": "tests/fixtures/roundtrip/schema/diagnostic-codes.json", "sha256": "sha256:98c816a7f6079f4ebb992836d3221d56d4cf4d1eeaae4973994af33a2805a2ff" },
+    { "path": "tests/fixtures/roundtrip/schema/protocol-cases.json", "sha256": "sha256:18cb4f7cef91b142e3e097bd7f41be4d0696bfbaa6cfb3ccca22c47868f2cb31" },
+    { "path": "tests/fixtures/roundtrip/canonical/hash-vectors.json", "sha256": "sha256:e0ece6a0bf6cccacfcd7a3e46a80c32240f6c4bbc9ff4cd36538dbe3de78aa1f" },
+    { "path": "tests/fixtures/roundtrip/geometry/geometry-v1.md", "sha256": "sha256:3a1cf5803f887ad7bb2635bcf6e56eea4c00b804b4037597bb17719b96534133" },
+    { "path": "tests/fixtures/roundtrip/geometry/vectors.json", "sha256": "sha256:4411edce4d836f90a248c938da7329eec4b648d0bd98c5fa481c9060ab44718c" },
+    { "path": "tests/fixtures/roundtrip/creator-3.8.7/roundtrip-fixture.prefab", "sha256": "sha256:812c36076ee992e65f8ccbe98e44a6a6cfd0c429708d0f2e4ebb8e880ddde079" },
+    { "path": "tests/fixtures/roundtrip/creator-3.8.7/roundtrip-fixture.prefab.meta", "sha256": "sha256:dd2e00e4a599a2d3ca7ff70afc5ed56acc10efc4063511d8ea324c69263b0fde" }
+  ],
+  "externalEvidence": {
+    "creator387": {
+      "status": "passed-basic-import-and-live-writer",
+      "evidence": "tests/fixtures/roundtrip/creator-3.8.7/evidence.json",
+      "scope": "isolated Prefab/meta import, UUID-addressed library output, transaction write, Editor.Message reimport, exact-byte restore"
+    },
+    "figmaDesktopReopen": "pending",
+    "figmaRestSharedPluginData": "pending",
+    "paintProjectionStability": "pending",
+    "readonlyProjectionStability": "pending"
+  }
+}

@@ -4,6 +4,11 @@ import { URL } from 'url';
 const API_BASE = 'https://api.figma.com';
 const MAX_RESPONSE_BYTES = 200 * 1024 * 1024;
 
+export function roundtripFilePath(fileKey: string): string {
+    const query = new URLSearchParams({ geometry: 'paths', plugin_data: 'shared' });
+    return `/v1/files/${encodeURIComponent(fileKey)}?${query.toString()}`;
+}
+
 export class CancelledError extends Error {
     constructor() {
         super('操作已取消。');
@@ -160,6 +165,11 @@ export class FigmaClient {
 
     async getFile(fileKey: string): Promise<Record<string, unknown>> {
         return this.json(`/v1/files/${encodeURIComponent(fileKey)}?geometry=paths`);
+    }
+
+    /** Round-trip always reads the complete current file and explicitly requests shared plugin data. */
+    async getRoundtripFile(fileKey: string): Promise<Record<string, unknown>> {
+        return this.json(roundtripFilePath(fileKey));
     }
 
     async getNode(fileKey: string, nodeId: string): Promise<Record<string, unknown>> {

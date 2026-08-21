@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "sha256": [
+    {
+      "utf8": "abc",
+      "expected": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "utf8": "中文😀",
+      "expected": "sha256:e973a1c1b41c5c9f4fbac31fcc311536dfffd003bfb914580455170a599953fa"
+    }
+  ],
+  "quantize4": [
+    { "input": "1.23445", "expected": 1.2345 },
+    { "input": "-1.23445", "expected": -1.2345 },
+    { "input": "0.000049", "expected": 0 },
+    { "input": "9.99995", "expected": 10 }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    { "name": "valid-single-chunk", "mutation": "none", "expected": "accept" },
+    { "name": "valid-multi-chunk", "mutation": "repeat-resources-until-two-chunks", "expected": "accept" },
+    { "name": "checksum-corrupt", "mutation": "append-one-byte-to-chunk-0000", "expected": "reject-checksum-or-byte-length" },
+    { "name": "duplicate-sync-id", "mutation": "copy-canonical-node-with-same-sync-id", "expected": "reject-duplicate-sync-id" },
+    { "name": "duplicate-visual-id", "mutation": "copy-manifest-entry-with-same-visual-id", "expected": "reject-duplicate-visual-id" },
+    { "name": "unknown-field", "mutation": "add-extra-member-to-canonical-node", "expected": "reject-unknown-field" },
+    { "name": "weak-identity", "mutation": "weak-node-has-no-sync-id-or-editable", "expected": "accept-readonly" },
+    { "name": "visual-manifest-damaged", "mutation": "replace-parent-visual-id-with-missing-id", "expected": "reject-structure" }
+  ]
+}

@@ -4,7 +4,7 @@
 > 适用版本：Cocos Creator 3.8.7  
 > 当前插件版本：`1.0.27`
 > 当前文档状态：持续维护  
-> 最近审计：2026-08-20
+> 最近审计：2026-08-21
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
 
 ## 1. 文档目的
@@ -456,6 +456,14 @@ Figma 节点的 `exportSettings` 为非空数组，表示设计者明确把该�
 
 插件不会照搬 Export 条目的输出细节。JPG/PNG/SVG/PDF、文件名后缀以及 SCALE/WIDTH/HEIGHT 约束都只用于确认“人工设置过 Export”；实际资源固定走 PNG，并使用插件导入倍率，默认 `1`。因此 Figma 中的 @2x、固定宽度或固定高度不会导致 Cocos 资源被二次缩放。
 
+### 12.14 Round-trip 开发门禁
+
+导出端 handoff、manifest 与 golden fixtures 已镜像并逐文件校验。Round-trip 现为独立 production 路径：完整文件 REST 读取强制 `plugin_data=shared`，严格解析 managed root/header/chunks/node/resource metadata/visualManifest，生成 Canonical F；再以 Prefab UUID 经 AssetDB 定位原资产，按稳定 node/component fileId 生成 Canonical C，最后执行五类 scalar leaf 的 B/F/C Diff3。
+
+P0 Writer 选择 Raw Prefab Copy-on-write，只修改 `_lpos.x/y`、`UITransform._contentSize.width/height`、经 PaintProjection 与 AssetDB 双重证明的 `_spriteFrame.__uuid__`。事务包含 opaque one-use token、Figma version/Prefab/meta/ledger generation 二次校验、排他锁、exact backup、prepare journal、原子 replace、reimport、semantic preserve post-audit、字段级 baseline 推进、receipt 与失败 rollback。启动恢复只清理 owner bytes 完全匹配且 PID 已不存在的 stale lock。
+
+面板中的 Round-trip 区域与旧导入按钮分离；首次 Pair 只建立 genesis ledger，不改 Prefab。`.cocos-figma-sync` 位于项目根且不进入 AssetDB，插件不自动修改用户 `.gitignore`。当前代码级实现候选已完成；真实 Creator 3.8.7/Figma Desktop 证据未归档前仍不能标记 G2。
+
 ## 13. 测试与质量门禁
 
 标准命令：
@@ -483,9 +491,10 @@ npm test
 - 旧 ScrollView 直接改为 PNG 整层时的辅助层清理、手工节点迁移和旧 SceneSpec 兼容；
 - 保留映射回填、节点恢复不重复、单根/多根双向切换及失败回滚；
 - Token 加密和明文不落盘；
-- 缓存哈希键不泄露 fileKey/nodeId。
+- 缓存哈希键不泄露 fileKey/nodeId；
+- Round-trip 协议 hash/canonical/Geometry、Shared Data reader、Cocos identity reader、Diff3、ledger、事务、资源 proof、精确回滚与启动恢复。
 
-当前基线：`68` 项测试通过（截至 2026-08-20）。
+当前基线：`104` 项测试通过（截至 2026-08-21）。其中原有 `68` 项单向导入回归保持通过，新增 `36` 项覆盖 Round-trip 协议、读取、Creator fixture、Diff3、ledger、事务与恢复。
 
 ## 14. 发布与版本策略
 
@@ -521,10 +530,21 @@ npm test
 | 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
+| Round-trip 使用 Raw Prefab Copy-on-write | 需要逐字段 patch，同时机器化证明脚本、未知组件和结构保持不变 | 完整 pre/post/rollback projection；仅 Creator 3.8.7 可 Apply，真机证据完成前不称 G2 |
 
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-21 · Round-trip T01–T10 实现候选（开发分支，未发布）
+
+- 镜像 exporter 协议/Schema/fixtures，加入逐文件 SHA-256、canonical JSON、Unicode chunk、Geometry v1 与 1,000 组正逆向量门禁。
+- 新增 Figma Shared Data reader/projector、Prefab UUID/fileId/component reader、五 leaf Diff3、独立 dry-run/Pair/Apply 面板与消息。
+- 新增项目根 ledger/baseline/lock/journal/backup/receipt、one-use token、Raw Prefab 白名单 Writer、SpriteFrame/paint proof、semantic audit、rollback 和 dead-owner 启动恢复。
+- reimport 故障注入证明 exact-byte rollback 且 ledger 不前进；ledger commit 后进程中断会补全 committed receipt，不会误回滚；Creator 非 3.8.7 或目标 Prefab 已被编辑器加载时在写前阻断。
+- Round-trip 使用独立取消控制器，preview txnId 与最终 receipt 一致，同一已消费 Apply token 只返回既有结果。
+- 隔离 Creator 3.8.7 工程已证明扩展启用、fixture 迁移/导入、AssetDB UUID API 唯一定位，以及 position/contentSize 的真实 raw write → reimport → post-audit → ledger/receipt commit；证据见 `docs/evidence/creator387-isolated-probe.md`。
+- 全量 `npm test` 为 104/104；完整 Creator/Figma 外部证据尚待完成，因此当前状态为实现候选而非最终 G2。
 
 ### 2026-08-20 · `1.0.27`
 

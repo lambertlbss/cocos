@@ -1,0 +1,22 @@
+{
+  "package_version": 2,
+  "name": "roundtrip-s0-probe",
+  "title": "Roundtrip S0 Probe",
+  "version": "1.0.0",
+  "main": "./main.js",
+  "engines": {
+    "creator": "3.8.7"
+  },
+  "contributions": {
+    "scene": {
+      "script": "./scene.js"
+    },
+    "messages": {
+      "run-probe": {
+        "methods": [
+          "runProbe"
+        ]
+      }
+    }
+  }
+}

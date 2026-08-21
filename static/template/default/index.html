@@ -77,6 +77,27 @@
         </div>
     </section>
 
+    <details class="card roundtrip-card" open>
+        <summary>
+            <span><span class="step">RT</span> Round-trip 回写</span>
+            <span class="summary-hint">独立安全路径 · 不调用完整导入</span>
+        </summary>
+        <p class="roundtrip-note">读取导出端 Shared Plugin Data，对原 Prefab 做 B/F/C 三方预览；无 Pair、冲突或不支持变化时不会写入。</p>
+        <div class="roundtrip-toolbar">
+            <button id="roundtrip-detect" class="button ghost" type="button">检测 Round-trip 数据</button>
+            <select id="roundtrip-root" class="roundtrip-root" aria-label="Managed root" disabled>
+                <option value="">等待检测</option>
+            </select>
+            <button id="roundtrip-preview" class="button primary" type="button" disabled>生成变更预览</button>
+        </div>
+        <div id="roundtrip-summary" class="roundtrip-summary">尚未检测。此区域只处理原 Prefab 的白名单字段。</div>
+        <div class="roundtrip-actions">
+            <button id="roundtrip-pair" class="button ghost" type="button" disabled>确认配对 Surface</button>
+            <button id="roundtrip-apply" class="button primary" type="button" disabled>应用到原 Prefab</button>
+            <button id="roundtrip-cancel" class="text-button" type="button">取消 Round-trip 操作</button>
+        </div>
+    </details>
+
     <section id="progress-region" class="progress-region" aria-live="polite">
         <div class="progress-copy">
             <span id="progress-icon" class="pulse-dot"></span>

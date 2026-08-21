@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cocosfigmabridge.local/schema/roundtrip-v1.schema.json",
+  "title": "Cocos Figma Bridge Round-trip Protocol v1",
+  "oneOf": [
+    { "$ref": "#/$defs/rootHeader" },
+    { "$ref": "#/$defs/baseline" },
+    { "$ref": "#/$defs/nodeMeta" },
+    { "$ref": "#/$defs/resourceBinding" }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "syncId": { "type": "string", "pattern": "^cfn1:[0-9a-f]{64}$" },
+    "visualId": { "type": "string", "pattern": "^cfv1:[0-9a-f-]{36}$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:@[^@]+)?$" },
+    "editable": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["position.xy", "contentSize.wh", "spriteFrame.uuid"] }
+    },
+    "vec2": {
+      "type": "object", "additionalProperties": false, "required": ["x", "y"],
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+    },
+    "size": {
+      "type": "object", "additionalProperties": false, "required": ["width", "height"],
+      "properties": { "width": { "type": "number" }, "height": { "type": "number" } }
+    },
+    "locator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ownerPrefabUuid", "sourcePrefabUuid", "instanceChain", "nodeFileId"],
+      "properties": {
+        "ownerPrefabUuid": { "$ref": "#/$defs/uuid" },
+        "sourcePrefabUuid": { "$ref": "#/$defs/uuid" },
+        "nodeFileId": { "type": "string", "minLength": 1 },
+        "instanceChain": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["instanceNodeFileId", "sourcePrefabUuid"],
+            "properties": {
+              "instanceNodeFileId": { "type": "string", "minLength": 1 },
+              "sourcePrefabUuid": { "$ref": "#/$defs/uuid" }
+            }
+          }
+        }
+      }
+    },
+    "componentLocator": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["strategy", "componentType", "fileId"],
+          "properties": {
+            "strategy": { "const": "comp-prefab-file-id" },
+            "componentType": { "type": "string" },
+            "fileId": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["strategy", "componentType", "baselineFingerprint"],
+          "properties": {
+            "strategy": { "const": "unique-component-type" },
+            "componentType": { "type": "string" },
+            "baselineFingerprint": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      ]
+    },
+    "rootHeader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "surfaceId", "producer", "prefab", "baseline", "capabilities", "exportedAt"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "surfaceId": { "type": "string", "format": "uuid" },
+        "producer": {
+          "type": "object", "additionalProperties": false, "required": ["name", "version"],
+          "properties": { "name": { "type": "string" }, "version": { "type": "string" } }
+        },
+        "prefab": {
+          "type": "object", "additionalProperties": false,
+          "required": ["uuid", "sourceHash", "metaSourceHash"],
+          "properties": {
+            "uuid": { "$ref": "#/$defs/uuid" },
+            "assetUrlHint": { "type": "string", "pattern": "^db://assets/" },
+            "sourceHash": { "$ref": "#/$defs/sha256" },
+            "metaSourceHash": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "baseline": {
+          "type": "object", "additionalProperties": false,
+          "required": ["encoding", "chunkKeys", "byteLength", "sha256"],
+          "properties": {
+            "encoding": { "const": "canonical-json" },
+            "chunkKeys": { "type": "array", "minItems": 1, "maxItems": 192, "items": { "type": "string", "pattern": "^rt\\.baseline\\.[0-9]{4}$" } },
+            "byteLength": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "capabilities": {
+          "type": "object", "additionalProperties": false,
+          "required": ["editable", "nestedWrite", "structureWrite"],
+          "properties": { "editable": { "$ref": "#/$defs/editable" }, "nestedWrite": { "const": false }, "structureWrite": { "const": false } }
+        },
+        "exportedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "baseline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "prefabUuid", "nodes", "visualManifest", "resources"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "prefabUuid": { "$ref": "#/$defs/uuid" },
+        "nodes": {
+          "type": "array", "maxItems": 20000,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["syncId", "locator", "componentLocators", "cocosStructure", "editable", "geometry"],
+            "properties": {
+              "syncId": { "$ref": "#/$defs/syncId" },
+              "locator": { "$ref": "#/$defs/locator" },
+              "componentLocators": {
+                "type": "object", "additionalProperties": false,
+                "properties": { "uiTransform": { "$ref": "#/$defs/componentLocator" }, "sprite": { "$ref": "#/$defs/componentLocator" } }
+              },
+              "cocosStructure": {
+                "type": "object", "additionalProperties": false, "required": ["parentNodeFileId", "siblingIndex"],
+                "properties": { "parentNodeFileId": { "type": ["string", "null"] }, "siblingIndex": { "type": "integer", "minimum": 0 } }
+              },
+              "position": { "$ref": "#/$defs/vec2" },
+              "contentSize": { "$ref": "#/$defs/size" },
+              "spriteFrameUuid": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+              "editable": { "$ref": "#/$defs/editable" },
+              "geometry": {
+                "type": "object", "additionalProperties": false,
+                "required": ["mappingVersion", "sourceAnchor", "sourceScale", "figmaBaselineLocalRect", "parentSyncId", "figmaBaselineRelativeTransform", "dependencySyncIds", "dependencyHash"],
+                "properties": {
+                  "mappingVersion": { "const": 1 },
+                  "sourceAnchor": { "$ref": "#/$defs/vec2" },
+                  "sourceScale": { "$ref": "#/$defs/vec2" },
+                  "figmaBaselineLocalRect": {
+                    "type": "object", "additionalProperties": false, "required": ["x", "y", "width", "height"],
+                    "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "width": { "type": "number" }, "height": { "type": "number" } }
+                  },
+                  "parentSyncId": { "oneOf": [{ "$ref": "#/$defs/syncId" }, { "type": "null" }] },
+                  "figmaBaselineRelativeTransform": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "type": "number" } } },
+                  "dependencySyncIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/syncId" } },
+                  "dependencyHash": { "$ref": "#/$defs/sha256" }
+                }
+              }
+            }
+          }
+        },
+        "visualManifest": {
+          "type": "array", "maxItems": 20000,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["visualId", "role", "parentVisualId", "siblingOrder", "figmaNodeType", "readonlyVisualFingerprint"],
+            "properties": {
+              "visualId": { "$ref": "#/$defs/visualId" },
+              "role": { "enum": ["direct", "nested-readonly", "weak-readonly", "helper"] },
+              "syncId": { "$ref": "#/$defs/syncId" },
+              "ownerVisualId": { "$ref": "#/$defs/visualId" },
+              "ownerSyncId": { "$ref": "#/$defs/syncId" },
+              "parentVisualId": { "oneOf": [{ "$ref": "#/$defs/visualId" }, { "type": "null" }] },
+              "siblingOrder": { "type": "integer", "minimum": 0 },
+              "figmaNodeType": { "type": "string" },
+              "readonlyVisualFingerprint": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["uuid", "type", "name"],
+            "properties": { "uuid": { "$ref": "#/$defs/uuid" }, "type": { "const": "cc.SpriteFrame" }, "name": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "nodeMeta": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "role", "visualId", "syncId", "editable"],
+          "properties": { "schemaVersion": { "const": 1 }, "role": { "const": "direct" }, "visualId": { "$ref": "#/$defs/visualId" }, "syncId": { "$ref": "#/$defs/syncId" }, "editable": { "$ref": "#/$defs/editable" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "role", "visualId", "syncId", "readonlyReason"],
+          "properties": { "schemaVersion": { "const": 1 }, "role": { "const": "nested-readonly" }, "visualId": { "$ref": "#/$defs/visualId" }, "syncId": { "$ref": "#/$defs/syncId" }, "readonlyReason": { "const": "nested-prefab-v1" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "role", "visualId", "readonlyReason"],
+          "properties": { "schemaVersion": { "const": 1 }, "role": { "const": "weak-readonly" }, "visualId": { "$ref": "#/$defs/visualId" }, "readonlyReason": { "type": "string" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "role", "visualId", "ownerVisualId", "helperKind"],
+          "properties": { "schemaVersion": { "const": 1 }, "role": { "const": "helper" }, "visualId": { "$ref": "#/$defs/visualId" }, "ownerVisualId": { "$ref": "#/$defs/visualId" }, "ownerSyncId": { "$ref": "#/$defs/syncId" }, "helperKind": { "enum": ["sprite-image", "nine-slice-piece", "label-text", "visual-container"] } }
+        }
+      ]
+    },
+    "resourceBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "syncId", "componentLocatorRef", "boundUuid", "intent", "paintVisualId", "paintFingerprint"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "syncId": { "$ref": "#/$defs/syncId" },
+        "componentLocatorRef": { "const": "sprite" },
+        "boundUuid": { "$ref": "#/$defs/uuid" },
+        "intent": { "enum": ["baseline", "explicit-rebind"] },
+        "paintVisualId": { "$ref": "#/$defs/visualId" },
+        "paintFingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

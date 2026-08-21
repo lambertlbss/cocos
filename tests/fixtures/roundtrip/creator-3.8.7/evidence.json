@@ -1,0 +1,24 @@
+{
+  "creatorVersion": "3.8.7",
+  "capturedAt": "2026-08-21T12:21:25+08:00",
+  "projectName": "figma-roundtrip-writer-fixture",
+  "isolatedProject": true,
+  "assetDbResult": "imported",
+  "assetUuid": "2d63d5c0-9a46-42ae-bda6-b17f784889cc",
+  "libraryArtifact": "library/2d/2d63d5c0-9a46-42ae-bda6-b17f784889cc.json",
+  "creatorOutputPrefabSha256": "sha256:5188f5aa4e7cc663c46cd92f48ce1434a8f4eef57eae4de3cdc1526ebeece393",
+  "normalizedFixturePrefabSha256": "sha256:812c36076ee992e65f8ccbe98e44a6a6cfd0c429708d0f2e4ebb8e880ddde079",
+  "metaSha256": "sha256:dd2e00e4a599a2d3ca7ff70afc5ed56acc10efc4063511d8ea324c69263b0fde",
+  "liveWriter": {
+    "capturedAt": "2026-08-21T12:35:49+08:00",
+    "packageEnabled": "roundtrip-live-reimport-probe@1.0.0",
+    "transactionStatus": "committed",
+    "operation": "set-content-size",
+    "sourceWidth": 100,
+    "creatorObservedWidth": 123,
+    "restoredWidth": 100,
+    "prefabPostimageSha256": "sha256:87394e549aeeebb5ec2911d40bb898f1ce0233c3de5904329319277f1a1109f0",
+    "restoredPrefabSha256": "sha256:812c36076ee992e65f8ccbe98e44a6a6cfd0c429708d0f2e4ebb8e880ddde079"
+  },
+  "notes": "Creator imported the fixture and accepted a real transaction write through Editor.Message asset-db reimport. Its library changed width 100 to 123; the probe then restored and reimported the exact original bytes back to width 100."
+}

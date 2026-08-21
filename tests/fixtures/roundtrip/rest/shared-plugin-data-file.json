@@ -1,0 +1,33 @@
+{
+  "name": "脱敏 Round-trip Fixture",
+  "version": "1234567890",
+  "document": {
+    "id": "0:0",
+    "type": "DOCUMENT",
+    "children": [
+      {
+        "id": "0:1",
+        "type": "CANVAS",
+        "children": [
+          {
+            "id": "1:1",
+            "type": "FRAME",
+            "sharedPluginData": {
+              "cocosfigmabridge": { "rt.header": "{}" }
+            },
+            "children": [
+              { "id": "1:2", "type": "RECTANGLE" }
+            ]
+          },
+          {
+            "id": "2:1",
+            "type": "FRAME",
+            "sharedPluginData": {
+              "cocosfigmabridge": { "rt.header": "{}" }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

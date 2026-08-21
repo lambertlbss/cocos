@@ -1,0 +1,22 @@
+{
+  "mappingVersion": 1,
+  "vectors": [
+    {
+      "name": "positive-scale-parent-local",
+      "parent": {
+        "contentSize": { "width": 200, "height": 100 },
+        "anchor": { "x": 0.5, "y": 0.5 }
+      },
+      "node": {
+        "position": { "x": 10, "y": 20 },
+        "contentSize": { "width": 40, "height": 30 },
+        "anchor": { "x": 0.25, "y": 0.75 },
+        "scale": { "x": 1, "y": 1 }
+      },
+      "figma": {
+        "localRect": { "x": 100, "y": 22.5, "width": 40, "height": 30 },
+        "relativeTransform": [[1, 0, 100], [0, 1, 22.5]]
+      }
+    }
+  ]
+}

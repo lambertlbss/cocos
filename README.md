@@ -55,6 +55,24 @@ Figma 中手动配置了非空 Export 设置的可见非文字节点，会被视
 
 可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪只映射为 `Mask`；智能模式只有在 Figma 明确设置滚动溢出方向时才映射为 `ScrollView`，`list_`、`scroll_` 等业务命名不会擅自改变节点层级。需要预留运行时滚动但设计稿没有设置溢出时，可在节点策略中手动选择 `ScrollView`。Figma Constraints 暂不自动映射为 `Widget`，导入后由用户在 Cocos 中手动配置。
 
+## Round-trip 回写原 Prefab（开发分支）
+
+Round-trip 是与“导入到场景/创建新 Prefab”完全隔离的安全路径。它只读取由配套 Cocos → Figma 插件写入的 `cocosfigmabridge` Shared Plugin Data，并对导出时 Baseline、Figma 当前状态和 Cocos 当前 Prefab 做逐字段三方合并。
+
+使用顺序：
+
+1. 粘贴 Figma 文件或节点链接，点击“检测 Round-trip 数据”。
+2. 文件有多个 managed root 时明确选择一个，再点击“生成变更预览”。
+3. 首次使用且 source/meta/identity 证据完全一致时，点击“确认配对 Surface”。该操作只建立 genesis ledger，不修改 Prefab。
+4. 重新生成预览，确认目标 `db://` URL、修改/保留/冲突/不支持数量。
+5. 只有没有阻断且存在 patch 时，“应用到原 Prefab”才可用；Apply 接受整个不可变计划，不支持部分勾选。
+
+P0 只写位置 x/y、UITransform 宽高和有完整 paint/resource proof 的 SpriteFrame UUID。名称、路径、Figma node id、Cocos runtime UUID 和旧 nodeMaps 都不会用于认领原节点。历史 Figma 版本链接、多个未选择 root、结构/只读视觉漂移、双方同时修改、Layout/Widget/嵌套 Prefab、非 SIMPLE + CUSTOM Sprite、目标 Prefab 当前被编辑器加载或 Creator 非 3.8.7 都会阻断写入。
+
+事务状态保存在项目根的 `.cocos-figma-sync/`，不在 `assets` 内，包含 baseline、ledger、lock、journal、backup 和 receipt。插件不会自动修改 `.gitignore`；团队需自行决定是否版本化 ledger/baseline，`backups/`、`locks/`、`journals/` 和 `receipts/` 通常应作为本地运行状态忽略。启动时会检查未完成 journal，并且只会清理由 exact owner bytes 证明且原进程已不存在的 stale lock。
+
+代码级门禁已通过，隔离 Creator 3.8.7 已证明扩展启用、AssetDB UUID 查询和真实 raw write/reimport/ledger commit；Prefab 打开/实例化、复杂脚本引用与 Figma 联合证据完成前，本功能仍属于实现候选，不能标记为最终 G2。
+
 ## Token 安全
 
 - Token 只在扩展主进程中使用，面板不会读取或回显已保存 Token。
