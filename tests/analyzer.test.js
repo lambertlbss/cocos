@@ -9,6 +9,7 @@ const {
     inferKind,
     hasManualExport,
     isNamedSliceGroup,
+    isAutoNineSlice,
     isPatchCandidate,
     isStructuredNodeName,
     isVectorNode,
@@ -476,4 +477,26 @@ test('derives asymmetric Cocos borders from a real nine-slice layout', () => {
     assert.ok(Math.abs(analysis.borders.right - 183.4) < 0.001);
     assert.ok(Math.abs(analysis.borders.top - 102.8) < 0.001);
     assert.ok(Math.abs(analysis.borders.bottom - 65.6) < 0.001);
+});
+
+test('marks only geometry-valid Rectangle grids for automatic compact nine-slice import', () => {
+    const children = [];
+    for (let row = 0; row < 3; row += 1) {
+        for (let column = 0; column < 3; column += 1) {
+            children.push({
+                id: `auto:${row}:${column}`,
+                name: children.length ? `Rectangle ${children.length}` : 'Rectangle',
+                type: 'RECTANGLE',
+                absoluteBoundingBox: { x: column * 10, y: row * 10, width: 10, height: 10 },
+            });
+        }
+    }
+    const candidate = node({
+        absoluteBoundingBox: { x: 0, y: 0, width: 30, height: 30 },
+        children,
+    });
+    assert.equal(isAutoNineSlice(candidate), true);
+    const [tree] = analyzeTree([candidate]);
+    assert.equal(tree.autoNineSlice, true);
+    assert.match(tree.warning, /最小切片 PNG/);
 });

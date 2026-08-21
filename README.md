@@ -40,7 +40,7 @@
 - PNG 整层：由 Figma 把当前节点及其子树渲染为一张 PNG，再导入 `SpriteFrame`；该节点的设计子层不会重复生成。
 - 矢量节点：面板显示为“PNG Sprite”，通过 Figma PNG 渲染后导入 `Sprite`，不会用 `cc.Graphics` 近似任意矢量路径；它只渲染当前矢量节点，不会压平父节点子树。
 - 更新：只更新已映射节点的几何与可见性。
-- 九宫格：把识别到的三宫/九宫节点导入为 `Sprite.Type.SLICED`，切片边界写入 SpriteFrame 元数据。
+- 三/九宫格：当一个非文字节点的直接子层严格命名为 `Rectangle`、`Rectangle 1`…，且其几何完整覆盖为横三段、竖三段或 3×3 网格时，智能模式会自动启用。插件先导出父节点完整 PNG，再保留四周固定区域和中心 `2` 个逻辑像素，重组为最小纹理；Cocos 端写入对应 SpriteFrame 边框并使用 `Sprite.Type.SLICED`，节点仍保持 Figma 原始显示尺寸。仅“几何上可能是网格”、但命名不符合规则的普通候选不会自动裁剪，可在节点策略中手动勾选。旋转/斜切或无法可靠映射像素边界时安全回退为完整 PNG + 切片边框，避免位置偏移。
 - 忽略：不创建当前节点及其整棵子树。
 
 文字节点始终按 Cocos `Label` 导入，不会因为渐变、阴影或复杂填充而导出 PNG 切图。字体描边直接写入 `Label.enableOutline`、`Label.outlineColor` 和 `Label.outlineWidth`，不再添加额外的 `LabelOutline` 组件。所有文字使用 `Label.Overflow.NONE`：无显式换行符的单行文字按 Figma 参考框水平、竖直居中；包含显式换行符的多行文字按参考框左上对齐。插件先加载映射字体，再让 Cocos 完成最终字体度量和位置补偿。Cocos 3.8.7 在 `NONE` 下会强制关闭自动换行，因此 Figma 自动折行但没有手动换行符的文本会在面板显示警告。启用本地同名资源目录时，如果一个容器节点自身命中同名 PNG 资源，会把该资源作为整层 Sprite 使用，并跳过其内部子节点导入。
@@ -75,4 +75,4 @@ npm run build
 npm test
 ```
 
-测试覆盖 Figma URL、全页面解析、缺失边界保护、Cocos 节点类型分析、安全 Auto Layout 降级、真实尺寸三/九宫边界、本地同名资源、内部缓存、Token 安全和渐变 SVG。
+测试覆盖 Figma URL、全页面解析、缺失边界保护、Cocos 节点类型分析、安全 Auto Layout 降级、最小化三/九宫 PNG 重组与边框、本地同名资源、内部缓存、Token 安全和渐变 SVG。

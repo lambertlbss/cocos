@@ -148,8 +148,9 @@ export class AssetWriter {
         }
         let info = await waitForAsset(url);
         const sliced = Boolean(borders && Object.values(borders).some((value) => value > 0));
-        if (borders && sliced) {
-            await this.applyBorders(info, borders);
+        const meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
+        if (borders || hasSlicedBorders(meta)) {
+            await this.applyBorders(info, borders ?? { left: 0, right: 0, top: 0, bottom: 0 });
             info = await waitForAsset(url);
         }
         const spriteFrame = findSpriteFrame(info);

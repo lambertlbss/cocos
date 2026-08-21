@@ -177,6 +177,11 @@ export function isPatchCandidate(node: FigmaNode): boolean {
     return isNamedSliceGroup(node) || Boolean(analyzeSliceGrid(node));
 }
 
+/** 只有命名与几何都满足规则时，才允许智能模式自动开启最小化三/九宫。 */
+export function isAutoNineSlice(node: FigmaNode): boolean {
+    return isNamedSliceGroup(node) && Boolean(analyzeSliceGrid(node));
+}
+
 function warningFor(
     node: FigmaNode,
     renderManualExportSubtree: boolean,
@@ -191,8 +196,11 @@ function warningFor(
     if (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode)) {
         return `混合模式 ${node.blendMode} 将近似处理`;
     }
+    if (isAutoNineSlice(node)) {
+        return '检测到有效的 Rectangle 三/九格，将导出最小切片 PNG 并自动配置 Cocos SLICED';
+    }
     if (isNamedSliceGroup(node)) {
-        return '检测到 3/9 个 Rectangle 切片，将按 PNG 整层导入并优先复用同名资源';
+        return '检测到 3/9 个 Rectangle 子层，但几何不构成有效切片；将按 PNG 整层导入';
     }
     if (renderMessySubtree) {
         return '当前结构化节点包含未结构化的直接子层，智能模式将按 PNG 整层导入';
@@ -231,6 +239,7 @@ function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
         kind: inferKind(node),
         renderSubtree,
         patchCandidate: isPatchCandidate(node),
+        autoNineSlice: inferredAction !== 'ignore' && isAutoNineSlice(node),
         warning: inferredAction === 'ignore'
             ? undefined
             : warningFor(node, renderManualExportSubtree, renderMessySubtree),

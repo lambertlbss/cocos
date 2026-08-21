@@ -2,7 +2,7 @@
   "package_version": 2,
   "name": "figma-importer-cocos",
   "title": "Figma Importer",
-  "version": "1.0.27",
+  "version": "1.0.28",
   "description": "Figma UI importer for Cocos Creator 3.8.7",
   "main": "./dist/main.js",
   "author": "Figma Importer contributors",
@@ -19,6 +19,7 @@
   "devDependencies": {
     "@cocos/creator-types": "3.8.7",
     "@types/node": "^16.18.126",
+    "@types/pngjs": "^6.0.5",
     "typescript": "^5.2.2"
   },
   "panels": {
@@ -122,5 +123,8 @@
         ]
       }
     }
+  },
+  "dependencies": {
+    "pngjs": "^7.0.0"
   }
 }

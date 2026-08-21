@@ -5,7 +5,7 @@ import packageJSON from '../package.json';
 import { FigmaClient, CancelledError } from './figma/client';
 import { inferAction, inferCocosLayoutMode, inferKind, isVectorNode } from './figma/analyzer';
 import { parseDocument } from './figma/parser';
-import { analyzeSliceGrid } from './figma/slicing';
+import { analyzeSliceGrid, type SliceAnalysis } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
 import {
     isTerminalAction,
@@ -16,6 +16,7 @@ import { AssetWriter, resolveAssetUuid, sanitizeAssetName } from './importer/ass
 import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
 import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
+import { compactSlicePng } from './importer/sliced-png';
 import { gradientPng } from './importer/svg';
 import { TokenVault } from './security/token-vault';
 import {
@@ -337,7 +338,7 @@ function decisionMap(overrides: ImportOverride[], tree: TreeNodeDto[]): Map<stri
             decisions.set(node.id, {
                 action: normalizeImportAction(node.action),
                 kind: node.kind,
-                nineSlice: false,
+                nineSlice: node.autoNineSlice === true,
             });
             addDefaults(node.children);
         }
@@ -475,7 +476,8 @@ async function buildAssets(
             node: FigmaNode;
             nodes: FigmaNode[];
             url: string;
-            borders?: { left: number; right: number; top: number; bottom: number };
+            analysis?: SliceAnalysis;
+            fallbackBorders?: { left: number; right: number; top: number; bottom: number };
             key: CacheEntryKey;
             contents: Buffer | null;
             source: 'local' | 'cache' | 'figma';
@@ -495,7 +497,10 @@ async function buildAssets(
             }
             const node = groupedNodes[0];
             const decision = decisions.get(node.id) ?? defaultDecision(node);
-            const borders = decision.nineSlice && format === 'png'
+            const analysis = decision.nineSlice && format === 'png'
+                ? analyzeSliceGrid(node) ?? undefined
+                : undefined;
+            const fallbackBorders = analysis
                 ? analyzeSliceGrid(node, importSettings.scale)?.borders
                 : undefined;
             let localMatch = null;
@@ -505,7 +510,7 @@ async function buildAssets(
                     break;
                 }
             }
-            const localUrl = localMatch && !borders
+            const localUrl = localMatch && !analysis
                 ? assetDatabaseUrl(localMatch.path)
                 : null;
             const localAsset = localUrl ? await writer.existing(localUrl) : null;
@@ -514,7 +519,7 @@ async function buildAssets(
                 continue;
             }
             const existing = !importSettings.refreshAssets ? await writer.existing(url) : null;
-            if (!localMatch && existing && !borders) {
+            if (!localMatch && existing && !analysis) {
                 completeGroup(groupedNodes, existing, 'existing');
                 continue;
             }
@@ -531,7 +536,8 @@ async function buildAssets(
                 node,
                 nodes: groupedNodes,
                 url,
-                borders,
+                analysis,
+                fallbackBorders,
                 key,
                 contents: localMatch?.contents ?? cached,
                 source: localMatch ? 'local' : cached ? 'cache' : 'figma',
@@ -559,9 +565,15 @@ async function buildAssets(
                 contents = await (await getApi()).download(remoteUrl);
                 await cache.write(item.key, contents);
             }
+            const compact = item.analysis
+                ? compactSlicePng(contents, item.node, item.analysis, importSettings.scale)
+                : null;
+            if (item.analysis && !compact) {
+                console.warn(`[${packageJSON.name}] 三/九宫最小化失败，保留完整 PNG：${item.node.name}`);
+            }
             completeGroup(
                 item.nodes,
-                await writer.write(item.url, contents, item.borders),
+                await writer.write(item.url, compact?.contents ?? contents, compact?.borders ?? item.fallbackBorders),
                 item.source,
             );
         }

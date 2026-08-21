@@ -116,6 +116,8 @@ export interface TreeNodeDto {
     /** 智能模式是否应把该容器及其后代收口为当前节点的一张 PNG。 */
     renderSubtree?: boolean;
     patchCandidate: boolean;
+    /** 严格 Rectangle 三/九格且几何有效，默认启用最小化切片资源。 */
+    autoNineSlice?: boolean;
     warning?: string;
     children: TreeNodeDto[];
 }

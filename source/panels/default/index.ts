@@ -214,6 +214,9 @@ function initializeDocument(document: DocumentDto): void {
         state.preferredActions.set(node.id, action);
         state.kinds.set(node.id, node.kind);
         state.defaults.set(node.id, { action, kind: node.kind });
+        if (node.autoNineSlice) {
+            state.patches.add(node.id);
+        }
     }
     reconcileActions();
     root().querySelectorAll<HTMLElement>('[data-preset]').forEach((button) => {
@@ -524,7 +527,9 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
 
     const patch = document.createElement('label');
     patch.className = 'patch-toggle';
-    patch.title = node.patchCandidate ? '启用九宫格/三宫格切片' : '该节点不是自动识别的切片候选';
+    patch.title = node.autoNineSlice
+        ? '已自动启用：严格 Rectangle 网格会输出最小三/九宫 PNG'
+        : node.patchCandidate ? '启用九宫格/三宫格切片' : '该节点不是自动识别的切片候选';
     const patchInput = document.createElement('input');
     patchInput.type = 'checkbox';
     patchInput.dataset.patchFor = node.id;
