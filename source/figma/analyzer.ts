@@ -56,6 +56,14 @@ function hasVisibleImage(node: FigmaNode): boolean {
     return node.fills.some((fill) => fill.visible !== false && fill.type === 'IMAGE');
 }
 
+export function hasTiledImageFill(node: Pick<FigmaNode, 'fills'>): boolean {
+    return node.fills.some((fill) =>
+        fill.visible !== false
+        && (fill.opacity ?? 1) > 0
+        && fill.type === 'IMAGE'
+        && fill.scaleMode?.toUpperCase() === 'TILE');
+}
+
 function hasComplexEffects(node: FigmaNode): boolean {
     return node.effects.some((effect) => effect.visible !== false);
 }
