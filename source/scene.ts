@@ -263,7 +263,9 @@ function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
     } else if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
         desired.add(cc.Label);
     } else if (!RASTER_VECTOR_TYPES.has(spec.figmaType)) {
-        desired.add(cc.Graphics);
+        if (hasGraphicsVisual(spec) || clipsChildren) {
+            desired.add(cc.Graphics);
+        }
         if (clipsChildren) {
             desired.add(cc.Mask);
         }
@@ -405,11 +407,29 @@ function visiblePaint(paints: FigmaPaint[]): FigmaPaint | undefined {
     return paints.find((paint) => paint.visible !== false && (paint.opacity ?? 1) > 0);
 }
 
+function visibleSolidPaint(paints: FigmaPaint[]): FigmaPaint | undefined {
+    return paints.find((paint) => paint.type === 'SOLID'
+        && paint.visible !== false
+        && (paint.opacity ?? 1) > 0
+        && Boolean(paint.color)
+        && (paint.color?.a ?? 1) > 0);
+}
+
+function visibleSolidFill(spec: SceneNodeSpec): FigmaPaint | undefined {
+    return visibleSolidPaint(spec.fills);
+}
+
+function validSolidStroke(spec: SceneNodeSpec): FigmaPaint | undefined {
+    return spec.strokeWeight > 0 ? visibleSolidPaint(spec.strokes) : undefined;
+}
+
+function hasGraphicsVisual(spec: SceneNodeSpec): boolean {
+    return Boolean(visibleSolidFill(spec) || validSolidStroke(spec));
+}
+
 function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any): void {
-    const fill = spec.fills.find((paint) =>
-        paint.visible !== false && (paint.opacity ?? 1) > 0 && paint.type === 'SOLID');
-    const stroke = spec.strokes.find((paint) =>
-        paint.visible !== false && (paint.opacity ?? 1) > 0 && paint.type === 'SOLID');
+    const fill = visibleSolidFill(spec);
+    const stroke = validSolidStroke(spec);
     if (!fill && !stroke) {
         return;
     }
@@ -430,7 +450,7 @@ function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any
         graphics.fillColor = toColor(cc.Color, fill.color, fill.opacity ?? 1);
         graphics.fill();
     }
-    if (stroke?.color && spec.strokeWeight > 0) {
+    if (stroke?.color) {
         graphics.lineWidth = Math.max(0.5, spec.strokeWeight * scale);
         graphics.strokeColor = toColor(cc.Color, stroke.color, stroke.opacity ?? 1);
         graphics.stroke();
@@ -466,7 +486,7 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
     label.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
     label.spacingX = (style.letterSpacing ?? 0) * scale;
     label.enableWrapText = false;
-    label.overflow = Label.Overflow.NONE;
+    label.overflow = Label.Overflow.CLAMP;
     label.horizontalAlign = multiline
         ? Label.HorizontalAlign.LEFT
         : Label.HorizontalAlign.CENTER;
@@ -489,30 +509,15 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
 }
 
 function finalizeLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
-    const label = node.getComponent(cc.Label);
     const transform = node.getComponent(cc.UITransform);
-    if (!label || !transform) {
+    if (!transform) {
         return;
     }
-    label.updateRenderData(true);
-    if (!isMultilineLabel(label.string)) {
-        return;
-    }
-    // Keep the original Figma frame's local top-left point fixed after NONE
-    // replaces UITransform with the measured text size. Rotate the local size
-    // delta with the node so rotated multiline labels keep the same reference.
-    const localDeltaX = (transform.width - spec.frame.width * scale) / 2;
-    const localDeltaY = (spec.frame.height * scale - transform.height) / 2;
-    const radians = -spec.rotation * Math.PI / 180;
-    const cos = Math.cos(radians);
-    const sin = Math.sin(radians);
-    const deltaX = localDeltaX * cos - localDeltaY * sin;
-    const deltaY = localDeltaX * sin + localDeltaY * cos;
-    node.setPosition(new cc.Vec3(
-        (node.position?.x ?? 0) + deltaX,
-        (node.position?.y ?? 0) + deltaY,
-        node.position?.z ?? 0,
-    ));
+    // Label content and mapped fonts must never resize the imported Figma box.
+    transform.setContentSize(
+        Math.max(0, spec.frame.width * scale),
+        Math.max(0, spec.frame.height * scale),
+    );
 }
 
 function loadAsset(assetManager: any, uuid: string): Promise<any> {
@@ -1039,7 +1044,7 @@ export const methods = {
                     throw new Error(`矢量节点“${spec.name}”没有绑定 SpriteFrame，PNG 资源可能未成功导入。`);
                 } else if (clipsChildren) {
                     configureClip(node, spec, cc);
-                } else {
+                } else if (hasGraphicsVisual(spec)) {
                     configureGraphics(node, spec, payload.scale, cc);
                 }
                 configureOpacity(node, spec, cc);
