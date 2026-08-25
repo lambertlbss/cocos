@@ -447,6 +447,21 @@ test('recognizes Figma PATTERN paints and their source nodes as native tiles', (
         cornerRadius: 12,
         fills: pattern.fills,
     })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        arcData: { startingAngle: 0, endingAngle: Math.PI, innerRadius: 0 },
+        fills: pattern.fills,
+    })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        arcData: { startingAngle: 0, endingAngle: Math.PI * 2, innerRadius: 0.5 },
+        fills: pattern.fills,
+    })), undefined);
+    assert.deepEqual(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        arcData: { startingAngle: 0, endingAngle: Math.PI * 2, innerRadius: 0 },
+        fills: pattern.fills,
+    })), tiledPaintSource(pattern));
     assert.deepEqual(nativeTiledPaintSource(node({
         type: 'RECTANGLE',
         fills: pattern.fills,

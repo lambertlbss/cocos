@@ -84,6 +84,11 @@ export interface FigmaNode {
     clipsContent: boolean;
     cornerRadius?: number;
     rectangleCornerRadii?: number[];
+    arcData?: {
+        startingAngle: number;
+        endingAngle: number;
+        innerRadius: number;
+    };
     fills: FigmaPaint[];
     strokes: FigmaPaint[];
     strokeWeight: number;

@@ -101,6 +101,12 @@ export function nativeTiledPaintSource(node: FigmaNode): TiledPaintSource | unde
     if (node.type !== 'ELLIPSE' && node.type !== 'RECTANGLE') {
         return undefined;
     }
+    if (node.type === 'ELLIPSE' && node.arcData) {
+        const sweep = Math.abs(node.arcData.endingAngle - node.arcData.startingAngle);
+        if (node.arcData.innerRadius > 1e-6 || sweep < Math.PI * 2 - 1e-6) {
+            return undefined;
+        }
+    }
     if (node.type === 'RECTANGLE') {
         const radii = node.rectangleCornerRadii
             ?? [

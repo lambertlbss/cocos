@@ -134,6 +134,7 @@ export function parseNode(value: unknown): FigmaNode | null {
     const relativeTransform = arrayValue(input.relativeTransform)
         .map((row) => arrayValue(row).map((part) => numberValue(part)));
     const cornerRadii = arrayValue(input.rectangleCornerRadii).map((part) => numberValue(part));
+    const arcData = record(input.arcData);
 
     return {
         id,
@@ -152,6 +153,11 @@ export function parseNode(value: unknown): FigmaNode | null {
         clipsContent: booleanValue(input.clipsContent, false),
         cornerRadius: typeof input.cornerRadius === 'number' ? numberValue(input.cornerRadius) : undefined,
         rectangleCornerRadii: cornerRadii.length === 4 ? cornerRadii : undefined,
+        arcData: Object.keys(arcData).length ? {
+            startingAngle: numberValue(arcData.startingAngle),
+            endingAngle: numberValue(arcData.endingAngle),
+            innerRadius: Math.max(0, numberValue(arcData.innerRadius)),
+        } : undefined,
         fills: arrayValue(input.fills).map(parsePaint),
         strokes: arrayValue(input.strokes).map(parsePaint),
         strokeWeight: Math.max(0, numberValue(input.strokeWeight)),

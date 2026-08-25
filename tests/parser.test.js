@@ -99,6 +99,26 @@ test('preserves Figma PATTERN paint source and native tiling settings', () => {
     });
 });
 
+test('preserves ellipse arc data so partial and hollow ellipses can avoid native masks', () => {
+    const node = parseNode({
+        id: '410:4757',
+        name: 'Arc',
+        type: 'ELLIPSE',
+        arcData: {
+            startingAngle: 0,
+            endingAngle: Math.PI,
+            innerRadius: 0.5,
+        },
+    });
+
+    assert.ok(node);
+    assert.deepEqual(node.arcData, {
+        startingAngle: 0,
+        endingAngle: Math.PI,
+        innerRadius: 0.5,
+    });
+});
+
 test('records manual Figma Export presence without retaining unused format metadata', () => {
     const exported = parseNode({
         id: '2:1',
