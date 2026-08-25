@@ -8,6 +8,7 @@ const {
     inferCocosLayoutMode,
     inferKind,
     hasManualExport,
+    hasTiledImageFill,
     isNamedSliceGroup,
     isPatchCandidate,
     isStructuredNodeName,
@@ -369,6 +370,18 @@ test('renders image fills and effects for visual fidelity', () => {
             absoluteBoundingBox: { x: 0, y: 0, width: 20, height: 20 },
         }],
     })), 'generate');
+});
+
+test('recognizes only visible TILE image fills as Cocos tiled sprites', () => {
+    assert.equal(hasTiledImageFill(node({
+        fills: [{ type: 'IMAGE', imageRef: 'tile', scaleMode: 'TILE' }],
+    })), true);
+    assert.equal(hasTiledImageFill(node({
+        fills: [{ type: 'IMAGE', imageRef: 'fill', scaleMode: 'FILL' }],
+    })), false);
+    assert.equal(hasTiledImageFill(node({
+        fills: [{ type: 'IMAGE', imageRef: 'hidden-tile', scaleMode: 'TILE', visible: false }],
+    })), false);
 });
 
 test('detects three- and nine-slice candidates without enabling them automatically', () => {

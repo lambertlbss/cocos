@@ -539,7 +539,11 @@ async function configureSprite(node: any, spec: SceneNodeSpec, scale: number, cc
     const { Sprite, UITransform, assetManager } = cc;
     const sprite = node.getComponent(Sprite) ?? node.addComponent(Sprite);
     sprite.sizeMode = Sprite.SizeMode.CUSTOM;
-    sprite.type = spec.sprite.sliced ? Sprite.Type.SLICED : Sprite.Type.SIMPLE;
+    sprite.type = spec.sprite.tiled
+        ? Sprite.Type.TILED
+        : spec.sprite.sliced
+            ? Sprite.Type.SLICED
+            : Sprite.Type.SIMPLE;
     sprite.spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
     const transform = node.getComponent(UITransform);
     transform?.setContentSize(

@@ -167,6 +167,7 @@ export interface SpriteAssetSpec {
     uuid: string;
     url: string;
     sliced: boolean;
+    tiled?: boolean;
 }
 
 export interface SceneNodeSpec {

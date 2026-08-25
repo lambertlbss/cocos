@@ -3,7 +3,7 @@ import { existsSync } from 'fs';
 import { readdir } from 'fs/promises';
 import packageJSON from '../package.json';
 import { FigmaClient, CancelledError } from './figma/client';
-import { inferAction, inferCocosLayoutMode, inferKind, isVectorNode } from './figma/analyzer';
+import { hasTiledImageFill, inferAction, inferCocosLayoutMode, inferKind, isVectorNode } from './figma/analyzer';
 import { parseDocument } from './figma/parser';
 import { analyzeSliceGrid } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
@@ -688,6 +688,7 @@ function makeSpec(
     const bitmapTerminal = decision.nineSlice || decision.action === 'render';
     const terminal = bitmapTerminal || isTerminalAction(decision.action);
     const effectiveKind = kindForImportAction(resolvedKind, decision.action, decision.nineSlice);
+    const spriteAsset = assets.get(node.id);
     return {
         figmaId: node.id,
         name: node.name,
@@ -726,7 +727,9 @@ function makeSpec(
         overflowDirection: node.overflowDirection,
         constraints: node.constraints,
         relativeTransform: node.relativeTransform,
-        sprite: assets.get(node.id),
+        sprite: spriteAsset
+            ? { ...spriteAsset, tiled: hasTiledImageFill(node) }
+            : undefined,
         fontUuid: node.style?.fontFamily ? fonts.get(node.style.fontFamily) : undefined,
         children: terminal
             ? []

@@ -58,7 +58,7 @@ class Sprite extends Component {
     }
 }
 Sprite.SizeMode = { CUSTOM: 1 };
-Sprite.Type = { SIMPLE: 0, SLICED: 1 };
+Sprite.Type = { SIMPLE: 0, SLICED: 1, TILED: 2 };
 
 class Label extends Component {
     updateRenderData() {
@@ -840,6 +840,21 @@ test('keeps the Figma node size when an existing sliced SpriteFrame is assigned'
     const sprite = imported.getComponent(Sprite);
 
     assert.equal(sprite.type, Sprite.Type.SLICED);
+    assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
+});
+
+test('uses Cocos tiled rendering for a Figma TILE image fill', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        frame: { x: 0, y: 0, width: 180, height: 72 },
+        sprite: { uuid: 'sprite-frame', url: 'db://assets/tile.png', sliced: true, tiled: true },
+    }));
+    const imported = environment.canvas.children[0];
+    const transform = imported.getComponent(UITransform);
+    const sprite = imported.getComponent(Sprite);
+
+    assert.equal(sprite.type, Sprite.Type.TILED);
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
 });
 
