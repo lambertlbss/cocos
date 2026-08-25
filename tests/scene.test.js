@@ -482,6 +482,150 @@ test('imports Figma vector nodes as Sprite instead of Graphics', async () => {
     assert.equal(imported.getComponent(Graphics), null);
 });
 
+test('keeps a structural container as UITransform only', async () => {
+    const environment = await importWithFakeCocos(makeSpec());
+    const imported = environment.canvas.children[0];
+
+    assert.ok(imported.getComponent(UITransform));
+    assert.equal(imported.getComponent(Graphics), null);
+    assert.equal(imported.components.length, 1);
+});
+
+test('removes Graphics when an existing visual node becomes a structural container', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const visual = makeSpec({
+            fills: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0 } }],
+        });
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: visual.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [visual],
+        });
+        const imported = environment.canvas.children[0];
+        assert.ok(imported.getComponent(Graphics));
+
+        const structural = makeSpec();
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: structural.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [structural],
+        });
+
+        assert.equal(imported.getComponent(Graphics), null);
+        assert.ok(imported.getComponent(UITransform));
+        assert.equal(imported.components.length, 1);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('adds Graphics only for a visible solid fill or a valid solid stroke', async () => {
+    const cases = [
+        {
+            name: 'visible solid fill',
+            overrides: {
+                fills: [{ type: 'SOLID', visible: true, color: { r: 1, g: 0, b: 0 } }],
+            },
+            expected: true,
+        },
+        {
+            name: 'visible solid stroke',
+            overrides: {
+                strokes: [{ type: 'SOLID', visible: true, color: { r: 0, g: 0, b: 0 } }],
+                strokeWeight: 2,
+            },
+            expected: true,
+        },
+        {
+            name: 'hidden fill',
+            overrides: {
+                fills: [{ type: 'SOLID', visible: false, color: { r: 1, g: 0, b: 0 } }],
+            },
+            expected: false,
+        },
+        {
+            name: 'transparent fill',
+            overrides: {
+                fills: [{ type: 'SOLID', opacity: 0, color: { r: 1, g: 0, b: 0 } }],
+            },
+            expected: false,
+        },
+        {
+            name: 'transparent fill color',
+            overrides: {
+                fills: [{ type: 'SOLID', color: { r: 1, g: 0, b: 0, a: 0 } }],
+            },
+            expected: false,
+        },
+        {
+            name: 'non-solid fill',
+            overrides: {
+                fills: [{ type: 'GRADIENT_LINEAR', visible: true }],
+            },
+            expected: false,
+        },
+        {
+            name: 'zero-width stroke',
+            overrides: {
+                strokes: [{ type: 'SOLID', visible: true, color: { r: 0, g: 0, b: 0 } }],
+                strokeWeight: 0,
+            },
+            expected: false,
+        },
+        {
+            name: 'stroke without color',
+            overrides: {
+                strokes: [{ type: 'SOLID', visible: true }],
+                strokeWeight: 2,
+            },
+            expected: false,
+        },
+    ];
+
+    for (const [index, entry] of cases.entries()) {
+        const environment = await importWithFakeCocos(makeSpec({
+            figmaId: `graphics-case-${index}`,
+            name: entry.name,
+            ...entry.overrides,
+        }));
+        const imported = environment.canvas.children[0];
+        assert.equal(Boolean(imported.getComponent(Graphics)), entry.expected, entry.name);
+    }
+});
+
+test('keeps Graphics when a structural container needs Mask clipping', async () => {
+    const root = makeSpec({
+        clipsContent: true,
+        children: [makeSpec({ figmaId: 'mask-child' })],
+    });
+    root.children[0].parentFrame = root.frame;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+
+    assert.ok(imported.getComponent(Mask));
+    assert.ok(imported.getComponent(Graphics));
+});
+
 test('does not auto-create Widget for Figma constraints', async () => {
     const spec = makeSpec({
         frame: { x: 10, y: 12, width: 40, height: 24 },
@@ -493,7 +637,7 @@ test('does not auto-create Widget for Figma constraints', async () => {
     assert.equal(imported.getComponent(Widget), null);
 });
 
-test('uses NONE and centers a single-line Label on the Figma reference frame', async () => {
+test('keeps a single-line Label at the Figma frame size', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 100, height: 80 },
@@ -530,19 +674,19 @@ test('uses NONE and centers a single-line Label on the Figma reference frame', a
     assert.equal(title.getComponent(LabelOutline), null);
     assert.equal(label.enableOutline, true);
     assert.equal(label.outlineWidth, 2);
-    assert.equal(label.overflow, Label.Overflow.NONE);
+    assert.equal(label.overflow, Label.Overflow.CLAMP);
     assert.equal(label.enableWrapText, false);
     assert.equal(label.horizontalAlign, Label.HorizontalAlign.CENTER);
     assert.equal(label.verticalAlign, Label.VerticalAlign.CENTER);
     assert.equal(label.lineHeight, 18);
-    assert.deepEqual(transform.contentSize, { width: 20, height: 26.68 });
+    assert.deepEqual(transform.contentSize, { width: 40, height: 20 });
     assert.deepEqual(
         { x: title.position.x, y: title.position.y },
         { x: -20, y: 25 },
     );
 });
 
-test('uses NONE and keeps a multiline Label aligned to the Figma top-left', async () => {
+test('keeps a multiline Label at the Figma frame size', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 100, height: 80 },
@@ -567,13 +711,13 @@ test('uses NONE and keeps a multiline Label aligned to the Figma top-left', asyn
     const label = description.getComponent(Label);
     const transform = description.getComponent(UITransform);
 
-    assert.equal(label.overflow, Label.Overflow.NONE);
+    assert.equal(label.overflow, Label.Overflow.CLAMP);
     assert.equal(label.enableWrapText, false);
     assert.equal(label.horizontalAlign, Label.HorizontalAlign.LEFT);
     assert.equal(label.verticalAlign, Label.VerticalAlign.TOP);
     assert.equal(label.string, '第一行\n第二行');
-    assert.equal(transform.width, 24);
-    assert.ok(Math.abs(transform.height - 40.68) < 1e-9);
+    assert.equal(transform.width, 40);
+    assert.equal(transform.height, 40);
     assert.equal(description.position.x - transform.width / 2, -40);
     assert.ok(Math.abs(description.position.y + transform.height / 2 - 35) < 1e-9);
 });
@@ -610,7 +754,7 @@ test('does not misclassify a single line from maxLines or a tall Figma frame', a
     );
 });
 
-test('keeps a rotated multiline Label local top-left fixed after NONE measurement', async () => {
+test('keeps a rotated multiline Label at the Figma frame size and position', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 100, height: 80 },
@@ -631,19 +775,14 @@ test('keeps a rotated multiline Label local top-left fixed after NONE measuremen
     const imported = environment.canvas.children[0].children[0];
     const transform = imported.getComponent(UITransform);
 
-    const radians = -Math.PI / 2;
-    const rotate = ({ x, y }) => ({
-        x: x * Math.cos(radians) - y * Math.sin(radians),
-        y: x * Math.sin(radians) + y * Math.cos(radians),
-    });
-    const originalTopLeft = rotate({ x: -20, y: 20 });
-    const measuredTopLeft = rotate({ x: -transform.width / 2, y: transform.height / 2 });
-
-    assert.ok(Math.abs(imported.position.x + measuredTopLeft.x - (-20 + originalTopLeft.x)) < 1e-9);
-    assert.ok(Math.abs(imported.position.y + measuredTopLeft.y - (15 + originalTopLeft.y)) < 1e-9);
+    assert.deepEqual(transform.contentSize, { width: 40, height: 40 });
+    assert.deepEqual(
+        { x: imported.position.x, y: imported.position.y },
+        { x: -20, y: 15 },
+    );
 });
 
-test('uses the mapped font final measurement before aligning multiline text', async () => {
+test('does not let a mapped font resize the Figma text frame', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 100, height: 80 },
@@ -665,9 +804,10 @@ test('uses the mapped font final measurement before aligning multiline text', as
     const transform = imported.getComponent(UITransform);
 
     assert.equal(imported.getComponent(Label).font.widthFactor, 0.75);
-    assert.equal(transform.width, 36);
+    assert.equal(transform.width, 40);
+    assert.equal(transform.height, 40);
     assert.equal(imported.position.x - transform.width / 2, -40);
-    assert.ok(Math.abs(imported.position.y + transform.height / 2 - 35) < 1e-9);
+    assert.equal(imported.position.y + transform.height / 2, 35);
 });
 
 test('does not import a __FigmaBackground child for clipped containers', async () => {
@@ -1405,7 +1545,7 @@ test('removes legacy LabelOutline before changing Label into Sprite', async () =
     }
 });
 
-test('resets reused Label font and color when the new Figma text has no mapping or fill', async () => {
+test('resets reused Label state and keeps the updated Figma text frame', async () => {
     const environment = fakeCocos();
     const originalLoad = Module._load;
     Module._load = function load(request, parent, isMain) {
@@ -1447,7 +1587,8 @@ test('resets reused Label font and color when the new Figma text has no mapping 
             name: 'StatefulText',
             figmaType: 'TEXT',
             kind: 'label',
-            characters: '文字',
+            frame: { x: 0, y: 0, width: 72, height: 36 },
+            characters: '更长的文字\n第二行',
             textStyle: { fontSize: 18, lineHeightPx: 20 },
         });
         await methods.importDocument({
@@ -1464,6 +1605,11 @@ test('resets reused Label font and color when the new Figma text has no mapping 
 
         assert.equal(imported.getComponent(Label), label);
         assert.equal(label.font, null);
+        assert.equal(label.overflow, Label.Overflow.CLAMP);
+        assert.deepEqual(
+            imported.getComponent(UITransform).contentSize,
+            { width: 72, height: 36 },
+        );
         assert.deepEqual(
             { r: label.color.r, g: label.color.g, b: label.color.b, a: label.color.a },
             { r: 255, g: 255, b: 255, a: 255 },
