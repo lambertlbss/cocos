@@ -53,15 +53,92 @@ export function hasManualExport(node: Pick<FigmaNode, 'hasExportSettings'>): boo
 }
 
 function hasVisibleImage(node: FigmaNode): boolean {
-    return node.fills.some((fill) => fill.visible !== false && fill.type === 'IMAGE');
+    return node.fills.some((fill) => fill.visible !== false
+        && (fill.type === 'IMAGE' || fill.type === 'PATTERN'));
+}
+
+export interface TiledPaintSource {
+    kind: 'image-ref' | 'source-node';
+    id: string;
+    scale: number;
+}
+
+export function tiledPaintSource(node: Pick<FigmaNode, 'fills'>): TiledPaintSource | undefined {
+    for (const fill of node.fills) {
+        if (fill.visible === false || (fill.opacity ?? 1) <= 0) {
+            continue;
+        }
+        const scale = typeof fill.scalingFactor === 'number'
+            && Number.isFinite(fill.scalingFactor)
+            && fill.scalingFactor > 0
+            ? fill.scalingFactor
+            : 1;
+        if (fill.type === 'PATTERN' && fill.sourceNodeId) {
+            return { kind: 'source-node', id: fill.sourceNodeId, scale };
+        }
+        if (fill.type === 'IMAGE'
+            && fill.scaleMode?.toUpperCase() === 'TILE'
+            && fill.imageRef) {
+            return { kind: 'image-ref', id: fill.imageRef, scale };
+        }
+    }
+    return undefined;
 }
 
 export function hasTiledImageFill(node: Pick<FigmaNode, 'fills'>): boolean {
-    return node.fills.some((fill) =>
-        fill.visible !== false
-        && (fill.opacity ?? 1) > 0
-        && fill.type === 'IMAGE'
-        && fill.scaleMode?.toUpperCase() === 'TILE');
+    return Boolean(tiledPaintSource(node));
+}
+
+/**
+ * A native tiled Sprite represents exactly one paint. Layers with additional
+ * visuals or descendants must stay on the whole-node raster path.
+ */
+export function nativeTiledPaintSource(node: FigmaNode): TiledPaintSource | undefined {
+    const source = tiledPaintSource(node);
+    if (!source || node.hasExportSettings || node.children.length > 0) {
+        return undefined;
+    }
+    if (node.type !== 'ELLIPSE' && node.type !== 'RECTANGLE') {
+        return undefined;
+    }
+    if (node.type === 'RECTANGLE') {
+        const radii = node.rectangleCornerRadii
+            ?? [
+                node.cornerRadius ?? 0,
+                node.cornerRadius ?? 0,
+                node.cornerRadius ?? 0,
+                node.cornerRadius ?? 0,
+            ];
+        if (radii.some((radius) => radius > 1e-6)) {
+            return undefined;
+        }
+    }
+    const visibleFills = node.fills.filter((fill) =>
+        fill.visible !== false && (fill.opacity ?? 1) > 0);
+    const hasVisibleStroke = node.strokeWeight > 0 && node.strokes.some((stroke) =>
+        stroke.visible !== false && (stroke.opacity ?? 1) > 0);
+    const hasVisibleEffect = node.effects.some((effect) => effect.visible !== false);
+    if (visibleFills.length !== 1 || hasVisibleStroke || hasVisibleEffect) {
+        return undefined;
+    }
+    const fill = visibleFills[0];
+    if ((fill.opacity ?? 1) < 0.999
+        || Math.abs(fill.rotation ?? 0) > 1e-6
+        || (fill.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(fill.blendMode))) {
+        return undefined;
+    }
+    if (fill.type === 'PATTERN') {
+        const spacing = fill.spacing ?? { x: 0, y: 0 };
+        const unsupportedPattern = (fill.tileType && fill.tileType !== 'RECTANGULAR')
+            || Math.abs(spacing.x) > 1e-6
+            || Math.abs(spacing.y) > 1e-6
+            || (fill.horizontalAlignment && fill.horizontalAlignment !== 'START')
+            || (fill.verticalAlignment && fill.verticalAlignment !== 'START');
+        if (unsupportedPattern) {
+            return undefined;
+        }
+    }
+    return source;
 }
 
 function hasComplexEffects(node: FigmaNode): boolean {

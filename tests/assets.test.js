@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
     AssetWriter,
+    detectImageExtension,
     hasSlicedBorders,
     sanitizeAssetName,
 } = require('../dist/importer/assets');
@@ -20,6 +21,32 @@ test('keeps readable Figma node names in imported asset URLs', () => {
         'db://assets/figma-importer/Player Title.png',
     );
     assert.equal(sanitizeAssetName('按钮/关闭:普通'), '按钮_关闭_普通');
+});
+
+test('uses isolated stable asset URLs for native tile sources', () => {
+    const writer = new AssetWriter('figma-importer');
+    const first = writer.buildTiledUrl('Ellipse 1.png', 'source-node:410:4755:scale:1', 'png');
+    const repeated = writer.buildTiledUrl('Ellipse 1.png', 'source-node:410:4755:scale:1', 'png');
+    const different = writer.buildTiledUrl('Ellipse 1.png', 'source-node:999:1:scale:1', 'png');
+    const otherFile = writer.buildTiledUrl('Ellipse 1.png', 'file-b:source-node:410:4755:scale:1', 'png');
+    const otherScale = writer.buildTiledUrl('Ellipse 1.png', 'file-a:source-node:410:4755:scale:2', 'png');
+
+    assert.equal(first, repeated);
+    assert.notEqual(first, 'db://assets/figma-importer/Ellipse 1.png');
+    assert.notEqual(first, different);
+    assert.notEqual(otherFile, otherScale);
+    assert.match(first, /^db:\/\/assets\/figma-importer\/Ellipse 1__tile_[0-9a-f]{10}\.png$/);
+});
+
+test('detects original image-fill formats from file signatures', () => {
+    assert.equal(detectImageExtension(Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ])), 'png');
+    assert.equal(detectImageExtension(Buffer.from([0xff, 0xd8, 0xff, 0xe0])), 'jpg');
+    assert.equal(detectImageExtension(Buffer.from('RIFF0000WEBP', 'ascii')), 'webp');
+    assert.equal(detectImageExtension(Buffer.from('GIF89a', 'ascii')), 'gif');
+    assert.equal(detectImageExtension(Buffer.from([0x42, 0x4d, 0, 0])), 'bmp');
+    assert.throws(() => detectImageExtension(Buffer.from('unknown')), /无法识别/);
 });
 
 test('maps duplicate node names to the same first-imported asset URL', () => {
@@ -66,4 +93,71 @@ test('detects three- and nine-slice borders from an existing Cocos SpriteFrame',
             },
         },
     }), false);
+});
+
+test('disables trimming and atlas packing for an existing tiled SpriteFrame', async () => {
+    const url = 'db://assets/figma-importer/Ellipse 1__tile_deadbeef00.png';
+    const info = {
+        uuid: 'image-uuid',
+        url,
+        importer: 'image',
+        type: 'cc.ImageAsset',
+        imported: true,
+        invalid: false,
+        subAssets: {
+            spriteFrame: {
+                uuid: 'sprite-frame-uuid',
+                url: `${url}/spriteFrame`,
+                importer: 'sprite-frame',
+                type: 'cc.SpriteFrame',
+                imported: true,
+                invalid: false,
+            },
+        },
+    };
+    const meta = {
+        uuid: info.uuid,
+        subMetas: {
+            spriteFrame: {
+                importer: 'sprite-frame',
+                uuid: 'sprite-frame-uuid',
+                userData: {
+                    trimType: 'auto',
+                    packable: true,
+                    borderLeft: 8,
+                    borderRight: 8,
+                    borderTop: 8,
+                    borderBottom: 8,
+                },
+            },
+        },
+    };
+    const calls = [];
+    const previousEditor = global.Editor;
+    global.Editor = {
+        Message: {
+            async request(channel, method, ...args) {
+                calls.push([channel, method, ...args]);
+                if (method === 'query-asset-info') return info;
+                if (method === 'query-asset-meta') return meta;
+                return undefined;
+            },
+        },
+    };
+    try {
+        const asset = await new AssetWriter('figma-importer').existing(url, true);
+
+        assert.equal(asset.uuid, 'sprite-frame-uuid');
+        assert.equal(asset.tiled, true);
+        assert.equal(meta.subMetas.spriteFrame.userData.trimType, 'none');
+        assert.equal(meta.subMetas.spriteFrame.userData.packable, false);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderLeft, 0);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderRight, 0);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderTop, 0);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderBottom, 0);
+        assert.ok(calls.some(([, method]) => method === 'save-asset-meta'));
+        assert.ok(calls.some(([, method]) => method === 'reimport-asset'));
+    } finally {
+        global.Editor = previousEditor;
+    }
 });

@@ -1,11 +1,12 @@
 import { createHash } from 'crypto';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { dirname, isAbsolute, join, parse, resolve } from 'path';
+import type { RasterImageExtension } from './assets';
 
 export interface CacheEntryKey {
     fileKey: string;
     nodeId: string;
-    format: 'png' | 'svg';
+    format: RasterImageExtension | 'svg';
     scale: number;
 }
 

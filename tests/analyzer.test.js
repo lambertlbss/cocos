@@ -14,7 +14,9 @@ const {
     isPatchCandidate,
     isStructuredNodeName,
     isVectorNode,
+    nativeTiledPaintSource,
     shouldRenderMessySubtree,
+    tiledPaintSource,
 } = require('../dist/figma/analyzer');
 const { parseNode } = require('../dist/figma/parser');
 const { analyzeSliceGrid } = require('../dist/figma/slicing');
@@ -374,15 +376,82 @@ test('renders image fills and effects for visual fidelity', () => {
 });
 
 test('recognizes only visible TILE image fills as Cocos tiled sprites', () => {
-    assert.equal(hasTiledImageFill(node({
+    const imageTile = node({
         fills: [{ type: 'IMAGE', imageRef: 'tile', scaleMode: 'TILE' }],
-    })), true);
+    });
+    assert.equal(hasTiledImageFill(imageTile), true);
+    assert.deepEqual(tiledPaintSource(imageTile), {
+        kind: 'image-ref',
+        id: 'tile',
+        scale: 1,
+    });
     assert.equal(hasTiledImageFill(node({
         fills: [{ type: 'IMAGE', imageRef: 'fill', scaleMode: 'FILL' }],
     })), false);
     assert.equal(hasTiledImageFill(node({
         fills: [{ type: 'IMAGE', imageRef: 'hidden-tile', scaleMode: 'TILE', visible: false }],
     })), false);
+    assert.equal(hasTiledImageFill(node({
+        fills: [{ type: 'IMAGE', scaleMode: 'TILE' }],
+    })), false);
+});
+
+test('recognizes Figma PATTERN paints and their source nodes as native tiles', () => {
+    const pattern = node({
+        type: 'ELLIPSE',
+        fills: [{
+            type: 'PATTERN',
+            sourceNodeId: '410:4755',
+            scalingFactor: 0.75,
+        }],
+    });
+
+    assert.equal(hasTiledImageFill(pattern), true);
+    assert.deepEqual(tiledPaintSource(pattern), {
+        kind: 'source-node',
+        id: '410:4755',
+        scale: 0.75,
+    });
+    assert.deepEqual(nativeTiledPaintSource(pattern), tiledPaintSource(pattern));
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        fills: pattern.fills,
+        effects: [{ type: 'DROP_SHADOW', visible: true }],
+    })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        fills: pattern.fills,
+        children: [{ id: '410:4756', name: 'Child', type: 'FRAME' }],
+    })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        fills: [{ ...pattern.fills[0], opacity: 0.5 }],
+    })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        fills: [{ ...pattern.fills[0], spacing: { x: 4, y: 0 } }],
+    })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        fills: [{ ...pattern.fills[0], horizontalAlignment: 'CENTER' }],
+    })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'ELLIPSE',
+        fills: [{ ...pattern.fills[0], rotation: 15 }],
+    })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'STAR',
+        fills: pattern.fills,
+    })), undefined);
+    assert.equal(nativeTiledPaintSource(node({
+        type: 'RECTANGLE',
+        cornerRadius: 12,
+        fills: pattern.fills,
+    })), undefined);
+    assert.deepEqual(nativeTiledPaintSource(node({
+        type: 'RECTANGLE',
+        fills: pattern.fills,
+    })), tiledPaintSource(pattern));
 });
 
 test('detects three- and nine-slice candidates without enabling them automatically', () => {

@@ -1,4 +1,15 @@
+import { createHash } from 'crypto';
 import type { SpriteAssetSpec } from '../types';
+
+export type RasterImageExtension = 'png' | 'jpg' | 'webp' | 'gif' | 'bmp';
+
+export const RASTER_IMAGE_EXTENSIONS: readonly RasterImageExtension[] = [
+    'png',
+    'jpg',
+    'webp',
+    'gif',
+    'bmp',
+];
 
 interface AssetInfo {
     uuid: string;
@@ -54,6 +65,36 @@ export function sanitizeAssetName(input: string): string {
         value = `_${value}`;
     }
     return value || 'figma_node';
+}
+
+export function detectImageExtension(contents: Buffer): RasterImageExtension {
+    if (contents.length >= 8
+        && contents.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+        return 'png';
+    }
+    if (contents.length >= 3
+        && contents[0] === 0xff
+        && contents[1] === 0xd8
+        && contents[2] === 0xff) {
+        return 'jpg';
+    }
+    if (contents.length >= 12
+        && contents.subarray(0, 4).toString('ascii') === 'RIFF'
+        && contents.subarray(8, 12).toString('ascii') === 'WEBP') {
+        return 'webp';
+    }
+    const header = contents.subarray(0, 6).toString('ascii');
+    if (header === 'GIF87a' || header === 'GIF89a') {
+        return 'gif';
+    }
+    if (contents.length >= 2 && contents[0] === 0x42 && contents[1] === 0x4d) {
+        return 'bmp';
+    }
+    throw new Error('Figma 原始平铺图片格式无法识别；当前支持 PNG、JPEG、WebP、GIF 和 BMP。');
+}
+
+function assetBaseName(name: string): string {
+    return sanitizeAssetName(name).replace(/\.(png|jpe?g|webp|gif|bmp|svg)$/i, '');
 }
 
 function findSpriteFrame(info: AssetInfo): AssetInfo | null {
@@ -115,29 +156,52 @@ export class AssetWriter {
         }
     }
 
-    buildUrl(name: string, _id: string, extension: 'png', _scale: number): string {
-        const fileName = sanitizeAssetName(name).replace(/\.(png|svg)$/i, '');
+    buildUrl(name: string, _id: string, extension: RasterImageExtension, _scale: number): string {
+        const fileName = assetBaseName(name);
         return `db://assets/${this.folder}/${fileName}.${extension}`;
     }
 
-    async existing(url: string): Promise<SpriteAssetSpec | null> {
-        const info = await queryAsset(url);
-        const spriteFrame = info ? findSpriteFrame(info) : null;
+    buildTiledUrl(name: string, sourceKey: string, extension: RasterImageExtension): string {
+        const sourceHash = createHash('sha256').update(sourceKey).digest('hex').slice(0, 10);
+        return `db://assets/${this.folder}/${assetBaseName(name)}__tile_${sourceHash}.${extension}`;
+    }
+
+    async existing(url: string, tiled = false): Promise<SpriteAssetSpec | null> {
+        let info = await queryAsset(url);
+        let spriteFrame = info ? findSpriteFrame(info) : null;
         if (!info?.imported || info.invalid || !spriteFrame) {
             return null;
         }
-        const meta = await Editor.Message.request(
+        let meta = await Editor.Message.request(
             'asset-db',
             'query-asset-meta',
             info.uuid,
         ) as AssetMeta | null;
-        return { uuid: spriteFrame.uuid, url, sliced: hasSlicedBorders(meta) };
+        if (tiled && meta && await this.applySpriteMeta(info, meta, undefined, true)) {
+            info = await waitForAsset(url);
+            spriteFrame = findSpriteFrame(info);
+            meta = await Editor.Message.request(
+                'asset-db',
+                'query-asset-meta',
+                info.uuid,
+            ) as AssetMeta | null;
+        }
+        if (!spriteFrame) {
+            return null;
+        }
+        return {
+            uuid: spriteFrame.uuid,
+            url,
+            sliced: hasSlicedBorders(meta),
+            tiled: tiled || undefined,
+        };
     }
 
     async write(
         url: string,
         contents: Buffer | string,
         borders?: { left: number; right: number; top: number; bottom: number },
+        tiled = false,
     ): Promise<SpriteAssetSpec> {
         const existing = await queryAsset(url);
         const data = typeof contents === 'string' ? Buffer.from(contents, 'utf8') : contents;
@@ -147,40 +211,65 @@ export class AssetWriter {
             await Editor.Message.request('asset-db', 'create-asset', url, data, { overwrite: true });
         }
         let info = await waitForAsset(url);
-        const sliced = Boolean(borders && Object.values(borders).some((value) => value > 0));
+        const sliced = !tiled && Boolean(borders && Object.values(borders).some((value) => value > 0));
         const meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
-        if (borders || hasSlicedBorders(meta)) {
-            await this.applyBorders(info, borders ?? { left: 0, right: 0, top: 0, bottom: 0 });
+        const spriteBorders = sliced
+            ? borders
+            : (!tiled && hasSlicedBorders(meta)
+                ? { left: 0, right: 0, top: 0, bottom: 0 }
+                : undefined);
+        if (meta && await this.applySpriteMeta(info, meta, spriteBorders, tiled)) {
             info = await waitForAsset(url);
         }
         const spriteFrame = findSpriteFrame(info);
         if (!spriteFrame) {
             throw new Error(`资源没有生成 SpriteFrame：${url}`);
         }
-        return { uuid: spriteFrame.uuid, url, sliced };
+        return { uuid: spriteFrame.uuid, url, sliced, tiled: tiled || undefined };
     }
 
-    private async applyBorders(
+    private async applySpriteMeta(
         info: AssetInfo,
-        borders: { left: number; right: number; top: number; bottom: number },
-    ): Promise<void> {
-        const meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
-        if (!meta?.subMetas) {
-            return;
+        meta: AssetMeta,
+        borders: { left: number; right: number; top: number; bottom: number } | undefined,
+        tiled: boolean,
+    ): Promise<boolean> {
+        if (!meta.subMetas) {
+            return false;
         }
         const spriteMeta = Object.values(meta.subMetas).find((item) => item.importer === 'sprite-frame');
         if (!spriteMeta) {
-            return;
+            return false;
         }
-        Object.assign(spriteMeta.userData, {
-            trimType: 'none',
-            borderLeft: Math.max(0, Math.round(borders.left)),
-            borderRight: Math.max(0, Math.round(borders.right)),
-            borderTop: Math.max(0, Math.round(borders.top)),
-            borderBottom: Math.max(0, Math.round(borders.bottom)),
-        });
+        const changes: Record<string, unknown> = {};
+        if (borders) {
+            Object.assign(changes, {
+                trimType: 'none',
+                borderLeft: Math.max(0, Math.round(borders.left)),
+                borderRight: Math.max(0, Math.round(borders.right)),
+                borderTop: Math.max(0, Math.round(borders.top)),
+                borderBottom: Math.max(0, Math.round(borders.bottom)),
+            });
+        }
+        if (tiled) {
+            Object.assign(changes, {
+                trimType: 'none',
+                packable: false,
+                borderLeft: 0,
+                borderRight: 0,
+                borderTop: 0,
+                borderBottom: 0,
+            });
+        }
+        const changed = Object.entries(changes)
+            .some(([key, value]) => spriteMeta.userData[key] !== value);
+        if (!changed) {
+            return false;
+        }
+        Object.assign(spriteMeta.userData, changes);
         await Editor.Message.request('asset-db', 'save-asset-meta', info.uuid, JSON.stringify(meta, null, 2));
         await Editor.Message.request('asset-db', 'reimport-asset', info.uuid);
+        return true;
     }
 }
 

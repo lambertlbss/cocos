@@ -2,8 +2,15 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'path';
 import { existsSync } from 'fs';
 import { readdir } from 'fs/promises';
 import packageJSON from '../package.json';
-import { FigmaClient, CancelledError } from './figma/client';
-import { hasTiledImageFill, inferAction, inferCocosLayoutMode, inferKind, isVectorNode } from './figma/analyzer';
+import { FigmaClient, CancelledError, clampImageScale } from './figma/client';
+import {
+    inferAction,
+    inferCocosLayoutMode,
+    inferKind,
+    isVectorNode,
+    nativeTiledPaintSource,
+    type TiledPaintSource,
+} from './figma/analyzer';
 import { parseDocument } from './figma/parser';
 import { analyzeSliceGrid, type SliceAnalysis } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
@@ -12,7 +19,14 @@ import {
     kindForImportAction,
     normalizeImportAction,
 } from './import-actions';
-import { AssetWriter, resolveAssetUuid, sanitizeAssetName } from './importer/assets';
+import {
+    AssetWriter,
+    RASTER_IMAGE_EXTENSIONS,
+    detectImageExtension,
+    resolveAssetUuid,
+    sanitizeAssetName,
+    type RasterImageExtension,
+} from './importer/assets';
 import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
 import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
@@ -44,6 +58,11 @@ interface Decision {
     action: ImportAction;
     kind: NodeKind;
     nineSlice: boolean;
+}
+
+interface TiledAssetRequest {
+    node: FigmaNode;
+    source: TiledPaintSource;
 }
 
 interface SceneImportPayload {
@@ -357,8 +376,9 @@ function decisionMap(overrides: ImportOverride[], tree: TreeNodeDto[]): Map<stri
 function collectAssetRequests(
     roots: FigmaNode[],
     decisions: Map<string, Decision>,
-): { png: FigmaNode[]; gradients: FigmaNode[] } {
+): { png: FigmaNode[]; tiled: TiledAssetRequest[]; gradients: FigmaNode[] } {
     const png: FigmaNode[] = [];
+    const tiled: TiledAssetRequest[] = [];
     const gradients: FigmaNode[] = [];
     const visit = (node: FigmaNode) => {
         const decision = decisionForNode(node, decisions);
@@ -369,8 +389,17 @@ function collectAssetRequests(
             node.children.forEach(visit);
             return;
         }
-        if (decision.nineSlice || decision.action === 'render') {
+        if (decision.nineSlice) {
             png.push(node);
+            return;
+        }
+        if (decision.action === 'render') {
+            const source = nativeTiledPaintSource(node);
+            if (source) {
+                tiled.push({ node, source });
+            } else {
+                png.push(node);
+            }
             return;
         }
         if (decision.action === 'generate') {
@@ -386,7 +415,7 @@ function collectAssetRequests(
         node.children.forEach(visit);
     };
     roots.forEach(visit);
-    return { png, gradients };
+    return { png, tiled, gradients };
 }
 
 async function buildAssets(
@@ -424,7 +453,7 @@ async function buildAssets(
     await Promise.all(session.roots.map(promoteLocalParents));
     const requests = collectAssetRequests(session.roots, decisions);
     const assets = new Map<string, SpriteAssetSpec>();
-    const total = requests.png.length + requests.gradients.length;
+    const total = requests.png.length + requests.tiled.length + requests.gradients.length;
     let completed = 0;
     let apiPromise: Promise<FigmaClient> | null = null;
 
@@ -452,6 +481,184 @@ async function buildAssets(
             value: total ? completed / total : 1,
             message: `${verb} ${completed}/${total} · ${node.name}`,
         });
+    };
+
+    const processTiled = async (items: TiledAssetRequest[]) => {
+        if (!items.length) {
+            return;
+        }
+        interface TileGroup {
+            node: FigmaNode;
+            nodes: FigmaNode[];
+            source: TiledPaintSource;
+            sourceKey: string;
+        }
+        interface PendingTile extends TileGroup {
+            contents: Buffer | null;
+            extension?: RasterImageExtension;
+            sourceType: 'cache' | 'figma';
+        }
+        const requestedScale = (source: TiledPaintSource) => importSettings.scale * source.scale;
+        const renderScale = (source: TiledPaintSource) => source.kind === 'source-node'
+            ? clampImageScale(requestedScale(source))
+            : 1;
+        const tileAsset = (asset: SpriteAssetSpec, source: TiledPaintSource): SpriteAssetSpec => ({
+            ...asset,
+            tiled: true,
+            tileScale: requestedScale(source) / renderScale(source),
+        });
+        const groups = new Map<string, TileGroup>();
+        for (const { node, source } of items) {
+            const sourceKey = JSON.stringify({
+                fileKey: session.fileKey,
+                kind: source.kind,
+                id: source.id,
+                paintScale: source.scale,
+                renderScale: renderScale(source),
+            });
+            const key = writer.buildTiledUrl(node.name, sourceKey, 'png')
+                .normalize('NFKC')
+                .toLocaleLowerCase('en-US');
+            const group = groups.get(key) ?? { node, nodes: [], source, sourceKey };
+            group.nodes.push(node);
+            groups.set(key, group);
+        }
+        const completeGroup = (
+            groupedNodes: FigmaNode[],
+            asset: SpriteAssetSpec,
+            source: 'existing' | 'cache' | 'figma',
+        ) => {
+            for (const groupedNode of groupedNodes) {
+                completeAsset(groupedNode, asset, source);
+            }
+        };
+        const pending: PendingTile[] = [];
+        for (const group of groups.values()) {
+            if (activeController?.signal.aborted) {
+                throw new CancelledError();
+            }
+            let existingAsset: SpriteAssetSpec | null = null;
+            if (!importSettings.refreshAssets) {
+                for (const extension of RASTER_IMAGE_EXTENSIONS) {
+                    existingAsset = await writer.existing(
+                        writer.buildTiledUrl(group.node.name, group.sourceKey, extension),
+                        true,
+                    );
+                    if (existingAsset) {
+                        break;
+                    }
+                }
+            }
+            if (existingAsset) {
+                completeGroup(group.nodes, tileAsset(existingAsset, group.source), 'existing');
+                continue;
+            }
+            let contents: Buffer | null = null;
+            let cachedExtension: RasterImageExtension | undefined;
+            if (!importSettings.refreshAssets) {
+                const extensions: readonly RasterImageExtension[] = group.source.kind === 'source-node'
+                    ? ['png']
+                    : RASTER_IMAGE_EXTENSIONS;
+                for (const extension of extensions) {
+                    const cached = await cache.read({
+                        fileKey: session.fileKey,
+                        nodeId: `tile:${group.sourceKey}`,
+                        format: extension,
+                        scale: renderScale(group.source),
+                    });
+                    if (cached) {
+                        contents = cached;
+                        cachedExtension = extension;
+                        break;
+                    }
+                }
+            }
+            pending.push({
+                ...group,
+                contents,
+                extension: cachedExtension,
+                sourceType: contents ? 'cache' : 'figma',
+            });
+        }
+
+        const remoteItems = pending.filter((item) => !item.contents);
+        const patternUrls = new Map<string, string | null>();
+        const patternsByScale = new Map<number, Set<string>>();
+        for (const item of remoteItems) {
+            if (item.source.kind !== 'source-node') {
+                continue;
+            }
+            const scale = renderScale(item.source);
+            const ids = patternsByScale.get(scale) ?? new Set<string>();
+            ids.add(item.source.id);
+            patternsByScale.set(scale, ids);
+        }
+        for (const [scale, ids] of patternsByScale) {
+            const urls = await (await getApi()).getImageUrls(
+                session.fileKey,
+                Array.from(ids),
+                'png',
+                scale,
+            );
+            for (const [id, url] of Object.entries(urls)) {
+                patternUrls.set(`${id}:scale:${scale}`, url);
+            }
+        }
+        const needsImageFills = remoteItems.some((item) => item.source.kind === 'image-ref');
+        const imageFillUrls = needsImageFills
+            ? await (await getApi()).getImageFillUrls(session.fileKey)
+            : {};
+        const downloads = new Map<string, Promise<Buffer>>();
+        const download = (url: string) => {
+            let task = downloads.get(url);
+            if (!task) {
+                task = getApi().then((api) => api.download(url));
+                downloads.set(url, task);
+            }
+            return task;
+        };
+        for (const item of pending) {
+            if (activeController?.signal.aborted) {
+                throw new CancelledError();
+            }
+            let contents = item.contents;
+            let extension = item.extension;
+            if (!contents) {
+                const remoteUrl = item.source.kind === 'source-node'
+                    ? patternUrls.get(
+                        `${item.source.id}:scale:${renderScale(item.source)}`,
+                    )
+                    : imageFillUrls[item.source.id];
+                if (!remoteUrl) {
+                    const label = item.source.kind === 'source-node'
+                        ? `PATTERN 源节点 ${item.source.id}`
+                        : `IMAGE 填充 ${item.source.id}`;
+                    throw new Error(`Figma 未能提供${label}：${item.node.name}`);
+                }
+                contents = await download(remoteUrl);
+                extension = item.source.kind === 'source-node'
+                    ? 'png'
+                    : detectImageExtension(contents);
+                await cache.write({
+                    fileKey: session.fileKey,
+                    nodeId: `tile:${item.sourceKey}`,
+                    format: extension,
+                    scale: renderScale(item.source),
+                }, contents);
+            }
+            if (!extension) {
+                extension = detectImageExtension(contents);
+            }
+            const url = writer.buildTiledUrl(item.node.name, item.sourceKey, extension);
+            completeGroup(
+                item.nodes,
+                tileAsset(
+                    await writer.write(url, contents, undefined, true),
+                    item.source,
+                ),
+                item.sourceType,
+            );
+        }
     };
 
     const processRemote = async (nodes: FigmaNode[]) => {
@@ -579,6 +786,7 @@ async function buildAssets(
         }
     };
 
+    await processTiled(requests.tiled);
     await processRemote(requests.png);
 
     const gradientAssets = new Map<string, SpriteAssetSpec>();
@@ -714,9 +922,7 @@ function makeSpec(
         overflowDirection: node.overflowDirection,
         constraints: node.constraints,
         relativeTransform: node.relativeTransform,
-        sprite: spriteAsset
-            ? { ...spriteAsset, tiled: hasTiledImageFill(node) }
-            : undefined,
+        sprite: spriteAsset,
         fontUuid: node.style?.fontFamily ? fonts.get(node.style.fontFamily) : undefined,
         children: terminal
             ? []
