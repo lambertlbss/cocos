@@ -62,6 +62,43 @@ test('guards missing bounds and sorts gradient stops', () => {
     assert.deepEqual(node.fills[0].gradientStops.map((stop) => stop.position), [0, 1]);
 });
 
+test('preserves Figma PATTERN paint source and native tiling settings', () => {
+    const node = parseNode({
+        id: '410:4754',
+        name: 'Ellipse 1',
+        type: 'ELLIPSE',
+        fills: [{
+            type: 'PATTERN',
+            sourceNodeId: '410:4755',
+            tileType: 'RECTANGULAR',
+            scalingFactor: 1,
+            spacing: { x: 0, y: 0 },
+            horizontalAlignment: 'START',
+            verticalAlignment: 'START',
+        }],
+    });
+
+    assert.ok(node);
+    assert.deepEqual(node.fills[0], {
+        type: 'PATTERN',
+        visible: true,
+        opacity: 1,
+        blendMode: undefined,
+        color: undefined,
+        imageRef: undefined,
+        scaleMode: undefined,
+        rotation: undefined,
+        sourceNodeId: '410:4755',
+        tileType: 'RECTANGULAR',
+        scalingFactor: 1,
+        spacing: { x: 0, y: 0 },
+        horizontalAlignment: 'START',
+        verticalAlignment: 'START',
+        gradientHandlePositions: [],
+        gradientStops: [],
+    });
+});
+
 test('records manual Figma Export presence without retaining unused format metadata', () => {
     const exported = parseNode({
         id: '2:1',

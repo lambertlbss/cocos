@@ -9,6 +9,23 @@ export function roundtripFilePath(fileKey: string): string {
     return `/v1/files/${encodeURIComponent(fileKey)}?${query.toString()}`;
 }
 
+export function imageFillPath(fileKey: string): string {
+    return `/v1/files/${encodeURIComponent(fileKey)}/images`;
+}
+
+export function clampImageScale(scale: number): number {
+    return Math.max(0.25, Math.min(4, scale));
+}
+
+interface ImageFillResponse {
+    images?: Record<string, string | null>;
+    meta?: { images?: Record<string, string | null> };
+}
+
+export function imageFillUrlsFromResponse(payload: ImageFillResponse): Record<string, string | null> {
+    return payload.meta?.images ?? payload.images ?? {};
+}
+
 export class CancelledError extends Error {
     constructor() {
         super('操作已取消。');
@@ -192,7 +209,7 @@ export class FigmaClient {
                 use_absolute_bounds: 'true',
             });
             if (format === 'png') {
-                query.set('scale', String(Math.max(0.25, Math.min(4, scale))));
+                query.set('scale', String(clampImageScale(scale)));
             }
             const payload = await this.json<{ images?: Record<string, string | null>; err?: string }>(
                 `/v1/images/${encodeURIComponent(fileKey)}?${query.toString()}`,
@@ -200,6 +217,14 @@ export class FigmaClient {
             Object.assign(result, payload.images ?? {});
         }
         return result;
+    }
+
+    /** Resolve IMAGE paint imageRef values to their original temporary download URLs. */
+    async getImageFillUrls(fileKey: string): Promise<Record<string, string | null>> {
+        const payload = await this.json<ImageFillResponse>(
+            imageFillPath(fileKey),
+        );
+        return imageFillUrlsFromResponse(payload);
     }
 
     async download(url: string): Promise<Buffer> {

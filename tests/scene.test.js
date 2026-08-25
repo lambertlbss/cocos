@@ -88,7 +88,7 @@ Label.VerticalAlign = { TOP: 0, CENTER: 1, BOTTOM: 2 };
 Label.Overflow = { NONE: 0, CLAMP: 1, RESIZE_HEIGHT: 2 };
 
 class Mask extends Component {}
-Mask.Type = { GRAPHICS_RECT: 0, ELLIPSE: 1, RECT: 0 };
+Mask.Type = { GRAPHICS_RECT: 0, GRAPHICS_ELLIPSE: 1, ELLIPSE: 1, RECT: 0 };
 
 class Canvas extends Component {}
 class Camera extends Component {}
@@ -129,6 +129,7 @@ class FakeNode {
         this.components = [];
         this.layer = 0;
         this.active = true;
+        this.scale = { x: 1, y: 1, z: 1 };
         this._parent = null;
         this.position = {
             x: 0,
@@ -270,6 +271,12 @@ class FakeNode {
     }
 
     setRotationFromEuler() {}
+
+    setScale(value, y = 1, z = 1) {
+        this.scale = typeof value === 'object'
+            ? { x: value.x, y: value.y, z: value.z ?? 1 }
+            : { x: value, y, z };
+    }
 }
 FakeNode.deferComponentRemoval = false;
 FakeNode.deferNodeDestruction = false;
@@ -856,6 +863,128 @@ test('uses Cocos tiled rendering for a Figma TILE image fill', async () => {
 
     assert.equal(sprite.type, Sprite.Type.TILED);
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
+});
+
+test('clips an elliptical native tile with a Mask and a TILED Sprite helper', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        figmaType: 'ELLIPSE',
+        frame: { x: 0, y: 0, width: 163, height: 154 },
+        sprite: {
+            uuid: 'source-node-sprite-frame',
+            url: 'db://assets/Ellipse 1__tile.png',
+            sliced: false,
+            tiled: true,
+        },
+    }));
+    const imported = environment.canvas.children[0];
+    const maskNode = imported.getChildByName('__FigmaTiledMask');
+    const tiledNode = maskNode?.getChildByName('__FigmaTiledSprite');
+
+    assert.equal(imported.getComponent(Sprite), null);
+    assert.equal(imported.getComponent(Mask), null);
+    assert.equal(imported.getComponent(Graphics), null);
+    assert.ok(maskNode);
+    assert.ok(maskNode.getComponent(Mask));
+    assert.equal(maskNode.getComponent(Mask).type, Mask.Type.GRAPHICS_ELLIPSE);
+    assert.ok(maskNode.getComponent(Graphics));
+    assert.ok(tiledNode);
+    assert.equal(tiledNode.getComponent(Sprite).type, Sprite.Type.TILED);
+    assert.deepEqual(tiledNode.getComponent(UITransform).contentSize, { width: 163, height: 154 });
+});
+
+test('scales an IMAGE tile with an isolated helper without masking manual children', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        figmaType: 'RECTANGLE',
+        frame: { x: 0, y: 0, width: 180, height: 72 },
+        sprite: {
+            uuid: 'image-fill-sprite-frame',
+            url: 'db://assets/tile.png',
+            sliced: false,
+            tiled: true,
+            tileScale: 2,
+        },
+    }));
+    const imported = environment.canvas.children[0];
+    const tiledNode = imported.getChildByName('__FigmaTiledSprite');
+
+    assert.equal(imported.getComponent(Sprite), null);
+    assert.equal(imported.getComponent(Mask), null);
+    assert.ok(tiledNode);
+    assert.equal(tiledNode.getComponent(Sprite).type, Sprite.Type.TILED);
+    assert.deepEqual(tiledNode.getComponent(UITransform).contentSize, { width: 90, height: 36 });
+    assert.deepEqual(tiledNode.scale, { x: 2, y: 2, z: 1 });
+});
+
+test('keeps manual children outside the tile Mask and synchronizes helper layers on reimport', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const firstSpec = makeSpec({
+            figmaId: '410:4754',
+            name: 'Ellipse 1',
+            figmaType: 'FRAME',
+        });
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstSpec.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstSpec],
+        });
+        const imported = environment.canvas.children[0];
+        imported.layer = 17;
+        const manualChild = new FakeNode('ManualBadge');
+        imported.addChild(manualChild);
+
+        const secondSpec = makeSpec({
+            figmaId: '410:4754',
+            name: 'Ellipse 1',
+            figmaType: 'ELLIPSE',
+            action: 'render',
+            kind: 'sprite',
+            frame: { x: 0, y: 0, width: 163, height: 154 },
+            sprite: {
+                uuid: 'source-node-sprite-frame',
+                url: 'db://assets/Ellipse 1__tile.png',
+                sliced: false,
+                tiled: true,
+            },
+        });
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondSpec.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondSpec],
+        });
+        const maskNode = imported.getChildByName('__FigmaTiledMask');
+        const tiledNode = maskNode.getChildByName('__FigmaTiledSprite');
+
+        assert.equal(manualChild.parent, imported);
+        assert.equal(imported.getComponent(Mask), null);
+        assert.equal(maskNode.layer, 17);
+        assert.equal(tiledNode.layer, 17);
+    } finally {
+        Module._load = originalLoad;
+    }
 });
 
 test('uses the outermost Figma Frame as the root and centers it on a 640x1136 Canvas', async () => {

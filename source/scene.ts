@@ -30,6 +30,8 @@ interface SceneImportResult {
 }
 
 const BACKGROUND_NODE_NAME = '__FigmaBackground';
+const TILED_MASK_NODE_NAME = '__FigmaTiledMask';
+const TILED_SPRITE_NODE_NAME = '__FigmaTiledSprite';
 const RASTER_VECTOR_TYPES = new Set([
     'VECTOR',
     'BOOLEAN_OPERATION',
@@ -74,7 +76,10 @@ function setParentKeepingWorld(node: any, parent: any): void {
 }
 
 function isGeneratedHelperNode(child: any, parent: any, cc: any): boolean {
-    if (child.name === BACKGROUND_NODE_NAME || child.name === '__FigmaContent') {
+    if (child.name === BACKGROUND_NODE_NAME
+        || child.name === TILED_MASK_NODE_NAME
+        || child.name === TILED_SPRITE_NODE_NAME
+        || child.name === '__FigmaContent') {
         return true;
     }
     if (child.name === 'view' && parent.getComponent?.(cc.ScrollView)) {
@@ -259,7 +264,9 @@ function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
     const desired = new Set<any>();
     const clipsChildren = clipsGeneratedChildren(spec);
     if (spec.action === 'render' || spec.sprite) {
-        desired.add(cc.Sprite);
+        if (!usesTiledSpriteHelper(spec)) {
+            desired.add(cc.Sprite);
+        }
     } else if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
         desired.add(cc.Label);
     } else if (!RASTER_VECTOR_TYPES.has(spec.figmaType)) {
@@ -303,6 +310,33 @@ function removeGeneratedBackground(node: any): void {
     }
     background.removeFromParent();
     background.destroy();
+}
+
+function destroyGeneratedTiledSprite(tiledSprite: any, survivor: any): void {
+    for (const child of [...tiledSprite.children]) {
+        setParentKeepingWorld(child, survivor);
+    }
+    tiledSprite.removeFromParent();
+    tiledSprite.destroy();
+}
+
+function removeGeneratedTiledNodes(node: any): void {
+    const tiledMask = node.getChildByName(TILED_MASK_NODE_NAME);
+    if (tiledMask) {
+        for (const child of [...tiledMask.children]) {
+            if (child.name === TILED_SPRITE_NODE_NAME) {
+                destroyGeneratedTiledSprite(child, node);
+            } else {
+                setParentKeepingWorld(child, node);
+            }
+        }
+        tiledMask.removeFromParent();
+        tiledMask.destroy();
+    }
+    const tiledSprite = node.getChildByName(TILED_SPRITE_NODE_NAME);
+    if (tiledSprite) {
+        destroyGeneratedTiledSprite(tiledSprite, node);
+    }
 }
 
 function removeObsoleteScrollHelpers(node: any, spec: SceneNodeSpec, cc: any): void {
@@ -538,18 +572,97 @@ async function configureSprite(node: any, spec: SceneNodeSpec, scale: number, cc
     }
     const { Sprite, UITransform, assetManager } = cc;
     const sprite = node.getComponent(Sprite) ?? node.addComponent(Sprite);
+    sprite.spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
     sprite.sizeMode = Sprite.SizeMode.CUSTOM;
     sprite.type = spec.sprite.tiled
         ? Sprite.Type.TILED
         : spec.sprite.sliced
             ? Sprite.Type.SLICED
             : Sprite.Type.SIMPLE;
-    sprite.spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
     const transform = node.getComponent(UITransform);
     transform?.setContentSize(
         Math.max(0, spec.frame.width * scale),
         Math.max(0, spec.frame.height * scale),
     );
+}
+
+function requiresTiledMask(spec: SceneNodeSpec): boolean {
+    return Boolean(spec.sprite?.tiled && spec.figmaType === 'ELLIPSE');
+}
+
+function nativeTileScale(spec: SceneNodeSpec): number {
+    const scale = spec.sprite?.tileScale;
+    return typeof scale === 'number' && Number.isFinite(scale) && scale > 0
+        ? scale
+        : 1;
+}
+
+function usesTiledSpriteHelper(spec: SceneNodeSpec): boolean {
+    return Boolean(spec.sprite?.tiled)
+        && (requiresTiledMask(spec) || Math.abs(nativeTileScale(spec) - 1) > 1e-6);
+}
+
+async function configureTiledSpriteHelper(
+    node: any,
+    spec: SceneNodeSpec,
+    scale: number,
+    cc: any,
+): Promise<void> {
+    const needsMask = requiresTiledMask(spec);
+    let tiledMask = node.getChildByName(TILED_MASK_NODE_NAME);
+    let tiledSprite = tiledMask?.getChildByName(TILED_SPRITE_NODE_NAME)
+        ?? node.getChildByName(TILED_SPRITE_NODE_NAME);
+    if (needsMask) {
+        if (!tiledMask) {
+            tiledMask = new cc.Node(TILED_MASK_NODE_NAME);
+            node.addChild(tiledMask);
+        }
+        tiledMask.name = TILED_MASK_NODE_NAME;
+        tiledMask.layer = node.layer;
+        tiledMask.active = true;
+        const maskTransform = tiledMask.getComponent(cc.UITransform)
+            ?? tiledMask.addComponent(cc.UITransform);
+        maskTransform.setAnchorPoint(0.5, 0.5);
+        maskTransform.setContentSize(
+            Math.max(0, spec.frame.width * scale),
+            Math.max(0, spec.frame.height * scale),
+        );
+        tiledMask.setPosition(new cc.Vec3(0, 0, 0));
+        tiledMask.setRotationFromEuler(0, 0, 0);
+        tiledMask.setScale(new cc.Vec3(1, 1, 1));
+        configureClip(tiledMask, spec, cc);
+        tiledMask.setSiblingIndex(0);
+    } else if (tiledMask) {
+        for (const child of [...tiledMask.children]) {
+            setParentKeepingWorld(child, node);
+        }
+        tiledMask.removeFromParent();
+        tiledMask.destroy();
+        tiledMask = null;
+    }
+    const spriteParent = tiledMask ?? node;
+    if (!tiledSprite) {
+        tiledSprite = new cc.Node(TILED_SPRITE_NODE_NAME);
+        spriteParent.addChild(tiledSprite);
+    } else if (tiledSprite.parent !== spriteParent) {
+        tiledSprite.parent = spriteParent;
+    }
+    tiledSprite.name = TILED_SPRITE_NODE_NAME;
+    tiledSprite.layer = node.layer;
+    tiledSprite.active = true;
+    await configureSprite(tiledSprite, spec, scale, cc);
+    const tileScale = nativeTileScale(spec);
+    const transform = tiledSprite.getComponent(cc.UITransform)
+        ?? tiledSprite.addComponent(cc.UITransform);
+    transform.setAnchorPoint(0.5, 0.5);
+    transform.setContentSize(
+        Math.max(0, spec.frame.width * scale / tileScale),
+        Math.max(0, spec.frame.height * scale / tileScale),
+    );
+    tiledSprite.setPosition(new cc.Vec3(0, 0, 0));
+    tiledSprite.setRotationFromEuler(0, 0, 0);
+    tiledSprite.setScale(new cc.Vec3(tileScale, tileScale, 1));
+    tiledSprite.setSiblingIndex(0);
 }
 
 function configureOpacity(node: any, spec: SceneNodeSpec, cc: any): void {
@@ -699,8 +812,9 @@ function configureClip(node: any, spec: SceneNodeSpec, cc: any): void {
     }
     const mask = node.getComponent(cc.Mask) ?? node.addComponent(cc.Mask);
     mask.type = spec.figmaType === 'ELLIPSE'
-        ? cc.Mask.Type.ELLIPSE
+        ? cc.Mask.Type.GRAPHICS_ELLIPSE ?? cc.Mask.Type.ELLIPSE
         : cc.Mask.Type.GRAPHICS_RECT ?? cc.Mask.Type.RECT;
+    mask.inverted = false;
 }
 
 function clipsGeneratedChildren(spec: SceneNodeSpec): boolean {
@@ -1028,13 +1142,21 @@ export const methods = {
                     await waitForDeferredComponentRemoval();
                 }
                 removeGeneratedBackground(node);
+                const tiledSpriteHelper = usesTiledSpriteHelper(spec);
+                if (!tiledSpriteHelper) {
+                    removeGeneratedTiledNodes(node);
+                }
                 configureGeometry(node, spec, payload.scale, cc);
                 const clipsChildren = clipsGeneratedChildren(spec);
                 if (spec.action === 'render' || spec.sprite) {
                     if (!spec.sprite) {
                         throw new Error(`PNG 整层节点“${spec.name}”没有绑定 SpriteFrame，资源可能未成功导入。`);
                     }
-                    await configureSprite(node, spec, payload.scale, cc);
+                    if (tiledSpriteHelper) {
+                        await configureTiledSpriteHelper(node, spec, payload.scale, cc);
+                    } else {
+                        await configureSprite(node, spec, payload.scale, cc);
+                    }
                 } else if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
                     configureLabel(node, spec, payload.scale, cc);
                     if (spec.fontUuid) {

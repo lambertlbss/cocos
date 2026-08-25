@@ -58,13 +58,27 @@ function parseColor(value: unknown): FigmaColor | undefined {
 
 function parsePaint(value: unknown): FigmaPaint {
     const input = record(value);
+    const spacing = record(input.spacing);
     return {
         type: stringValue(input.type, 'SOLID'),
         visible: booleanValue(input.visible, true),
         opacity: Math.max(0, Math.min(1, numberValue(input.opacity, 1))),
+        blendMode: stringValue(input.blendMode) || undefined,
         color: parseColor(input.color),
         imageRef: stringValue(input.imageRef) || undefined,
         scaleMode: stringValue(input.scaleMode) || undefined,
+        rotation: typeof input.rotation === 'number' ? numberValue(input.rotation) : undefined,
+        sourceNodeId: stringValue(input.sourceNodeId) || undefined,
+        tileType: stringValue(input.tileType) || undefined,
+        scalingFactor: typeof input.scalingFactor === 'number'
+            ? Math.max(0, numberValue(input.scalingFactor, 1))
+            : undefined,
+        spacing: Object.keys(spacing).length ? {
+            x: numberValue(spacing.x),
+            y: numberValue(spacing.y),
+        } : undefined,
+        horizontalAlignment: stringValue(input.horizontalAlignment) || undefined,
+        verticalAlignment: stringValue(input.verticalAlignment) || undefined,
         gradientHandlePositions: arrayValue(input.gradientHandlePositions).map((item) => {
             const point = record(item);
             return { x: numberValue(point.x), y: numberValue(point.y) };

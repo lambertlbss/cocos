@@ -30,9 +30,18 @@ export interface FigmaPaint {
     type: string;
     visible?: boolean;
     opacity?: number;
+    blendMode?: string;
     color?: FigmaColor;
     imageRef?: string;
     scaleMode?: string;
+    rotation?: number;
+    /** Figma PATTERN paint 的平铺源节点。 */
+    sourceNodeId?: string;
+    tileType?: string;
+    scalingFactor?: number;
+    spacing?: { x: number; y: number };
+    horizontalAlignment?: string;
+    verticalAlignment?: string;
     gradientHandlePositions?: Array<{ x: number; y: number }>;
     gradientStops?: Array<{ position: number; color: FigmaColor }>;
 }
@@ -168,6 +177,8 @@ export interface SpriteAssetSpec {
     url: string;
     sliced: boolean;
     tiled?: boolean;
+    /** Native tile size multiplier after the SpriteFrame's untrimmed pixel size. */
+    tileScale?: number;
 }
 
 export interface SceneNodeSpec {
