@@ -7,6 +7,7 @@ import {
     actionOptionsForNode,
     effectiveKindForNode,
     isVectorNodeType,
+    rerenderPreservingScroll,
     resolveEffectiveActions,
     smartActionForNode,
 } from './model';
@@ -228,7 +229,7 @@ function initializeDocument(document: DocumentDto): void {
         ? `检测到：${document.fonts.join('、')}`
         : '当前文件尚未发现字体。';
     renderFontMap();
-    renderTree();
+    renderTree(true);
     updateSummary();
 }
 
@@ -546,24 +547,26 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     }
 }
 
-function renderTree(): void {
+function renderTree(resetScroll = false): void {
     const tree = element('#tree');
-    tree.replaceChildren();
-    if (!state.document) {
-        const empty = document.createElement('div');
-        empty.className = 'empty-state';
-        const glyph = document.createElement('span');
-        glyph.className = 'empty-glyph';
-        glyph.textContent = '↳';
-        const title = document.createElement('strong');
-        title.textContent = '还没有节点';
-        const body = document.createElement('p');
-        body.textContent = '读取 Figma 链接后，可逐层选择生成、PNG 整层或更新。';
-        empty.append(glyph, title, body);
-        tree.appendChild(empty);
-        return;
-    }
-    state.document.tree.forEach((node) => appendTreeNode(tree, node, 0));
+    rerenderPreservingScroll(tree, () => {
+        tree.replaceChildren();
+        if (!state.document) {
+            const empty = document.createElement('div');
+            empty.className = 'empty-state';
+            const glyph = document.createElement('span');
+            glyph.className = 'empty-glyph';
+            glyph.textContent = '↳';
+            const title = document.createElement('strong');
+            title.textContent = '还没有节点';
+            const body = document.createElement('p');
+            body.textContent = '读取 Figma 链接后，可逐层选择生成、PNG 整层或更新。';
+            empty.append(glyph, title, body);
+            tree.appendChild(empty);
+            return;
+        }
+        state.document.tree.forEach((node) => appendTreeNode(tree, node, 0));
+    }, resetScroll);
 }
 
 function updateSummary(): void {

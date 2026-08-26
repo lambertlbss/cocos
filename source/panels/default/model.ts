@@ -20,6 +20,21 @@ export function isVectorNodeType(type: string): boolean {
     return VECTOR_NODE_TYPES.has(type);
 }
 
+export function rerenderPreservingScroll(
+    target: { scrollTop: number; scrollLeft: number },
+    render: () => void,
+    reset = false,
+): void {
+    const scrollTop = reset ? 0 : target.scrollTop;
+    const scrollLeft = reset ? 0 : target.scrollLeft;
+    try {
+        render();
+    } finally {
+        target.scrollTop = scrollTop;
+        target.scrollLeft = scrollLeft;
+    }
+}
+
 export function smartActionForNode(node: TreeNodeDto): ImportAction {
     const inferred = normalizeImportAction(node.action);
     const renderSubtree = Boolean(node.renderSubtree) || (node.action as unknown) === 'merge';
