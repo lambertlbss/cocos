@@ -62,6 +62,25 @@ test('guards missing bounds and sorts gradient stops', () => {
     assert.deepEqual(node.fills[0].gradientStops.map((stop) => stop.position), [0, 1]);
 });
 
+test('converts Figma REST radians and transform matrices to Cocos degrees', () => {
+    const node = parseNode({
+        id: '231:46119',
+        name: 'common_xian_01',
+        type: 'RECTANGLE',
+        rotation: Math.PI,
+        size: { x: 68, y: 17 },
+        relativeTransform: [
+            [-1, 0, 396],
+            [0, -1, 58.5],
+        ],
+        absoluteBoundingBox: { x: 328, y: 41.5, width: 68, height: 17 },
+    });
+
+    assert.ok(node);
+    assert.equal(node.rotation, 180);
+    assert.deepEqual(node.size, { width: 68, height: 17 });
+});
+
 test('preserves Figma PATTERN paint source and native tiling settings', () => {
     const node = parseNode({
         id: '410:4754',

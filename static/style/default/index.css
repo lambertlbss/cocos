@@ -548,6 +548,11 @@ input[readonly] {
     background: rgba(216, 255, 82, 0.055);
 }
 
+.tree-row.has-detail {
+    min-height: 54px;
+    padding-block: 6px;
+}
+
 .node-main {
     display: flex;
     align-items: center;
@@ -583,26 +588,67 @@ input[readonly] {
 .type-dot.component { background: #63d9a4; }
 
 .node-copy {
+    flex: 1;
     min-width: 0;
 }
 
-.node-name,
+.node-name-input,
 .node-meta {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.node-name {
+.node-name-input {
+    width: 100%;
+    min-height: 22px;
+    padding: 1px 4px;
+    border-color: transparent;
+    border-radius: 4px;
     color: #dce0dc;
+    background: transparent;
     font-size: 12px;
     line-height: 1.35;
+}
+
+.node-name-input:hover {
+    border-color: var(--border-strong);
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.node-name-input:focus {
+    border-color: rgba(216, 255, 82, 0.62);
+    background: #111416;
+}
+
+.node-name-input.is-renamed {
+    color: var(--accent);
 }
 
 .node-meta {
     margin-top: 2px;
     color: var(--muted-2);
     font: 11px/1.25 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.node-strategy,
+.node-warning {
+    display: -webkit-box;
+    overflow: hidden;
+    margin-top: 3px;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.node-strategy {
+    color: #91aa9d;
+}
+
+.node-warning {
+    color: #e9aa70;
 }
 
 .tree-row select {

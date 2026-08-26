@@ -2,7 +2,7 @@
   "package_version": 2,
   "name": "figma-importer-cocos",
   "title": "Figma Importer",
-  "version": "1.0.27",
+  "version": "1.0.32",
   "description": "Figma UI importer for Cocos Creator 3.8.7",
   "main": "./dist/main.js",
   "author": "Figma Importer contributors",
@@ -74,6 +74,11 @@
       "save-settings": {
         "methods": [
           "saveSettings"
+        ]
+      },
+      "save-node-overrides": {
+        "methods": [
+          "saveNodeOverrides"
         ]
       },
       "pick-asset-folder": {

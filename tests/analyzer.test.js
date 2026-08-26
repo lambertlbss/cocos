@@ -191,8 +191,17 @@ test('does not infer ScrollView from clipping, overflow geometry, or a scroll-li
     })), 'node');
 });
 
-test('recognizes only strict multi-segment snake_case as a structured node name', () => {
-    for (const name of ['img_hongbao_bg_mini', 'panel_list', 'icon_01', 'UI_panel_bg']) {
+test('recognizes structured names and stable Cocos semantic roles', () => {
+    for (const name of [
+        'img_hongbao_bg_mini',
+        'panel_list',
+        'icon_01',
+        'UI_panel_bg',
+        'view',
+        'content',
+        'panel_公会红包',
+        'txt_规则详情',
+    ]) {
         assert.equal(isStructuredNodeName(name), true, name);
     }
     for (const name of [
@@ -242,6 +251,207 @@ test('renders the nearest non-root structured boundary when its visible direct c
     assert.equal(assetBoundary.action, 'render');
     assert.equal(assetBoundary.renderSubtree, true);
     assert.match(assetBoundary.warning, /PNG 整层/);
+    assert.match(assetBoundary.warning, /所有有效可见直接子层.*非结构化纯视觉/);
+});
+
+test('keeps panel_view editable when structured and unstructured direct children are mixed', () => {
+    const root = node({
+        name: 'PopupInstructionView',
+        children: [{
+            id: 'panel:1',
+            name: 'panel_view',
+            type: 'FRAME',
+            absoluteBoundingBox: { x: 0, y: 0, width: 530, height: 388 },
+            children: [
+                {
+                    id: 'panel:2',
+                    name: 'img_bg',
+                    type: 'FRAME',
+                    absoluteBoundingBox: { x: 0, y: 0, width: 530, height: 388 },
+                },
+                {
+                    id: 'panel:3',
+                    name: 'txt_title',
+                    type: 'FRAME',
+                    absoluteBoundingBox: { x: 211, y: 8, width: 108, height: 42 },
+                },
+                {
+                    id: 'panel:4',
+                    name: 'Ellipse 1',
+                    type: 'ELLIPSE',
+                    absoluteBoundingBox: { x: 20, y: 80, width: 163, height: 154 },
+                },
+            ],
+        }],
+    });
+
+    const panel = root.children[0];
+    const panelTree = analyzeTree([root])[0].children[0];
+    assert.equal(shouldRenderMessySubtree(panel, false), false);
+    assert.equal(panelTree.action, 'generate');
+    assert.equal(panelTree.renderSubtree, false);
+    assert.equal(panelTree.warning, undefined);
+});
+
+test('keeps Cocos semantic containers editable even when every child name is unstructured', () => {
+    const root = node({
+        id: 'semantic-root',
+        name: 'PopupInstructionView',
+        children: [{
+            id: 'semantic-panel',
+            name: 'panel_view',
+            type: 'FRAME',
+            children: [{
+                id: 'semantic-placeholder',
+                name: 'Ellipse 1',
+                type: 'ELLIPSE',
+                fills: [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }],
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+            }],
+        }],
+    });
+
+    const panel = analyzeTree([root])[0].children[0];
+    assert.equal(panel.action, 'generate');
+    assert.equal(panel.renderSubtree, false);
+});
+
+test('does not flatten all-messy wrappers that contain editable or runtime structure', () => {
+    const cases = [
+        {
+            label: 'text descendant',
+            child: {
+                id: 'guard:1',
+                name: 'Group 1',
+                type: 'GROUP',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 40 },
+                children: [{
+                    id: 'guard:2',
+                    name: '标题',
+                    type: 'TEXT',
+                    characters: '规则详情',
+                    absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 40 },
+                }],
+            },
+        },
+        {
+            label: 'scroll descendant',
+            child: {
+                id: 'guard:3',
+                name: 'Group 2',
+                type: 'GROUP',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+                children: [{
+                    id: 'guard:4',
+                    name: 'Frame 4',
+                    type: 'FRAME',
+                    overflowDirection: 'VERTICAL_SCROLLING',
+                    absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+                }],
+            },
+        },
+        {
+            label: 'semantic descendant',
+            child: {
+                id: 'guard:5',
+                name: 'Group 3',
+                type: 'GROUP',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+                children: [{
+                    id: 'guard:6',
+                    name: 'content',
+                    type: 'FRAME',
+                    absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+                }],
+            },
+        },
+        {
+            label: 'manual export descendant',
+            child: {
+                id: 'guard:7',
+                name: 'Group 4',
+                type: 'GROUP',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+                children: [{
+                    id: 'guard:8',
+                    name: 'Vector 1',
+                    type: 'VECTOR',
+                    exportSettings: [{ format: 'PNG' }],
+                    absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+                }],
+            },
+        },
+        {
+            label: 'named slice descendant',
+            child: {
+                id: 'guard:9',
+                name: 'Group 5',
+                type: 'GROUP',
+                absoluteBoundingBox: { x: 0, y: 0, width: 90, height: 30 },
+                children: [0, 1, 2].map((index) => ({
+                    id: `guard:slice:${index}`,
+                    name: index === 0 ? 'Rectangle' : `Rectangle ${index}`,
+                    type: 'RECTANGLE',
+                    absoluteBoundingBox: { x: index * 30, y: 0, width: 30, height: 30 },
+                })),
+            },
+        },
+    ];
+
+    for (const { label, child } of cases) {
+        const root = node({
+            name: 'panel_root',
+            children: [{
+                id: `wrapper:${label}`,
+                name: 'img_complex_asset',
+                type: 'FRAME',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+                children: [child],
+            }],
+        });
+        const wrapper = root.children[0];
+        const [tree] = analyzeTree([root]);
+        assert.equal(shouldRenderMessySubtree(wrapper, false), false, label);
+        assert.equal(tree.children[0].action, 'generate', label);
+        assert.equal(tree.children[0].renderSubtree, false, label);
+    }
+});
+
+test('only counts effective visible children when deciding a pure-visual PNG boundary', () => {
+    const wrapper = node({
+        name: 'img_effective_visual',
+        children: [
+            {
+                id: 'effective:1',
+                name: 'Group 1',
+                type: 'GROUP',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+                children: [{
+                    id: 'effective:2',
+                    name: 'Ellipse 1',
+                    type: 'ELLIPSE',
+                    absoluteBoundingBox: { x: 10, y: 10, width: 20, height: 20 },
+                }],
+            },
+            {
+                id: 'effective:3',
+                name: 'txt_hidden',
+                type: 'TEXT',
+                visible: false,
+                characters: 'hidden',
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 20 },
+            },
+            {
+                id: 'effective:4',
+                name: 'content',
+                type: 'FRAME',
+                opacity: 0,
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+            },
+        ],
+    });
+
+    assert.equal(shouldRenderMessySubtree(wrapper, false), true);
 });
 
 test('does not flatten structured, hidden-noise, root, or explicit ScrollView containers', () => {

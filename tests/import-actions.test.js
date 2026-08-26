@@ -11,9 +11,11 @@ const {
 const {
     actionOptionsForNode,
     effectiveKindForNode,
+    kindOptionsForAction,
     rerenderPreservingScroll,
     resolveEffectiveActions,
     smartActionForNode,
+    strategySummaryForNode,
 } = require('../dist/panels/default/model');
 
 function treeNode(overrides = {}) {
@@ -28,6 +30,10 @@ function treeNode(overrides = {}) {
         kind: overrides.kind ?? 'node',
         renderSubtree: overrides.renderSubtree ?? false,
         patchCandidate: false,
+        reason: overrides.reason,
+        fold: overrides.fold,
+        absorbedNodeIds: overrides.absorbedNodeIds,
+        warning: overrides.warning,
         children: overrides.children ?? [],
     };
 }
@@ -97,6 +103,40 @@ test('panel exposes PNG whole-layer without a duplicate merge-subtree option', (
     const autoButton = treeNode({ name: 'common_btn_close', kind: 'button' });
     assert.equal(effectiveKindForNode(autoButton, 'auto', 'render'), 'button');
     assert.equal(effectiveKindForNode(autoButton, 'auto', 'generate'), 'button');
+});
+
+test('panel exposes RichText only for editable node actions', () => {
+    const editableKinds = kindOptionsForAction('generate');
+    assert.ok(editableKinds.some(([value, label]) => value === 'richText' && label === 'RichText'));
+    assert.equal(kindOptionsForAction('render').some(([value]) => value === 'richText'), false);
+});
+
+test('builds visible strategy and separate warning summaries for folded nodes', () => {
+    const summary = strategySummaryForNode(treeNode({
+        reason: 'background-promotion',
+        fold: 'background',
+        absorbedNodeIds: ['1:2', '1:3'],
+        warning: '背景含有不支持的混合模式',
+    }));
+
+    assert.match(summary.strategy, /背景可提升到父节点/);
+    assert.match(summary.strategy, /提升背景子层/);
+    assert.match(summary.strategy, /吸收 2 个子层/);
+    assert.equal(summary.warning, '背景含有不支持的混合模式');
+
+    assert.deepEqual(strategySummaryForNode(treeNode({
+        reason: 'single-image-fold',
+        fold: 'single-image',
+        absorbedNodeIds: ['1:2'],
+    }), true), {
+        strategy: '用户显式覆盖',
+        warning: undefined,
+    });
+
+    assert.deepEqual(strategySummaryForNode(treeNode()), {
+        strategy: undefined,
+        warning: undefined,
+    });
 });
 
 test('restores nested PNG boundaries and keeps their descendants suppressed', () => {

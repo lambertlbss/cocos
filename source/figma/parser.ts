@@ -43,6 +43,37 @@ function parseRect(value: unknown): Rect | undefined {
     return { x, y, width, height };
 }
 
+function parseSize(value: unknown): { width: number; height: number } | undefined {
+    const input = record(value);
+    const width = numberValue(input.x, Number.NaN);
+    const height = numberValue(input.y, Number.NaN);
+    if (![width, height].every(Number.isFinite) || width < 0 || height < 0) {
+        return undefined;
+    }
+    return { width, height };
+}
+
+/**
+ * Figma REST 的 rotation 数值是弧度；geometry=paths 同时提供的矩阵是更
+ * 稳定的事实来源。矩阵公式与 Figma rotation 属性一致：atan2(-m10,m00)。
+ */
+export function nodeRotationDegrees(
+    rawRotation: unknown,
+    relativeTransform: number[][] | undefined,
+): number {
+    const m00 = relativeTransform?.[0]?.[0];
+    const m10 = relativeTransform?.[1]?.[0];
+    const radians = Number.isFinite(m00) && Number.isFinite(m10)
+        ? Math.atan2(-Number(m10), Number(m00))
+        : numberValue(rawRotation);
+    let degrees = radians * 180 / Math.PI;
+    if (Math.abs(degrees) < 1e-10) return 0;
+    if (Math.abs(Math.abs(degrees) - 180) < 1e-10) return 180;
+    if (degrees > 180) degrees -= 360;
+    if (degrees <= -180) degrees += 360;
+    return degrees;
+}
+
 function parseColor(value: unknown): FigmaColor | undefined {
     const input = record(value);
     if (!['r', 'g', 'b'].every((key) => typeof input[key] === 'number')) {
@@ -133,6 +164,7 @@ export function parseNode(value: unknown): FigmaNode | null {
     const constraints = record(input.constraints);
     const relativeTransform = arrayValue(input.relativeTransform)
         .map((row) => arrayValue(row).map((part) => numberValue(part)));
+    const parsedTransform = relativeTransform.length === 2 ? relativeTransform : undefined;
     const cornerRadii = arrayValue(input.rectangleCornerRadii).map((part) => numberValue(part));
     const arcData = record(input.arcData);
 
@@ -146,8 +178,9 @@ export function parseNode(value: unknown): FigmaNode | null {
             .filter((child): child is FigmaNode => child !== null),
         absoluteBoundingBox: parseRect(input.absoluteBoundingBox),
         absoluteRenderBounds: parseRect(input.absoluteRenderBounds),
-        relativeTransform: relativeTransform.length === 2 ? relativeTransform : undefined,
-        rotation: numberValue(input.rotation),
+        size: parseSize(input.size),
+        relativeTransform: parsedTransform,
+        rotation: nodeRotationDegrees(input.rotation, parsedTransform),
         opacity: Math.max(0, Math.min(1, numberValue(input.opacity, 1))),
         blendMode: stringValue(input.blendMode) || undefined,
         clipsContent: booleanValue(input.clipsContent, false),

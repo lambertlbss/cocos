@@ -26,6 +26,9 @@ const VECTOR_TYPES = new Set([
 
 const SLICE_RECTANGLE_NAME = /^Rectangle(?:[\s_-]*\d+)?$/i;
 const STRUCTURED_NODE_NAME = /^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$/;
+const SEMANTIC_NODE_NAME = /^(?:panel|list|layout|btn|button|img|image|icon|bg|sprite|txt|text|label)_[\p{L}\p{N}]+(?:_[\p{L}\p{N}]+)*$/iu;
+const RUNTIME_ROLE_NAME = /^(?:panel|list|layout|btn|button|txt|text|label)_[\p{L}\p{N}]+(?:_[\p{L}\p{N}]+)*$/iu;
+const EXACT_SEMANTIC_NAMES = new Set(['view', 'content']);
 const FIGMA_SCROLL_DIRECTIONS = new Set([
     'HORIZONTAL_SCROLLING',
     'VERTICAL_SCROLLING',
@@ -40,7 +43,12 @@ export function isVectorNode(node: Pick<FigmaNode, 'type'>): boolean {
 }
 
 export function isStructuredNodeName(name: string): boolean {
-    return name === name.trim() && STRUCTURED_NODE_NAME.test(name);
+    if (name !== name.trim()) {
+        return false;
+    }
+    return EXACT_SEMANTIC_NAMES.has(name.toLowerCase())
+        || STRUCTURED_NODE_NAME.test(name)
+        || SEMANTIC_NODE_NAME.test(name);
 }
 
 export function isNamedSliceGroup(node: FigmaNode): boolean {
@@ -248,20 +256,79 @@ export function inferAction(node: FigmaNode): ImportAction {
     return 'render';
 }
 
+function hasExplicitScroll(node: FigmaNode): boolean {
+    const overflowDirection = node.overflowDirection?.trim().toUpperCase() ?? '';
+    return FIGMA_SCROLL_DIRECTIONS.has(overflowDirection);
+}
+
+function isEffectivelyVisible(node: FigmaNode): boolean {
+    if (node.visible === false || node.opacity <= 0) {
+        return false;
+    }
+    const frame = node.absoluteBoundingBox;
+    return !frame || (frame.width > 0 && frame.height > 0);
+}
+
+function isRuntimeRoleBoundary(node: FigmaNode): boolean {
+    const name = node.name.trim();
+    return EXACT_SEMANTIC_NAMES.has(name.toLowerCase())
+        || RUNTIME_ROLE_NAME.test(name)
+        || hasExplicitScroll(node)
+        || Boolean(inferCocosLayoutMode(node));
+}
+
+/**
+ * A messy visual wrapper must not absorb an editable or independently planned
+ * descendant. Structured names, text, scrolling/layout semantics, manual
+ * exports and slice groups all need to keep their own import boundary.
+ */
+function subtreeRequiresStructure(node: FigmaNode): boolean {
+    if (!isEffectivelyVisible(node)) {
+        return false;
+    }
+    if (node.type === 'TEXT'
+        || isStructuredNodeName(node.name)
+        || isRuntimeRoleBoundary(node)
+        || hasManualExport(node)
+        || isNamedSliceGroup(node)) {
+        return true;
+    }
+    return node.children.some(subtreeRequiresStructure);
+}
+
+function subtreeHasVisualContent(node: FigmaNode): boolean {
+    if (!isEffectivelyVisible(node) || node.type === 'TEXT') {
+        return false;
+    }
+    const hasVisibleFill = node.fills.some((fill) =>
+        fill.visible !== false && (fill.opacity ?? 1) > 0);
+    const hasVisibleStroke = node.strokeWeight > 0 && node.strokes.some((stroke) =>
+        stroke.visible !== false && (stroke.opacity ?? 1) > 0);
+    const hasVisibleEffect = node.effects.some((effect) => effect.visible !== false);
+    if (hasVisibleFill || hasVisibleStroke || hasVisibleEffect || isVectorNode(node)) {
+        return true;
+    }
+    if (!CONTAINER_TYPES.has(node.type)) {
+        return true;
+    }
+    return node.children.some(subtreeHasVisualContent);
+}
+
 export function shouldRenderMessySubtree(node: FigmaNode, isRoot: boolean): boolean {
     if (isRoot
         || node.visible === false
         || !CONTAINER_TYPES.has(node.type)
-        || !isStructuredNodeName(node.name)) {
+        || !isStructuredNodeName(node.name)
+        || hasManualExport(node)
+        || isNamedSliceGroup(node)
+        || isRuntimeRoleBoundary(node)) {
         return false;
     }
-    const overflowDirection = node.overflowDirection?.trim().toUpperCase() ?? '';
-    if (FIGMA_SCROLL_DIRECTIONS.has(overflowDirection)) {
-        return false;
-    }
-    const visibleChildren = node.children.filter((child) => child.visible !== false);
+    const visibleChildren = node.children.filter(isEffectivelyVisible);
     return visibleChildren.length > 0
-        && visibleChildren.some((child) => !isStructuredNodeName(child.name));
+        && visibleChildren.every((child) => !isStructuredNodeName(child.name))
+        && !visibleChildren.some(subtreeRequiresStructure)
+        && visibleChildren.some(subtreeHasVisualContent);
 }
 
 export function isPatchCandidate(node: FigmaNode): boolean {
@@ -279,14 +346,14 @@ function warningFor(
     if (renderManualExportSubtree) {
         return '检测到 Figma Export 设置，智能模式将按 PNG 整层导入；Figma 的格式、后缀和倍率不沿用';
     }
-    if (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode)) {
-        return `混合模式 ${node.blendMode} 将近似处理`;
-    }
     if (isNamedSliceGroup(node)) {
         return '检测到 3/9 个 Rectangle 切片，将按 PNG 整层导入并优先复用同名资源';
     }
+    if (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode)) {
+        return `混合模式 ${node.blendMode} 将近似处理`;
+    }
     if (renderMessySubtree) {
-        return '当前结构化节点包含未结构化的直接子层，智能模式将按 PNG 整层导入';
+        return '所有有效可见直接子层均为非结构化纯视觉内容，且未检测到文字或运行时结构，智能模式将按 PNG 整层导入';
     }
     if (node.type === 'TEXT' && node.characters && !/[\r\n\u2028\u2029]/.test(node.characters)) {
         const lineHeight = node.style?.lineHeightPx ?? node.style?.fontSize ?? 0;

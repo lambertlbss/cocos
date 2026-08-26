@@ -6,6 +6,32 @@ import {
 } from '../../import-actions';
 import type { ImportAction, NodeKind, TreeNodeDto } from '../../types';
 
+export interface NodeStrategySummary {
+    strategy?: string;
+    warning?: string;
+}
+
+const REASON_LABELS: Record<NonNullable<TreeNodeDto['reason']>, string> = {
+    hidden: '隐藏节点',
+    'root-structure': '保留根节点结构',
+    'manual-export': 'Figma Export 资源边界',
+    'slice-resource': '三/九宫资源边界',
+    'semantic-container': '保留语义容器',
+    'editable-text': '保留可编辑文字',
+    'single-image-fold': '单图片包装层可折叠',
+    'single-text-fold': '单文字包装层可折叠',
+    'background-promotion': '背景可提升到父节点',
+    'visual-fallback': '纯视觉子树使用 PNG',
+    'default-generate': '保留可编辑结构',
+    'user-override': '用户显式覆盖',
+};
+
+const FOLD_LABELS: Record<NonNullable<TreeNodeDto['fold']>, string> = {
+    'single-image': '折叠单图片子层',
+    'single-text': '折叠单文字子层',
+    background: '提升背景子层',
+};
+
 const VECTOR_NODE_TYPES = new Set([
     'VECTOR',
     'BOOLEAN_OPERATION',
@@ -54,6 +80,44 @@ export function actionOptionsForNode(node: TreeNodeDto): Array<[ImportAction, st
         ['render', isVectorNodeType(node.type) ? 'PNG Sprite' : 'PNG 整层'],
         ['transform', '更新'],
     ];
+}
+
+export function kindOptionsForAction(action: ImportAction): Array<[NodeKind, string]> {
+    if (action === 'render') {
+        return [
+            ['sprite', 'Sprite'],
+            ['button', 'Button'],
+        ];
+    }
+    return [
+        ['auto', '自动'],
+        ['node', 'Node'],
+        ['sprite', 'Sprite'],
+        ['label', 'Label'],
+        ['richText', 'RichText'],
+        ['button', 'Button'],
+        ['scrollView', 'ScrollView'],
+        ['layout', 'Layout'],
+    ];
+}
+
+export function strategySummaryForNode(
+    node: TreeNodeDto,
+    explicit = false,
+): NodeStrategySummary {
+    const details: string[] = [];
+    const reason = explicit ? 'user-override' : node.reason;
+    if (reason) {
+        details.push(REASON_LABELS[reason]);
+    }
+    if (node.fold && !explicit) {
+        const absorbed = node.absorbedNodeIds?.length ?? 0;
+        details.push(`${FOLD_LABELS[node.fold]}，吸收 ${absorbed} 个子层`);
+    }
+    return {
+        strategy: details.length ? details.join(' · ') : undefined,
+        warning: node.warning,
+    };
 }
 
 export function effectiveKindForNode(

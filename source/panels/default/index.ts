@@ -3,13 +3,16 @@ import { join } from 'path';
 import packageJSON from '../../../package.json';
 import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import { normalizeImportAction } from '../../import-actions';
+import { sanitizeNodeName } from '../../node-name';
 import {
     actionOptionsForNode,
     effectiveKindForNode,
     isVectorNodeType,
+    kindOptionsForAction,
     rerenderPreservingScroll,
     resolveEffectiveActions,
     smartActionForNode,
+    strategySummaryForNode,
 } from './model';
 import type {
     ImportAction,
@@ -27,6 +30,7 @@ interface DocumentDto {
     tree: TreeNodeDto[];
     fonts: string[];
     fontAssets?: FontAssetOption[];
+    nodeOverrides?: ImportOverride[];
 }
 
 interface RoundtripDetectDto {
@@ -63,6 +67,9 @@ interface PanelState {
     actions: Map<string, ImportAction>;
     kinds: Map<string, NodeKind>;
     patches: Set<string>;
+    explicitIds: Set<string>;
+    names: Map<string, string>;
+    renamedIds: Set<string>;
     defaults: Map<string, { action: ImportAction; kind: NodeKind }>;
     collapsed: Set<string>;
     suppressed: Set<string>;
@@ -76,6 +83,7 @@ interface PanelState {
 let panelHost: any = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let importButtonResetTimer: ReturnType<typeof setTimeout> | null = null;
+let nodeOverrideSaveTask: Promise<void> = Promise.resolve();
 let roundtripPreviewToken: string | undefined;
 let roundtripPairToken: string | undefined;
 
@@ -97,6 +105,9 @@ const state: PanelState = {
     actions: new Map(),
     kinds: new Map(),
     patches: new Set(),
+    explicitIds: new Set(),
+    names: new Map(),
+    renamedIds: new Set(),
     defaults: new Map(),
     collapsed: new Set(),
     suppressed: new Set(),
@@ -236,6 +247,9 @@ function initializeDocument(document: DocumentDto): void {
     state.actions.clear();
     state.kinds.clear();
     state.patches.clear();
+    state.explicitIds.clear();
+    state.names.clear();
+    state.renamedIds.clear();
     state.defaults.clear();
     state.collapsed.clear();
     state.suppressed.clear();
@@ -244,10 +258,33 @@ function initializeDocument(document: DocumentDto): void {
         state.preferredActions.set(node.id, action);
         state.kinds.set(node.id, node.kind);
         state.defaults.set(node.id, { action, kind: node.kind });
+        state.names.set(node.id, node.name);
+    }
+    for (const override of document.nodeOverrides ?? []) {
+        const node = findNode(override.id, document.tree);
+        if (!node) {
+            continue;
+        }
+        const customName = sanitizeNodeName(override.name);
+        if (customName && customName !== node.name) {
+            state.names.set(node.id, customName);
+            state.renamedIds.add(node.id);
+        }
+        if (override.explicit === true) {
+            state.preferredActions.set(node.id, safeAction(node, override.action));
+            state.kinds.set(node.id, override.kind);
+            if (override.nineSlice && node.patchCandidate) {
+                state.patches.add(node.id);
+            }
+            state.explicitIds.add(node.id);
+        }
     }
     reconcileActions();
     root().querySelectorAll<HTMLElement>('[data-preset]').forEach((button) => {
-        button.classList.toggle('active', button.dataset.preset === 'smart');
+        button.classList.toggle(
+            'active',
+            state.explicitIds.size === 0 && button.dataset.preset === 'smart',
+        );
     });
     element('#file-name').textContent = document.fileName;
     element<HTMLInputElement>('#source-url').value = document.sourceUrl;
@@ -480,11 +517,53 @@ function setAction(node: TreeNodeDto, action: ImportAction): void {
     reconcileActions();
 }
 
+function effectiveNodeName(node: TreeNodeDto): string {
+    return state.names.get(node.id) ?? node.name;
+}
+
+function explicitOverrides(): ImportOverride[] {
+    if (!state.document) {
+        return [];
+    }
+    return flatten(state.document.tree)
+        .filter((node) => state.explicitIds.has(node.id) || state.renamedIds.has(node.id))
+        .map((node) => {
+            const renamed = state.renamedIds.has(node.id);
+            return {
+                id: node.id,
+                action: state.preferredActions.get(node.id) ?? smartActionForNode(node),
+                kind: state.kinds.get(node.id) ?? node.kind,
+                nineSlice: state.patches.has(node.id),
+                explicit: state.explicitIds.has(node.id),
+                ...(renamed ? { name: effectiveNodeName(node) } : {}),
+            };
+        });
+}
+
+function persistNodeOverrides(): void {
+    if (!state.document) {
+        return;
+    }
+    const fileKey = state.document.fileKey;
+    const overrides = explicitOverrides();
+    const scopeIds = flatten(state.document.tree).map((node) => node.id);
+    // Serialize writes so a slower earlier request can never overwrite a newer
+    // strategy snapshot after rapid select changes.
+    nodeOverrideSaveTask = nodeOverrideSaveTask
+        .catch(() => undefined)
+        .then(async () => {
+            await request<ImportOverride[]>('save-node-overrides', fileKey, overrides, scopeIds);
+        })
+        .catch((error) => {
+            showToast(errorMessage(error, '节点策略保存失败。'), true);
+        });
+}
+
 function matches(node: TreeNodeDto): boolean {
     if (!state.search) {
         return true;
     }
-    const haystack = `${node.name} ${node.type} ${node.id}`.toLowerCase();
+    const haystack = `${effectiveNodeName(node)} ${node.name} ${node.type} ${node.id}`.toLowerCase();
     if (haystack.includes(state.search)) {
         return true;
     }
@@ -542,14 +621,42 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     }`;
     const copy = document.createElement('div');
     copy.className = 'node-copy';
-    const name = document.createElement('div');
-    name.className = 'node-name';
-    name.textContent = node.name;
-    name.title = node.warning ? `${node.name} · ${node.warning}` : node.name;
+    const displayName = effectiveNodeName(node);
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = `node-name-input${state.renamedIds.has(node.id) ? ' is-renamed' : ''}`;
+    name.value = displayName;
+    name.maxLength = 96;
+    name.spellcheck = false;
+    name.dataset.nameFor = node.id;
+    name.setAttribute('aria-label', `${node.name} 导入节点名`);
+    const strategySummary = strategySummaryForNode(node, state.explicitIds.has(node.id));
+    name.title = [
+        state.renamedIds.has(node.id) ? `Figma 原名：${node.name}` : '点击修改导入节点名',
+        strategySummary.strategy,
+        strategySummary.warning,
+    ]
+        .filter(Boolean)
+        .join(' · ');
     const meta = document.createElement('div');
     meta.className = 'node-meta';
     meta.textContent = `${node.type} · ${Math.round(node.width)}×${Math.round(node.height)}`;
     copy.append(name, meta);
+    if (strategySummary.strategy) {
+        const strategy = document.createElement('div');
+        strategy.className = 'node-strategy';
+        strategy.textContent = strategySummary.strategy;
+        strategy.title = strategySummary.strategy;
+        copy.appendChild(strategy);
+    }
+    if (strategySummary.warning) {
+        const warning = document.createElement('div');
+        warning.className = 'node-warning';
+        warning.textContent = `⚠ ${strategySummary.warning}`;
+        warning.title = strategySummary.warning;
+        copy.appendChild(warning);
+    }
+    row.classList.toggle('has-detail', Boolean(strategySummary.strategy || strategySummary.warning));
     main.append(collapse, dot, copy);
 
     const selectedAction = safeAction(node, state.actions.get(node.id) ?? node.action);
@@ -558,7 +665,7 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
         'action-select',
         selectedAction,
         actionOptions,
-        `${node.name} 导入方式`,
+        `${displayName} 导入方式`,
     );
     action.dataset.actionFor = node.id;
 
@@ -569,25 +676,12 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
         selectedAction,
         state.patches.has(node.id),
     );
-    const kindOptions: Array<[string, string]> = selectedAction === 'render'
-        ? [
-            ['sprite', 'Sprite'],
-            ['button', 'Button'],
-        ]
-        : [
-            ['auto', '自动'],
-            ['node', 'Node'],
-            ['sprite', 'Sprite'],
-            ['label', 'Label'],
-            ['button', 'Button'],
-            ['scrollView', 'ScrollView'],
-            ['layout', 'Layout'],
-        ];
+    const kindOptions = kindOptionsForAction(selectedAction);
     const kind = makeSelect(
         'kind-select',
         effectiveKind,
         kindOptions,
-        `${node.name} 节点类型`,
+        `${displayName} 节点类型`,
     );
     kind.dataset.kindFor = node.id;
 
@@ -651,7 +745,7 @@ async function preview(node: TreeNodeDto): Promise<void> {
     }
     state.selectedId = node.id;
     renderTree();
-    element('#preview-meta').textContent = `${node.name} · ${Math.round(node.width)}×${Math.round(node.height)}`;
+    element('#preview-meta').textContent = `${effectiveNodeName(node)} · ${Math.round(node.width)}×${Math.round(node.height)}`;
     const stage = element('#preview-stage');
     const image = element<HTMLImageElement>('#preview-image');
     stage.classList.add('is-loading');
@@ -681,6 +775,8 @@ function applyPreset(name: string): void {
     }
     const all = flatten(state.document.tree);
     if (name === 'smart') {
+        state.explicitIds.clear();
+        state.patches.clear();
         for (const node of all) {
             const original = state.defaults.get(node.id)!;
             state.preferredActions.set(node.id, original.action);
@@ -689,6 +785,7 @@ function applyPreset(name: string): void {
     } else if (name === 'editable') {
         for (const node of all) {
             state.preferredActions.set(node.id, isVectorNodeType(node.type) ? 'render' : 'generate');
+            state.explicitIds.add(node.id);
         }
     } else {
         for (const node of all) {
@@ -697,6 +794,7 @@ function applyPreset(name: string): void {
                 : node.children.length
                     ? 'generate'
                     : 'render');
+            state.explicitIds.add(node.id);
         }
     }
     reconcileActions();
@@ -705,6 +803,7 @@ function applyPreset(name: string): void {
     });
     renderTree();
     updateSummary();
+    persistNodeOverrides();
 }
 
 async function importToScene(): Promise<void> {
@@ -724,6 +823,8 @@ async function importToScene(): Promise<void> {
         action: state.actions.get(node.id) ?? node.action,
         kind: state.kinds.get(node.id) ?? node.kind,
         nineSlice: state.patches.has(node.id),
+        explicit: state.explicitIds.has(node.id),
+        ...(state.renamedIds.has(node.id) ? { name: effectiveNodeName(node) } : {}),
     }));
     setBusy(true);
     updateProgress({ phase: 'assets', value: 0, message: '正在准备导入…' });
@@ -998,7 +1099,7 @@ function bindEvents(): void {
             renderTree();
             return;
         }
-        if (target.closest('select, label')) {
+        if (target.closest('select, label, input, textarea')) {
             return;
         }
         const id = target.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
@@ -1010,10 +1111,31 @@ function bindEvents(): void {
 
     element('#tree').addEventListener('change', (event) => {
         const target = event.target as HTMLInputElement | HTMLSelectElement;
-        if (target.dataset.actionFor) {
+        if (target.dataset.nameFor) {
+            const node = findNode(target.dataset.nameFor);
+            if (!node) return;
+            const customName = sanitizeNodeName(target.value);
+            if (!customName) {
+                target.value = effectiveNodeName(node);
+                showToast('节点名不能为空。', true);
+                return;
+            }
+            state.names.set(node.id, customName);
+            if (customName === node.name) {
+                state.renamedIds.delete(node.id);
+            } else {
+                state.renamedIds.add(node.id);
+            }
+            renderTree();
+            persistNodeOverrides();
+            showToast(state.renamedIds.has(node.id)
+                ? `节点将以“${customName}”导入。`
+                : '已恢复 Figma 原节点名。');
+        } else if (target.dataset.actionFor) {
             const node = findNode(target.dataset.actionFor);
             if (node) {
                 const action = target.value as ImportAction;
+                state.explicitIds.add(node.id);
                 if (action !== 'render') {
                     state.patches.delete(node.id);
                 }
@@ -1021,13 +1143,20 @@ function bindEvents(): void {
                 root().querySelectorAll<HTMLElement>('[data-preset]')
                     .forEach((button) => button.classList.remove('active'));
                 if (action === 'render' && node.children.length) {
-                    showToast(`“${node.name}”将作为整层导入，${descendants(node).length} 个子节点不会单独生成。`);
+                    showToast(`“${effectiveNodeName(node)}”将作为整层导入，${descendants(node).length} 个子节点不会单独生成。`);
                 }
                 renderTree();
+                persistNodeOverrides();
             }
         } else if (target.dataset.kindFor) {
             state.kinds.set(target.dataset.kindFor, target.value as NodeKind);
+            state.explicitIds.add(target.dataset.kindFor);
+            root().querySelectorAll<HTMLElement>('[data-preset]')
+                .forEach((button) => button.classList.remove('active'));
+            renderTree();
+            persistNodeOverrides();
         } else if (target.dataset.patchFor) {
+            state.explicitIds.add(target.dataset.patchFor);
             if ((target as HTMLInputElement).checked) {
                 state.patches.add(target.dataset.patchFor);
                 const node = findNode(target.dataset.patchFor);
@@ -1039,8 +1168,25 @@ function bindEvents(): void {
                 reconcileActions();
             }
             renderTree();
+            root().querySelectorAll<HTMLElement>('[data-preset]')
+                .forEach((button) => button.classList.remove('active'));
+            persistNodeOverrides();
         }
         updateSummary();
+    });
+
+    element('#tree').addEventListener('keydown', (event) => {
+        const target = event.target as HTMLInputElement;
+        const id = target.dataset.nameFor;
+        if (!id) return;
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            target.blur();
+        } else if (event.key === 'Escape') {
+            const node = findNode(id);
+            if (node) target.value = effectiveNodeName(node);
+            target.blur();
+        }
     });
 
     root().querySelectorAll<HTMLElement>('[data-preset]').forEach((button) => {

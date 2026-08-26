@@ -1,6 +1,7 @@
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path';
 import { existsSync } from 'fs';
-import { readdir } from 'fs/promises';
+import { randomBytes } from 'crypto';
+import { readFile, readdir } from 'fs/promises';
 import packageJSON from '../package.json';
 import { FigmaClient, CancelledError, clampImageScale } from './figma/client';
 import {
@@ -12,6 +13,10 @@ import {
     type TiledPaintSource,
 } from './figma/analyzer';
 import { parseDocument } from './figma/parser';
+import {
+    annotateTreeWithImportPlan,
+    compileImportPlan,
+} from './figma/import-planner';
 import { analyzeSliceGrid } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
 import {
@@ -31,6 +36,19 @@ import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
 import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
+import {
+    collectSceneSpecFigmaIds,
+    createMinimalPrefabJson,
+    createPrefabSyncRecord,
+    figmaFrameSourceHash,
+    mergePrefabSyncRecord,
+    planPrefabRecoveryTarget,
+    prefabJsonContainsSyncRecord,
+    readPrefabSyncRecord,
+    recordPrefabSyncCapture,
+    resolveExistingNodeFileIds,
+    type PrefabSyncRecord,
+} from './importer/prefab-sync';
 import { TokenVault } from './security/token-vault';
 import { RoundtripService } from './roundtrip/service';
 import { recoverInterruptedTransactions } from './roundtrip/recovery';
@@ -40,16 +58,22 @@ import {
     type DocumentSession,
     type FigmaNode,
     type ImportAction,
+    type ImportDecision,
     type ImportOverride,
     type ImportRequest,
     type ImportSettings,
     type NodeKind,
+    type NodeImportPlan,
+    type PrefabEditingState,
+    type PrefabSceneSyncCapture,
+    type PrefabSceneSyncContext,
     type ProgressEvent,
     type Rect,
     type SceneNodeSpec,
     type SpriteAssetSpec,
     type TreeNodeDto,
 } from './types';
+import { sanitizeNodeName } from './node-name';
 
 const vault = new TokenVault(packageJSON.name);
 let activeDocument: DocumentSession | null = null;
@@ -58,11 +82,7 @@ let roundtripController: AbortController | null = null;
 let settingsCache: ImportSettings | null = null;
 let roundtripRecoveryBlocker: string | null = null;
 
-interface Decision {
-    action: ImportAction;
-    kind: NodeKind;
-    nineSlice: boolean;
-}
+type Decision = ImportDecision;
 
 interface TiledAssetRequest {
     node: FigmaNode;
@@ -79,6 +99,7 @@ interface SceneImportPayload {
     existingMap: Record<string, string>;
     prefabUrl?: string;
     centerInCanvas?: boolean;
+    prefabContext?: PrefabSceneSyncContext;
     roots: SceneNodeSpec[];
 }
 
@@ -89,9 +110,32 @@ interface SceneImportResult {
     updated: number;
     temporaryRoot?: boolean;
     prefabUrl?: string;
+    prefabSync?: PrefabSceneSyncCapture;
+}
+
+interface PrefabAssetInfo {
+    uuid: string;
+    url: string;
+    importer: string;
+    type: string;
+    imported: boolean;
+    invalid: boolean;
+    isDirectory?: boolean;
+    readonly?: boolean;
+    redirect?: unknown;
 }
 
 const FONT_EXTENSIONS = new Set(['.ttf', '.otf', '.fnt', '.woff', '.woff2']);
+const NODE_KINDS = new Set<NodeKind>([
+    'auto',
+    'node',
+    'sprite',
+    'label',
+    'richText',
+    'button',
+    'scrollView',
+    'layout',
+]);
 
 async function listFontAssets(): Promise<FontAssetOption[]> {
     const assetsRoot = resolve(Editor.Project.path, 'assets');
@@ -360,6 +404,7 @@ function defaultDecision(node: FigmaNode): Decision {
         action: inferAction(node),
         kind: inferKind(node),
         nineSlice: false,
+        explicit: false,
     };
 }
 
@@ -374,7 +419,7 @@ function decisionForNode(node: FigmaNode, decisions: Map<string, Decision>): Dec
     return decision;
 }
 
-function decisionMap(overrides: ImportOverride[], tree: TreeNodeDto[]): Map<string, Decision> {
+export function decisionMap(overrides: ImportOverride[], tree: TreeNodeDto[]): Map<string, Decision> {
     const decisions = new Map<string, Decision>();
     const addDefaults = (nodes: TreeNodeDto[]) => {
         for (const node of nodes) {
@@ -382,19 +427,118 @@ function decisionMap(overrides: ImportOverride[], tree: TreeNodeDto[]): Map<stri
                 action: normalizeImportAction(node.action),
                 kind: node.kind,
                 nineSlice: false,
+                explicit: false,
             });
             addDefaults(node.children);
         }
     };
     addDefaults(tree);
     for (const item of overrides ?? []) {
+        const name = sanitizeNodeName(item.name);
         decisions.set(item.id, {
             action: normalizeImportAction(item.action),
-            kind: item.kind,
+            kind: NODE_KINDS.has(item.kind) ? item.kind : 'auto',
             nineSlice: item.nineSlice,
+            explicit: item.explicit === true,
+            ...(name ? { name } : {}),
         });
     }
     return decisions;
+}
+
+export function subtreeHasExplicitOverride(
+    node: FigmaNode,
+    decisions: ReadonlyMap<string, ImportDecision>,
+    includeNodeName = true,
+): boolean {
+    const decision = decisions.get(node.id);
+    return decision?.explicit === true
+        || (includeNodeName && Boolean(decision?.name))
+        || node.children.some((child) => subtreeHasExplicitOverride(child, decisions));
+}
+
+type StoredNodeOverrides = Record<string, Record<string, ImportOverride>>;
+
+async function getStoredNodeOverrides(): Promise<StoredNodeOverrides> {
+    const saved = await Editor.Profile.getProject(packageJSON.name, 'nodeOverrides', 'project');
+    return saved && typeof saved === 'object' ? saved as StoredNodeOverrides : {};
+}
+
+function safeNodeOverride(value: unknown, fallbackId = ''): ImportOverride | null {
+    if (!value || typeof value !== 'object') return null;
+    const item = value as Partial<ImportOverride>;
+    const id = typeof item.id === 'string' && item.id ? item.id : fallbackId;
+    if (!id) return null;
+    const kind = typeof item.kind === 'string' && NODE_KINDS.has(item.kind as NodeKind)
+        ? item.kind as NodeKind
+        : 'auto';
+    const explicit = item.explicit === false ? false : true;
+    const name = sanitizeNodeName(item.name);
+    if (!explicit && !name) return null;
+    return {
+        id,
+        action: normalizeImportAction(item.action),
+        kind,
+        nineSlice: item.nineSlice === true,
+        explicit,
+        ...(name ? { name } : {}),
+    };
+}
+
+async function nodeOverridesFor(fileKey: string): Promise<ImportOverride[]> {
+    const stored = (await getStoredNodeOverrides())[fileKey] ?? {};
+    const result: ImportOverride[] = [];
+    for (const [id, value] of Object.entries(stored)) {
+        const safe = safeNodeOverride(value, id);
+        if (safe) result.push(safe);
+    }
+    return result;
+}
+
+async function saveNodeOverrides(
+    fileKey: unknown,
+    values: unknown,
+    scopeValues: unknown,
+): Promise<ImportOverride[]> {
+    if (typeof fileKey !== 'string' || !fileKey.trim()) {
+        throw new Error('无法保存节点策略：缺少 Figma fileKey。');
+    }
+    const items = Array.isArray(values) ? values : [];
+    const safeItems = items
+        .map((item) => safeNodeOverride(item))
+        .filter((item): item is ImportOverride => Boolean(item));
+    const scopeIds = new Set(
+        (Array.isArray(scopeValues) ? scopeValues : safeItems.map((item) => item.id))
+            .filter((id): id is string => typeof id === 'string' && Boolean(id)),
+    );
+    if (!scopeIds.size) {
+        throw new Error('无法保存节点策略：缺少当前导入范围。');
+    }
+    const scopedItems = safeItems.filter((item) => scopeIds.has(item.id));
+    const stored = await getStoredNodeOverrides();
+    const current = { ...(stored[fileKey] ?? {}) };
+    for (const id of scopeIds) {
+        delete current[id];
+    }
+    for (const item of scopedItems) {
+        current[item.id] = item;
+    }
+    if (Object.keys(current).length) {
+        stored[fileKey] = current;
+    } else {
+        delete stored[fileKey];
+    }
+    await Editor.Profile.setProject(packageJSON.name, 'nodeOverrides', stored, 'project');
+    return scopedItems;
+}
+
+function annotateDocumentPlan(session: DocumentSession): DocumentSession {
+    const defaults = decisionMap([], session.tree);
+    session.tree = annotateTreeWithImportPlan(
+        session.tree,
+        compileImportPlan(session.roots, defaults),
+    );
+    return session;
 }
 
 function collectAssetRequests(
@@ -459,7 +603,12 @@ async function buildAssets(
         if (decision.action === 'ignore') {
             return;
         }
-        if (node.children.length && node.type !== 'TEXT') {
+        if (node.children.length
+            && node.type !== 'TEXT'
+            // Renaming this container does not change resource matching; only
+            // a strategy override on itself or any override below it blocks
+            // promotion because descendants would otherwise disappear.
+            && !subtreeHasExplicitOverride(node, decisions, false)) {
             let localMatch = null;
             for (const library of localResources) {
                 localMatch = await library.find(node.name, 'png');
@@ -880,41 +1029,59 @@ function inferredLayoutMode(node: FigmaNode): string | undefined {
     return 'GRID';
 }
 
-function makeSpec(
+export function makeSpec(
     node: FigmaNode,
     parentFrame: Rect | undefined,
     decisions: Map<string, Decision>,
+    plans: ReadonlyMap<string, NodeImportPlan>,
+    nodeById: ReadonlyMap<string, FigmaNode>,
     assets: Map<string, SpriteAssetSpec>,
     fonts: Map<string, string>,
+    isRoot = false,
 ): SceneNodeSpec | null {
     const decision = decisionForNode(node, decisions);
     if (decision.action === 'ignore') {
         return null;
     }
     const frame = nodeFrame(node);
+    const plan = plans.get(node.id);
+    const fold = plan?.fold;
+    const foldSource = fold ? nodeById.get(fold.sourceNodeId) : undefined;
+    const textSource = fold?.kind === 'single-text' && foldSource ? foldSource : node;
+    const visualSource = fold && fold.kind !== 'single-text' && foldSource ? foldSource : node;
     const resolvedKind = decision.kind === 'auto' ? inferKind(node) : decision.kind;
+    const plannedKind = plan?.kind ?? resolvedKind;
     const bitmapTerminal = decision.nineSlice || decision.action === 'render';
     const terminal = bitmapTerminal || isTerminalAction(decision.action);
-    const effectiveKind = kindForImportAction(resolvedKind, decision.action, decision.nineSlice);
-    const spriteAsset = assets.get(node.id);
+    const effectiveKind = kindForImportAction(plannedKind, decision.action, decision.nineSlice);
+    const spriteSourceId = fold && fold.kind !== 'single-text'
+        ? fold.sourceNodeId
+        : node.id;
+    const spriteAsset = assets.get(spriteSourceId);
+    const absorbedDirectIds = new Set(fold ? [fold.sourceNodeId] : []);
+    const fullFold = fold?.kind === 'single-image' || fold?.kind === 'single-text';
     return {
         figmaId: node.id,
-        name: node.name,
-        figmaType: node.type,
+        name: decision.name ?? node.name,
+        figmaType: visualSource.type,
         action: decision.action,
         kind: effectiveKind,
         frame,
         parentFrame,
+        intrinsicSize: node.size,
+        isRoot,
         rotation: node.rotation,
-        opacity: node.opacity,
+        opacity: foldSource && fullFold
+            ? node.opacity * foldSource.opacity
+            : node.opacity,
         visible: node.visible,
         clipsContent: node.clipsContent,
-        cornerRadii: cornerRadii(node),
-        fills: node.fills,
-        strokes: node.strokes,
-        strokeWeight: node.strokeWeight,
-        characters: node.characters,
-        textStyle: node.style,
+        cornerRadii: cornerRadii(visualSource),
+        fills: textSource.fills,
+        strokes: textSource.strokes,
+        strokeWeight: textSource.strokeWeight,
+        characters: textSource.characters,
+        textStyle: textSource.style,
         layout: {
             mode: effectiveKind === 'layout' || effectiveKind === 'scrollView'
                 ? inferredLayoutMode(node)
@@ -936,11 +1103,28 @@ function makeSpec(
         constraints: node.constraints,
         relativeTransform: node.relativeTransform,
         sprite: spriteAsset,
-        fontUuid: node.style?.fontFamily ? fonts.get(node.style.fontFamily) : undefined,
+        fontUuid: textSource.style?.fontFamily ? fonts.get(textSource.style.fontFamily) : undefined,
+        aliasFigmaIds: fold?.absorbedNodeIds,
+        flattenBoundary: bitmapTerminal || fullFold
+            ? true
+            : fold?.kind === 'background'
+                ? false
+                : undefined,
+        planReason: plan?.reason,
         children: terminal
             ? []
             : node.children
-                .map((child) => makeSpec(child, frame, decisions, assets, fonts))
+                .filter((child) => !absorbedDirectIds.has(child.id))
+                .map((child) => makeSpec(
+                    child,
+                    frame,
+                    decisions,
+                    plans,
+                    nodeById,
+                    assets,
+                    fonts,
+                    false,
+                ))
                 .filter((child): child is SceneNodeSpec => child !== null),
     };
 }
@@ -948,6 +1132,576 @@ function makeSpec(
 async function getNodeMaps(): Promise<Record<string, Record<string, string>>> {
     const saved = await Editor.Profile.getProject(packageJSON.name, 'nodeMaps', 'project');
     return saved && typeof saved === 'object' ? saved as Record<string, Record<string, string>> : {};
+}
+
+function cocosFileId(): string {
+    const generated = Editor.Utils?.UUID?.generate?.(true);
+    return typeof generated === 'string' && generated.length > 0
+        ? generated
+        : randomBytes(16).toString('base64').replace(/=+$/g, '');
+}
+
+async function queryPrefabAsset(urlOrUuid: string): Promise<PrefabAssetInfo | null> {
+    return await Editor.Message.request(
+        'asset-db',
+        'query-asset-info',
+        urlOrUuid,
+    ) as PrefabAssetInfo | null;
+}
+
+function assertPrefabAsset(
+    info: PrefabAssetInfo,
+    expected: { uuid?: string; url?: string } = {},
+): void {
+    if (info.invalid || info.imported !== true) {
+        throw new Error(`Prefab 尚未完成导入：${info.url}`);
+    }
+    if (info.importer !== 'prefab' || info.type !== 'cc.Prefab' || info.isDirectory) {
+        throw new Error(`目标资源不是可编辑的 Cocos Prefab：${info.url}`);
+    }
+    if (info.readonly || info.redirect) {
+        throw new Error(`目标 Prefab 为只读或重定向资源，不能安全更新：${info.url}`);
+    }
+    if (expected.uuid && info.uuid !== expected.uuid) {
+        throw new Error(`Prefab UUID 校验失败：${info.url}`);
+    }
+    if (expected.url && info.url !== expected.url) {
+        throw new Error(`Prefab 路径校验失败：期望 ${expected.url}，实际 ${info.url}`);
+    }
+}
+
+async function waitForPrefabAsset(url: string, expectedUuid?: string): Promise<PrefabAssetInfo> {
+    const started = Date.now();
+    while (Date.now() - started < 30_000) {
+        const info = await queryPrefabAsset(url);
+        if (info?.invalid) {
+            throw new Error(`Cocos Prefab 资源导入失败：${url}`);
+        }
+        if (info?.imported === true) {
+            if (expectedUuid && info.uuid !== expectedUuid) {
+                throw new Error(`Prefab UUID 在导入期间发生变化：${url}`);
+            }
+            assertPrefabAsset(info, { uuid: expectedUuid, url });
+            return info;
+        }
+        if (activeController?.signal.aborted) {
+            throw new CancelledError();
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 120));
+    }
+    throw new Error(`等待 Cocos Prefab 资源就绪超时：${url}`);
+}
+
+async function queryPrefabMeta(uuid: string): Promise<Record<string, unknown>> {
+    const meta = await Editor.Message.request(
+        'asset-db',
+        'query-asset-meta',
+        uuid,
+    );
+    if (!meta || typeof meta !== 'object') {
+        throw new Error(`无法读取 Prefab Meta：${uuid}`);
+    }
+    const value = meta as unknown as Record<string, unknown>;
+    if (value.uuid !== uuid || value.importer !== 'prefab') {
+        throw new Error(`Prefab Meta 与目标资源不匹配：${uuid}`);
+    }
+    return value;
+}
+
+function prefabDiskPath(url: string): string {
+    if (!url.startsWith('db://')) {
+        throw new Error(`Prefab URL 无效：${url}`);
+    }
+    return resolve(Editor.Project.path, url.slice('db://'.length));
+}
+
+async function storedPrefabMatchesRecord(
+    info: PrefabAssetInfo,
+    record: PrefabSyncRecord,
+): Promise<boolean> {
+    try {
+        return prefabJsonContainsSyncRecord(
+            await readFile(prefabDiskPath(info.url)),
+            record,
+        );
+    } catch {
+        return false;
+    }
+}
+
+async function waitForOpenedPrefab(
+    prefabUrl: string,
+    prefabUuid: string,
+    rootFileId: string,
+): Promise<void> {
+    const currentDirty = await Editor.Message.request('scene', 'query-dirty') as boolean;
+    if (currentDirty) {
+        throw new Error('当前打开的场景或 Prefab 有未保存修改；为避免触发保存询问，请先手工保存或还原后再导入。');
+    }
+    Editor.Selection.clear('node');
+    Editor.Selection.select('asset', prefabUuid);
+    await Editor.Message.request('asset-db', 'open-asset', prefabUuid);
+    const started = Date.now();
+    let lastReason = 'Creator 尚未返回 Prefab 编辑状态';
+    while (Date.now() - started < 30_000) {
+        try {
+            const state = await Editor.Message.request('scene', 'execute-scene-script', {
+                name: packageJSON.name,
+                method: 'inspectPrefabContext',
+                args: [{ prefabUuid, rootFileId }],
+            }) as PrefabEditingState;
+            if (state.ready) {
+                return;
+            }
+            lastReason = state.reason ?? lastReason;
+        } catch (error) {
+            lastReason = error instanceof Error ? error.message : String(error);
+        }
+        if (activeController?.signal.aborted) {
+            throw new CancelledError();
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 120));
+    }
+    throw new Error(`打开目标 Prefab 超时：${lastReason}`);
+}
+
+async function assertOpenedPrefab(prefabUuid: string, rootFileId: string): Promise<void> {
+    const state = await Editor.Message.request('scene', 'execute-scene-script', {
+        name: packageJSON.name,
+        method: 'inspectPrefabContext',
+        args: [{ prefabUuid, rootFileId }],
+    }) as PrefabEditingState;
+    if (!state.ready) {
+        throw new Error(`目标 Prefab 编辑上下文已变化：${state.reason ?? '未知原因'}`);
+    }
+}
+
+async function waitForSceneSaved(): Promise<void> {
+    const started = Date.now();
+    while (Date.now() - started < 15_000) {
+        const dirty = await Editor.Message.request('scene', 'query-dirty') as boolean;
+        if (!dirty) {
+            return;
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 120));
+    }
+    throw new Error('等待 Prefab 保存完成超时。');
+}
+
+async function getPrefabBindings(): Promise<Record<string, string>> {
+    const saved = await Editor.Profile.getProject(
+        packageJSON.name,
+        'prefabBindingsV1',
+        'project',
+    );
+    if (!saved || typeof saved !== 'object') {
+        return {};
+    }
+    const result: Record<string, string> = {};
+    for (const [sourceHash, prefabUuid] of Object.entries(saved as Record<string, unknown>)) {
+        if (!/^sha256:[0-9a-f]{64}$/.test(sourceHash)
+            || typeof prefabUuid !== 'string'
+            || !prefabUuid) {
+            throw new Error('Prefab 来源绑定记录已损坏，已停止导入。');
+        }
+        result[sourceHash] = prefabUuid;
+    }
+    return result;
+}
+
+async function setPrefabBinding(sourceHash: string, prefabUuid: string): Promise<void> {
+    const bindings = await getPrefabBindings();
+    bindings[sourceHash] = prefabUuid;
+    await Editor.Profile.setProject(
+        packageJSON.name,
+        'prefabBindingsV1',
+        bindings,
+        'project',
+    );
+}
+
+async function removePrefabBinding(sourceHash: string): Promise<void> {
+    const bindings = await getPrefabBindings();
+    if (!bindings[sourceHash]) {
+        return;
+    }
+    delete bindings[sourceHash];
+    await Editor.Profile.setProject(
+        packageJSON.name,
+        'prefabBindingsV1',
+        bindings,
+        'project',
+    );
+}
+
+async function getPendingPrefabSyncs(): Promise<Record<string, {
+    prefabUuid: string;
+    record: PrefabSyncRecord;
+}>> {
+    const saved = await Editor.Profile.getProject(
+        packageJSON.name,
+        'pendingPrefabSyncV1',
+        'project',
+    );
+    if (!saved || typeof saved !== 'object') {
+        return {};
+    }
+    const result: Record<string, { prefabUuid: string; record: PrefabSyncRecord }> = {};
+    for (const [sourceHash, raw] of Object.entries(saved as Record<string, unknown>)) {
+        if (!/^sha256:[0-9a-f]{64}$/.test(sourceHash)
+            || !raw
+            || typeof raw !== 'object'
+            || typeof (raw as { prefabUuid?: unknown }).prefabUuid !== 'string') {
+            throw new Error('Prefab 待恢复同步记录已损坏，已停止导入。');
+        }
+        const record = readPrefabSyncRecord({
+            userData: {
+                figmaImporter: (raw as { record?: unknown }).record,
+            },
+        });
+        if (!record || record.sourceHash !== sourceHash) {
+            throw new Error('Prefab 待恢复同步记录来源不一致，已停止导入。');
+        }
+        result[sourceHash] = {
+            prefabUuid: (raw as { prefabUuid: string }).prefabUuid,
+            record,
+        };
+    }
+    return result;
+}
+
+async function setPendingPrefabSync(
+    sourceHash: string,
+    value: { prefabUuid: string; record: PrefabSyncRecord } | null,
+): Promise<void> {
+    const pending = await getPendingPrefabSyncs();
+    if (value) {
+        pending[sourceHash] = value;
+    } else {
+        delete pending[sourceHash];
+    }
+    await Editor.Profile.setProject(
+        packageJSON.name,
+        'pendingPrefabSyncV1',
+        pending,
+        'project',
+    );
+}
+
+async function verifiedPrefabRecord(
+    info: PrefabAssetInfo,
+    sourceHash: string,
+): Promise<{ meta: Record<string, unknown>; record: PrefabSyncRecord }> {
+    let meta = await queryPrefabMeta(info.uuid);
+    let record = readPrefabSyncRecord(meta);
+    if (!record) {
+        throw new Error(
+            `Prefab 缺少 Figma 来源记录，无法确认是否可安全覆盖：${info.url}。请先移动或重命名该资源。`,
+        );
+    }
+    if (record.sourceHash !== sourceHash) {
+        throw new Error(`Prefab 来自另一个 Figma Frame，已拒绝覆盖：${info.url}`);
+    }
+    const pending = (await getPendingPrefabSyncs())[sourceHash];
+    if (pending) {
+        if (pending.prefabUuid !== info.uuid || pending.record.sourceHash !== sourceHash) {
+            throw new Error('检测到与目标 Prefab 不一致的待恢复同步记录，已停止导入。');
+        }
+        if (await storedPrefabMatchesRecord(info, pending.record)) {
+            await Editor.Message.request(
+                'asset-db',
+                'save-asset-meta',
+                info.uuid,
+                JSON.stringify(mergePrefabSyncRecord(meta, pending.record), null, 2),
+            );
+            await Editor.Message.request('asset-db', 'reimport-asset', info.uuid);
+            await waitForPrefabAsset(info.url, info.uuid);
+            meta = await queryPrefabMeta(info.uuid);
+            const recovered = readPrefabSyncRecord(meta);
+            if (!recovered || JSON.stringify(recovered) !== JSON.stringify(pending.record)) {
+                throw new Error('Prefab 增量同步记录自动恢复失败。');
+            }
+            record = recovered;
+        } else if (!await storedPrefabMatchesRecord(info, record)) {
+            throw new Error('Prefab 文件与当前及待恢复的同步记录都不一致，已停止自动恢复。');
+        }
+        await setPendingPrefabSync(sourceHash, null);
+    }
+    return { meta, record };
+}
+
+async function writeVerifiedPrefabRecord(
+    info: PrefabAssetInfo,
+    sourceHash: string,
+    record: PrefabSyncRecord,
+): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+            const meta = await queryPrefabMeta(info.uuid);
+            const existing = readPrefabSyncRecord(meta);
+            if (!existing || existing.sourceHash !== sourceHash) {
+                throw new Error('写入前 Prefab 来源记录不一致。');
+            }
+            await Editor.Message.request(
+                'asset-db',
+                'save-asset-meta',
+                info.uuid,
+                JSON.stringify(mergePrefabSyncRecord(meta, record), null, 2),
+            );
+            await Editor.Message.request('asset-db', 'reimport-asset', info.uuid);
+            await waitForPrefabAsset(info.url, info.uuid);
+            const saved = readPrefabSyncRecord(await queryPrefabMeta(info.uuid));
+            if (!saved || JSON.stringify(saved) !== JSON.stringify(record)) {
+                throw new Error('Prefab 来源记录写入后校验不一致。');
+            }
+            return;
+        } catch (error) {
+            lastError = error;
+            if (attempt < 2) {
+                await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
+            }
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error('Prefab 来源记录写入失败。');
+}
+
+async function prepareLinkedFramePrefab(
+    prefabUrl: string,
+    prefabName: string,
+    rootFrame: Rect,
+    sourceHash: string,
+    sourceRootId: string,
+): Promise<{
+    info: PrefabAssetInfo;
+    record: PrefabSyncRecord;
+}> {
+    const bindings = await getPrefabBindings();
+    const boundUuid = bindings[sourceHash];
+    const pending = (await getPendingPrefabSyncs())[sourceHash];
+    const pendingInfo = pending
+        ? await queryPrefabAsset(pending.prefabUuid)
+        : null;
+    const targetPlan = planPrefabRecoveryTarget(
+        pending?.prefabUuid,
+        boundUuid,
+        Boolean(pendingInfo),
+    );
+    if (targetPlan.clearPending) {
+        await setPendingPrefabSync(sourceHash, null);
+    }
+    if (targetPlan.clearBinding) {
+        await removePrefabBinding(sourceHash);
+    }
+    const targetUuid = targetPlan.targetUuid;
+    if (targetUuid) {
+        let targetInfo = pendingInfo?.uuid === targetUuid
+            ? pendingInfo
+            : await queryPrefabAsset(targetUuid);
+        if (!targetInfo) {
+            if (bindings[sourceHash] === targetUuid) {
+                await removePrefabBinding(sourceHash);
+            }
+        } else {
+            targetInfo = await waitForPrefabAsset(targetInfo.url, targetUuid);
+            if (pending?.prefabUuid === targetUuid && boundUuid !== targetUuid) {
+                // Persist the recovery identity before verifiedPrefabRecord may
+                // commit and clear pending. A later move failure must still be
+                // able to locate the exact Prefab by UUID on the next attempt.
+                await setPrefabBinding(sourceHash, targetUuid);
+            }
+            const verified = await verifiedPrefabRecord(targetInfo, sourceHash);
+            if (targetInfo.url !== prefabUrl) {
+                const conflict = await queryPrefabAsset(prefabUrl);
+                if (conflict && conflict.uuid !== targetUuid) {
+                    throw new Error(
+                        `Figma Frame 对应的 Prefab 需要移动到 ${prefabUrl}，但目标路径已被其他资源占用。`,
+                    );
+                }
+                if (!conflict) {
+                    const moved = await Editor.Message.request(
+                        'asset-db',
+                        'move-asset',
+                        targetInfo.url,
+                        prefabUrl,
+                        { overwrite: false, rename: false },
+                    ) as PrefabAssetInfo | null;
+                    if (!moved || moved.uuid !== targetUuid) {
+                        throw new Error(`无法在保留 UUID 的前提下移动 Prefab：${prefabUrl}`);
+                    }
+                    targetInfo = await waitForPrefabAsset(prefabUrl, targetUuid);
+                } else {
+                    targetInfo = await waitForPrefabAsset(prefabUrl, targetUuid);
+                }
+            }
+            return {
+                info: targetInfo,
+                record: verified.record,
+            };
+        }
+    }
+
+    let info = await queryPrefabAsset(prefabUrl);
+    if (!info) {
+        const rootFileId = cocosFileId();
+        const rootTransformFileId = cocosFileId();
+        const seed = createMinimalPrefabJson(
+            prefabName,
+            rootFrame,
+            rootFileId,
+            rootTransformFileId,
+        );
+        const created = await Editor.Message.request(
+            'asset-db',
+            'create-asset',
+            prefabUrl,
+            seed,
+            { overwrite: false, rename: false },
+        ) as PrefabAssetInfo | null;
+        if (!created) {
+            throw new Error(`无法创建 Prefab：${prefabUrl}`);
+        }
+        info = await waitForPrefabAsset(prefabUrl, created.uuid);
+        const meta = await queryPrefabMeta(info.uuid);
+        const record = createPrefabSyncRecord(
+            sourceHash,
+            sourceRootId,
+            rootFileId,
+            rootTransformFileId,
+        );
+        const nextMeta = mergePrefabSyncRecord(meta, record);
+        await Editor.Message.request(
+            'asset-db',
+            'save-asset-meta',
+            info.uuid,
+            JSON.stringify(nextMeta, null, 2),
+        );
+        await Editor.Message.request('asset-db', 'reimport-asset', info.uuid);
+        info = await waitForPrefabAsset(prefabUrl, info.uuid);
+        const verified = await verifiedPrefabRecord(info, sourceHash);
+        await setPrefabBinding(sourceHash, info.uuid);
+        return {
+            info,
+            record: verified.record,
+        };
+    }
+    info = await waitForPrefabAsset(prefabUrl, info.uuid);
+    const verified = await verifiedPrefabRecord(info, sourceHash);
+    await setPrefabBinding(sourceHash, info.uuid);
+    return {
+        info,
+        record: verified.record,
+    };
+}
+
+async function importLinkedFramePrefab(args: {
+    prefabUrl: string;
+    prefabName: string;
+    fileKey: string;
+    sourceNodeId: string;
+    rootFrame: Rect;
+    scale: number;
+    roots: SceneNodeSpec[];
+}): Promise<SceneImportResult> {
+    const sourceHash = figmaFrameSourceHash(args.fileKey, args.sourceNodeId);
+    const prepared = await prepareLinkedFramePrefab(
+        args.prefabUrl,
+        args.prefabName,
+        {
+            x: args.rootFrame.x * args.scale,
+            y: args.rootFrame.y * args.scale,
+            width: args.rootFrame.width * args.scale,
+            height: args.rootFrame.height * args.scale,
+        },
+        sourceHash,
+        args.roots[0].figmaId,
+    );
+    await waitForOpenedPrefab(
+        prepared.info.url,
+        prepared.info.uuid,
+        prepared.record.rootFileId,
+    );
+    const existingNodeFileIds = resolveExistingNodeFileIds(
+        prepared.record,
+        collectSceneSpecFigmaIds(args.roots),
+    );
+    const payload: SceneImportPayload = {
+        packageName: packageJSON.name,
+        fileKey: args.fileKey,
+        rootName: args.prefabName,
+        rootFrame: args.rootFrame,
+        scale: args.scale,
+        updateExisting: true,
+        existingMap: {},
+        prefabUrl: prepared.info.url,
+        roots: args.roots,
+        prefabContext: {
+            prefabUuid: prepared.info.uuid,
+            rootFileId: prepared.record.rootFileId,
+            existingNodeFileIds,
+            managedNodeFileIds: prepared.record.managedNodeFileIds,
+            managedComponentFileIds: prepared.record.managedComponentFileIds,
+            managedHelperFileIds: prepared.record.managedHelperFileIds,
+        },
+    };
+    let snapshotStarted = false;
+    let saveAttempted = false;
+    try {
+        const dirtyBeforeImport = await Editor.Message.request('scene', 'query-dirty') as boolean;
+        if (dirtyBeforeImport) {
+            throw new Error('目标 Prefab 有未保存的手工修改，请先保存后再执行 Figma 增量导入。');
+        }
+        await Editor.Message.request('scene', 'snapshot');
+        snapshotStarted = true;
+        const result = await Editor.Message.request('scene', 'execute-scene-script', {
+            name: packageJSON.name,
+            method: 'importDocument',
+            args: [payload],
+        }) as SceneImportResult;
+        if (!result.prefabSync) {
+            throw new Error('Prefab 增量同步未返回 fileId 记录，已停止保存。');
+        }
+        const nextRecord = recordPrefabSyncCapture(prepared.record, result.prefabSync);
+        await setPendingPrefabSync(sourceHash, {
+            prefabUuid: prepared.info.uuid,
+            record: nextRecord,
+        });
+        await assertOpenedPrefab(prepared.info.uuid, prepared.record.rootFileId);
+        // Once the save request is sent its result is ambiguous until the
+        // persisted Prefab is verified. Do not roll the in-memory Prefab back
+        // on an IPC timeout: the disk write may already have completed.
+        saveAttempted = true;
+        await Editor.Message.request('scene', 'save-scene');
+        await waitForSceneSaved();
+        const currentInfo = await waitForPrefabAsset(prepared.info.url, prepared.info.uuid);
+        if (!await storedPrefabMatchesRecord(currentInfo, nextRecord)) {
+            throw new Error('Prefab 文件未包含本次同步生成的全部 fileId，已停止更新 Meta。');
+        }
+        const currentMeta = await queryPrefabMeta(currentInfo.uuid);
+        const currentRecord = readPrefabSyncRecord(currentMeta);
+        if (!currentRecord || currentRecord.sourceHash !== sourceHash) {
+            throw new Error('Prefab 来源记录在保存期间发生变化，已拒绝提交。');
+        }
+        await writeVerifiedPrefabRecord(currentInfo, sourceHash, nextRecord);
+        await setPendingPrefabSync(sourceHash, null);
+        const verified = await queryPrefabAsset(prepared.info.url);
+        if (!verified) {
+            throw new Error('保存后 Prefab UUID 校验失败。');
+        }
+        assertPrefabAsset(verified, {
+            uuid: prepared.info.uuid,
+            url: prepared.info.url,
+        });
+        result.prefabUrl = prepared.info.url;
+        Editor.Selection.clear('node');
+        Editor.Selection.select('asset', prepared.info.uuid);
+        return result;
+    } catch (error) {
+        if (snapshotStarted && !saveAttempted) {
+            await Editor.Message.request('scene', 'snapshot-abort').catch(() => undefined);
+        }
+        throw error;
+    }
 }
 
 async function performImport(request: ImportRequest): Promise<SceneImportResult> {
@@ -961,6 +1715,10 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
         const decisions = decisionMap(request.overrides, activeDocument.tree);
         const assets = await buildAssets(activeDocument, decisions, importSettings);
+        // buildAssets may promote a container to a local same-name resource.
+        // Compile after that promotion so assets and SceneNodeSpec share the
+        // exact same final plan.
+        const plans = compileImportPlan(activeDocument.roots, decisions);
         const fonts = await resolveFonts(importSettings);
         const sourceRootFrames = activeDocument.roots.map(nodeFrame);
         const multipleRoots = activeDocument.roots.length > 1;
@@ -979,7 +1737,16 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         let rootCursor = 0;
         const roots = activeDocument.roots
             .map((node, index) => {
-                const spec = makeSpec(node, rootFrame, decisions, assets, fonts);
+                const spec = makeSpec(
+                    node,
+                    rootFrame,
+                    decisions,
+                    plans,
+                    activeDocument!.nodeById,
+                    assets,
+                    fonts,
+                    true,
+                );
                 if (spec && multipleRoots) {
                     spec.frame = {
                         x: rootCursor,
@@ -996,129 +1763,69 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             throw new Error('没有选中任何可导入节点。');
         }
 
-        const linkedFrame = Boolean(activeDocument.sourceNodeId && roots.length === 1);
-        let prefabUrl: string | undefined;
-        if (linkedFrame) {
+        const sourceNodeId = activeDocument.sourceNodeId;
+        if (sourceNodeId && roots.length === 1) {
             const prefabWriter = new AssetWriter(importSettings.prefabFolder);
             await prefabWriter.initialize();
-            const frameName = activeDocument.roots[0]?.name?.trim() || activeDocument.fileName;
-            prefabUrl = `db://assets/${prefabWriter.folder}/${sanitizeAssetName(frameName)}.prefab`;
+            const frameName = roots[0]?.name?.trim()
+                || activeDocument.roots[0]?.name?.trim()
+                || activeDocument.fileName;
+            const prefabUrl = `db://assets/${prefabWriter.folder}/${sanitizeAssetName(frameName)}.prefab`;
+            emitProgress({
+                phase: 'scene',
+                value: 0.05,
+                message: '正在创建或打开目标 Prefab…',
+            });
+            const result = await importLinkedFramePrefab({
+                prefabUrl,
+                prefabName: frameName,
+                fileKey: activeDocument.fileKey,
+                sourceNodeId,
+                rootFrame,
+                scale: importSettings.scale,
+                roots,
+            });
+            const nodeMaps = await getNodeMaps();
+            // Prefab updates persist by PrefabInfo.fileId in the asset meta;
+            // runtime node UUIDs are session-only and must never be reused here.
+            delete nodeMaps[activeDocument.fileKey];
+            await Editor.Profile.setProject(packageJSON.name, 'nodeMaps', nodeMaps, 'project');
+            emitProgress({
+                phase: 'done',
+                value: 1,
+                message: `完成：新建 ${result.created}，更新 ${result.updated}，已打开预制体 ${prefabUrl}`,
+            });
+            return result;
         }
 
         const nodeMaps = await getNodeMaps();
-        const legacyRootUuid = linkedFrame
-            ? nodeMaps[activeDocument.fileKey]?.__root__
-            : undefined;
         const payload: SceneImportPayload = {
             packageName: packageJSON.name,
             fileKey: activeDocument.fileKey,
             rootName: activeDocument.fileName,
             rootFrame,
             scale: importSettings.scale,
-            // A linked Figma frame is a prefab export, not an insertion into the
-            // currently selected scene/prefab. Build an isolated temporary root
-            // and remove it as soon as the prefab asset has been serialized.
-            updateExisting: linkedFrame ? false : importSettings.updateExisting,
-            existingMap: linkedFrame ? {} : (nodeMaps[activeDocument.fileKey] ?? {}),
-            prefabUrl,
-            centerInCanvas: linkedFrame,
+            updateExisting: importSettings.updateExisting,
+            existingMap: nodeMaps[activeDocument.fileKey] ?? {},
             roots,
         };
         emitProgress({ phase: 'scene', value: 0.1, message: '正在构建 Cocos 节点树…' });
-        if (linkedFrame) {
-            // Establish an undo boundary before creating the temporary export
-            // root, so aborting the export cannot discard the user's prior
-            // edits in the currently opened scene/prefab.
-            await Editor.Message.request('scene', 'snapshot');
-        }
         const result = await Editor.Message.request('scene', 'execute-scene-script', {
             name: packageJSON.name,
             method: 'importDocument',
             args: [payload],
         }) as SceneImportResult;
-        let prefabUuid: string | undefined;
-        if (prefabUrl) {
-            try {
-                prefabUuid = String(await Editor.Message.request(
-                    'scene',
-                    'create-prefab',
-                    result.rootUuid,
-                    prefabUrl,
-                ) || '');
-                if (!prefabUuid) {
-                    throw new Error(`预制体创建失败：${prefabUrl}`);
-                }
-                result.prefabUrl = prefabUrl;
-                if (result.temporaryRoot) {
-                    await Editor.Message.request('scene', 'execute-scene-script', {
-                        name: packageJSON.name,
-                        method: 'removeImportedNode',
-                        args: [{ rootUuid: result.rootUuid }],
-                    });
-                }
-                // Remove the root left behind by versions before 1.0.11. It is
-                // tracked by the importer map and is the source of the fixed
-                // top-level ghost that survived prefab switches.
-                if (legacyRootUuid && legacyRootUuid !== result.rootUuid) {
-                    await Editor.Message.request('scene', 'execute-scene-script', {
-                        name: packageJSON.name,
-                        method: 'removeImportedNode',
-                        args: [{ rootUuid: legacyRootUuid }],
-                    }).catch(() => undefined);
-                }
-                // create-prefab may select the source node internally. Clear
-                // that stale node selection before opening the asset; otherwise
-                // Cocos can keep drawing the old node as a top-level overlay.
-                Editor.Selection.clear('node');
-            } catch (error) {
-                if (result.temporaryRoot) {
-                    await Editor.Message.request('scene', 'execute-scene-script', {
-                        name: packageJSON.name,
-                        method: 'removeImportedNode',
-                        args: [{ rootUuid: result.rootUuid }],
-                    }).catch(() => undefined);
-                }
-                if (linkedFrame) {
-                    Editor.Selection.clear('node');
-                    await Editor.Message.request('scene', 'snapshot-abort').catch(() => undefined);
-                }
-                throw error;
-            }
-        }
-        if (result.prefabUrl) {
-            // The prefab export uses a temporary scene node only for
-            // serialization. Abort that editor undo step so the currently
-            // opened scene/prefab is not marked dirty by the export.
-            await Editor.Message.request('scene', 'snapshot-abort');
-        } else {
-            await Editor.Message.request('scene', 'snapshot');
-        }
-        if (result.prefabUrl) {
-            // The linked frame root is temporary and has already been removed
-            // from the scene, so never persist its destroyed UUID for updates.
-            delete nodeMaps[activeDocument.fileKey];
-        } else {
-            nodeMaps[activeDocument.fileKey] = result.nodeMap;
-        }
+        await Editor.Message.request('scene', 'snapshot');
+        nodeMaps[activeDocument.fileKey] = result.nodeMap;
         await Editor.Profile.setProject(packageJSON.name, 'nodeMaps', nodeMaps, 'project');
-        if (!result.prefabUrl) {
-            Editor.Selection.select('node', result.rootUuid);
-        }
-        if (importSettings.autoSave && !result.prefabUrl) {
+        Editor.Selection.select('node', result.rootUuid);
+        if (importSettings.autoSave) {
             await Editor.Message.request('scene', 'save-scene');
-        }
-        if (result.prefabUrl && prefabUuid) {
-            // Cocos 3.8.7 opens prefab assets through asset-db. Selecting the
-            // asset first keeps the Assets panel and Inspector in sync.
-            Editor.Selection.select('asset', prefabUuid);
-            await Editor.Message.request('asset-db', 'open-asset', result.prefabUrl);
         }
         emitProgress({
             phase: 'done',
             value: 1,
-            message: result.prefabUrl
-                ? `完成：新建 ${result.created}，已创建并打开预制体 ${result.prefabUrl}`
-                : `完成：新建 ${result.created}，更新 ${result.updated}`,
+            message: `完成：新建 ${result.created}，更新 ${result.updated}`,
         });
         return result;
     } catch (error) {
@@ -1155,6 +1862,7 @@ export const methods: Record<string, (...args: any[]) => any> = {
                 sourceUrl: activeDocument.sourceUrl,
                 tree: activeDocument.tree,
                 fonts: activeDocument.fonts,
+                nodeOverrides: await nodeOverridesFor(activeDocument.fileKey),
             } : null,
         };
     },
@@ -1184,6 +1892,10 @@ export const methods: Record<string, (...args: any[]) => any> = {
         return saveSettings(value);
     },
 
+    async saveNodeOverrides(fileKey: unknown, overrides: unknown, scopeIds: unknown) {
+        return saveNodeOverrides(fileKey, overrides, scopeIds);
+    },
+
     async pickAssetFolder(current: unknown) {
         return pickAssetFolder(current);
     },
@@ -1209,7 +1921,9 @@ export const methods: Record<string, (...args: any[]) => any> = {
             const payload = parsed.nodeId
                 ? await api.getNode(parsed.fileKey, parsed.nodeId)
                 : await api.getFile(parsed.fileKey);
-            activeDocument = parseDocument(payload, sourceUrl, parsed.fileKey, parsed.nodeId);
+            activeDocument = annotateDocumentPlan(
+                parseDocument(payload, sourceUrl, parsed.fileKey, parsed.nodeId),
+            );
             const current = await getSettings();
             await saveSettings({ ...current, sourceUrl });
             emitProgress({ phase: 'idle', value: 1, message: `已读取 ${activeDocument.fileName}` });
@@ -1220,6 +1934,7 @@ export const methods: Record<string, (...args: any[]) => any> = {
                 tree: activeDocument.tree,
                 fonts: activeDocument.fonts,
                 fontAssets: await listFontAssets(),
+                nodeOverrides: await nodeOverridesFor(activeDocument.fileKey),
             };
         } catch (error) {
             emitProgress({

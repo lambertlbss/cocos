@@ -87,6 +87,18 @@ Label.HorizontalAlign = { LEFT: 0, CENTER: 1, RIGHT: 2 };
 Label.VerticalAlign = { TOP: 0, CENTER: 1, BOTTOM: 2 };
 Label.Overflow = { NONE: 0, CLAMP: 1, RESIZE_HEIGHT: 2 };
 
+class RichText extends Component {}
+RichText.HorizontalAlign = { LEFT: 0, CENTER: 1, RIGHT: 2 };
+RichText.VerticalAlign = { TOP: 0, CENTER: 1, BOTTOM: 2 };
+class TTFFont {
+    constructor() {
+        this.width = 24;
+        this.height = 16;
+        this.widthFactor = 0.75;
+    }
+}
+class BitmapFont {}
+
 class Mask extends Component {}
 Mask.Type = { GRAPHICS_RECT: 0, GRAPHICS_ELLIPSE: 1, ELLIPSE: 1, RECT: 0 };
 
@@ -130,6 +142,7 @@ class FakeNode {
         this.layer = 0;
         this.active = true;
         this.scale = { x: 1, y: 1, z: 1 };
+        this.euler = { x: 0, y: 0, z: 0 };
         this._parent = null;
         this.position = {
             x: 0,
@@ -183,6 +196,7 @@ class FakeNode {
 
     addChild(child) {
         child.parent = this;
+        FakeNode.onAddChild?.(child);
     }
 
     removeFromParent() {
@@ -222,14 +236,18 @@ class FakeNode {
     }
 
     addComponent(Type) {
-        if ([Graphics, Sprite, Label].includes(Type)
+        if ([Graphics, Sprite, Label, RichText].includes(Type)
             && this.components.some((component) =>
-                component instanceof Graphics || component instanceof Sprite || component instanceof Label)) {
+                component instanceof Graphics
+                || component instanceof Sprite
+                || component instanceof Label
+                || component instanceof RichText)) {
             throw new Error(`render component conflict on ${this.name}`);
         }
         const component = new Type();
         component.node = this;
         this.components.push(component);
+        FakeNode.onAddComponent?.(component);
         if (Type === Mask && !this.getComponent(Graphics)) {
             this.addComponent(Graphics);
         }
@@ -270,7 +288,9 @@ class FakeNode {
             : { x: value, y, z, clone: this.position.clone };
     }
 
-    setRotationFromEuler() {}
+    setRotationFromEuler(x, y, z) {
+        this.euler = { x, y, z };
+    }
 
     setScale(value, y = 1, z = 1) {
         this.scale = typeof value === 'object'
@@ -280,6 +300,8 @@ class FakeNode {
 }
 FakeNode.deferComponentRemoval = false;
 FakeNode.deferNodeDestruction = false;
+FakeNode.onAddChild = null;
+FakeNode.onAddComponent = null;
 
 function makeSpec(overrides = {}) {
     return {
@@ -289,6 +311,9 @@ function makeSpec(overrides = {}) {
         action: overrides.action ?? 'generate',
         kind: overrides.kind ?? 'node',
         frame: overrides.frame ?? { x: 0, y: 0, width: 100, height: 80 },
+        intrinsicSize: overrides.intrinsicSize,
+        isRoot: overrides.isRoot,
+        relativeTransform: overrides.relativeTransform,
         rotation: overrides.rotation ?? 0,
         opacity: overrides.opacity ?? 1,
         visible: true,
@@ -308,6 +333,8 @@ function makeSpec(overrides = {}) {
         },
         children: overrides.children ?? [],
         sprite: overrides.sprite,
+        aliasFigmaIds: overrides.aliasFigmaIds,
+        flattenBoundary: overrides.flattenBoundary,
         overflowDirection: overrides.overflowDirection,
         characters: overrides.characters,
         textStyle: overrides.textStyle,
@@ -335,6 +362,9 @@ function fakeCocos() {
             Graphics,
             Sprite,
             Label,
+            RichText,
+            TTFFont,
+            BitmapFont,
             LabelOutline,
             Layout,
             ScrollView,
@@ -359,8 +389,10 @@ function fakeCocos() {
             },
             Size: class Size {},
             assetManager: {
-                loadAny(_request, callback) {
-                    callback(null, { width: 24, height: 16, widthFactor: 0.75 });
+                loadAny(request, callback) {
+                    callback(null, request.uuid === 'bitmap-font'
+                        ? new BitmapFont()
+                        : new TTFFont());
                 },
             },
         },
@@ -398,6 +430,64 @@ async function importWithFakeCocos(spec) {
         return { ...environment, result };
     } finally {
         Module._load = originalLoad;
+    }
+}
+
+async function importWithPrefabContext(environment, spec, prefabContext) {
+    const originalLoad = Module._load;
+    const originalCce = global.cce;
+    const prefabRoot = environment.canvas;
+    let nextFileId = environment.nextFileId ?? 1;
+    global.cce = {
+        SceneFacadeManager: {
+            queryMode: () => 'prefab',
+            queryCurrentSceneUuid: () => environment.reportedPrefabUuid ?? prefabContext.prefabUuid,
+        },
+        Scene: { rootNode: prefabRoot },
+        Prefab: {
+            onAddNode(node) {
+                node._prefab ??= {
+                    fileId: `managedNodeFile${nextFileId++}`,
+                    root: prefabRoot,
+                    asset: { uuid: prefabContext.prefabUuid },
+                };
+            },
+            onAddComponent(component) {
+                component.__prefab ??= { fileId: `managedCompFile${nextFileId++}` };
+            },
+        },
+    };
+    const originalOnAddChild = FakeNode.onAddChild;
+    const originalOnAddComponent = FakeNode.onAddComponent;
+    if (environment.autoAssignPrefabInfo) {
+        FakeNode.onAddChild = (node) => global.cce.Prefab.onAddNode(node);
+        FakeNode.onAddComponent = (component) => global.cce.Prefab.onAddComponent(component);
+    }
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const result = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Prefab',
+            rootFrame: spec.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: {},
+            roots: [spec],
+            prefabContext,
+        });
+        environment.nextFileId = nextFileId;
+        return result;
+    } finally {
+        FakeNode.onAddChild = originalOnAddChild;
+        FakeNode.onAddComponent = originalOnAddComponent;
+        Module._load = originalLoad;
+        global.cce = originalCce;
     }
 }
 
@@ -644,16 +734,16 @@ test('does not auto-create Widget for Figma constraints', async () => {
     assert.equal(imported.getComponent(Widget), null);
 });
 
-test('keeps a single-line Label at the Figma frame size', async () => {
+test('expands a single-line Label equally on both sides by its outline width', async () => {
     const root = makeSpec({
         name: 'TextRoot',
-        frame: { x: 0, y: 0, width: 100, height: 80 },
+        frame: { x: 0, y: 0, width: 200, height: 80 },
         children: [makeSpec({
             figmaId: '15:196',
             name: 'Title',
             figmaType: 'TEXT',
             kind: 'label',
-            frame: { x: 10, y: 5, width: 40, height: 20 },
+            frame: { x: 50, y: 5, width: 100, height: 20 },
         })],
     });
     root.children[0].parentFrame = root.frame;
@@ -670,7 +760,7 @@ test('keeps a single-line Label at the Figma frame size', async () => {
         visible: true,
         color: { r: 1, g: 0, b: 0, a: 1 },
     }];
-    root.children[0].strokeWeight = 2;
+    root.children[0].strokeWeight = 5;
     const environment = await importWithFakeCocos(root);
     const imported = environment.canvas.children[0];
     const title = imported.children[0];
@@ -680,17 +770,19 @@ test('keeps a single-line Label at the Figma frame size', async () => {
     assert.ok(label);
     assert.equal(title.getComponent(LabelOutline), null);
     assert.equal(label.enableOutline, true);
-    assert.equal(label.outlineWidth, 2);
+    assert.equal(label.outlineWidth, 5);
     assert.equal(label.overflow, Label.Overflow.CLAMP);
     assert.equal(label.enableWrapText, false);
     assert.equal(label.horizontalAlign, Label.HorizontalAlign.CENTER);
     assert.equal(label.verticalAlign, Label.VerticalAlign.CENTER);
     assert.equal(label.lineHeight, 18);
-    assert.deepEqual(transform.contentSize, { width: 40, height: 20 });
+    assert.deepEqual(transform.contentSize, { width: 110, height: 20 });
     assert.deepEqual(
         { x: title.position.x, y: title.position.y },
-        { x: -20, y: 25 },
+        { x: 0, y: 25 },
     );
+    assert.equal(title.position.x - transform.width / 2, -55);
+    assert.equal(title.position.x + transform.width / 2, 55);
 });
 
 test('keeps a multiline Label at the Figma frame size', async () => {
@@ -1004,6 +1096,74 @@ test('uses the outermost Figma Frame as the root and centers it on a 640x1136 Ca
     );
     assert.deepEqual(transform.anchorPoint, { x: 0.5, y: 0.5 });
     assert.equal(environment.result.temporaryRoot, true);
+});
+
+test('imports the right common_xian_01 as an exact 180-degree local transform', async () => {
+    const root = makeSpec({
+        name: 'PopupHongbaoView',
+        isRoot: true,
+        intrinsicSize: { width: 400, height: 100 },
+        frame: { x: 1000, y: 500, width: 400, height: 100 },
+        children: [makeSpec({
+            figmaId: '231:common-right',
+            name: 'common_xian_01',
+            kind: 'sprite',
+            intrinsicSize: { width: 68, height: 17 },
+            frame: { x: 1328, y: 541.5, width: 68, height: 17 },
+            relativeTransform: [
+                [-1, 0, 396],
+                [0, -1, 58.5],
+            ],
+            rotation: 180,
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+
+    const environment = await importWithFakeCocos(root);
+    const importedRoot = environment.canvas.children[0];
+    const line = importedRoot.children[0];
+
+    assert.deepEqual(line.getComponent(UITransform).contentSize, { width: 68, height: 17 });
+    assert.deepEqual({ x: line.position.x, y: line.position.y }, { x: 162, y: 0 });
+    assert.deepEqual(line.euler, { x: 0, y: 0, z: 180 });
+});
+
+test('keeps nested rotated nodes in their Figma parent-local coordinate systems', async () => {
+    const child = makeSpec({
+        figmaId: 'rotation:child',
+        name: 'NestedChild',
+        intrinsicSize: { width: 20, height: 10 },
+        frame: { x: 0, y: 0, width: 20, height: 10 },
+        relativeTransform: [[1, 0, 10], [0, 1, 20]],
+        rotation: 0,
+    });
+    const parent = makeSpec({
+        figmaId: 'rotation:parent',
+        name: 'RotatedParent',
+        intrinsicSize: { width: 100, height: 80 },
+        frame: { x: 0, y: 0, width: 80, height: 100 },
+        relativeTransform: [[0, 1, 110], [-1, 0, 200]],
+        rotation: 90,
+        children: [child],
+    });
+    const root = makeSpec({
+        name: 'RotationRoot',
+        isRoot: true,
+        intrinsicSize: { width: 300, height: 300 },
+        frame: { x: 0, y: 0, width: 300, height: 300 },
+        children: [parent],
+    });
+    parent.parentFrame = root.frame;
+    child.parentFrame = parent.frame;
+
+    const environment = await importWithFakeCocos(root);
+    const importedParent = environment.canvas.children[0].children[0];
+    const importedChild = importedParent.children[0];
+
+    assert.deepEqual(importedParent.getComponent(UITransform).contentSize, { width: 100, height: 80 });
+    assert.deepEqual({ x: importedParent.position.x, y: importedParent.position.y }, { x: 0, y: 0 });
+    assert.equal(importedParent.euler.z, 90);
+    assert.deepEqual({ x: importedChild.position.x, y: importedChild.position.y }, { x: -30, y: 15 });
 });
 
 test('converts child nodes to center anchors without changing their Figma placement', async () => {
@@ -1763,6 +1923,385 @@ test('resets reused Label state and keeps the updated Figma text frame', async (
     }
 });
 
+test('creates an editable RichText placeholder without a Label renderer', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const root = makeSpec({
+            figmaId: '15:310',
+            name: 'txt_msg',
+            kind: 'richText',
+            frame: { x: 0, y: 0, width: 400, height: 28 },
+            characters: '',
+            textStyle: { fontSize: 20, lineHeightPx: 22 },
+            fontUuid: 'mapped-font',
+            fills: [{ type: 'SOLID', visible: true, color: { r: 0.47, g: 0.3, b: 0.23 } }],
+        });
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: root.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [root],
+        });
+        const imported = environment.canvas.children[0];
+        const richText = imported.getComponent(RichText);
+
+        assert.ok(richText);
+        assert.equal(imported.getComponent(Label), null);
+        assert.equal(richText.string, '');
+        assert.equal(richText.fontSize, 20);
+        assert.equal(richText.lineHeight, 22);
+        assert.equal(richText.maxWidth, 400);
+        assert.equal(richText.horizontalAlign, RichText.HorizontalAlign.LEFT);
+        assert.equal(richText.verticalAlign, RichText.VerticalAlign.TOP);
+        assert.equal(richText.useSystemFont, false);
+        assert.ok(richText.font);
+        assert.deepEqual(imported.getComponent(UITransform).contentSize, { width: 400, height: 28 });
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('rejects a BitmapFont mapping for RichText with an actionable error', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') return environment.cc;
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const root = makeSpec({
+            figmaId: '15:310:bitmap',
+            name: 'txt_msg',
+            kind: 'richText',
+            frame: { x: 0, y: 0, width: 400, height: 28 },
+            characters: '内容',
+            textStyle: { fontSize: 20, lineHeightPx: 22 },
+            fontUuid: 'bitmap-font',
+        });
+        await assert.rejects(methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: root.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [root],
+        }), /RichText.*TTF\/OTF.*BitmapFont/);
+        assert.equal(environment.canvas.children.length, 0);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('switches safely between Label and RichText renderers on repeated imports', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') return environment.cc;
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    const importRoot = (kind, existingMap = {}, updateExisting = false) => {
+        const root = makeSpec({
+            figmaId: '15:311',
+            name: 'txt_msg',
+            figmaType: 'TEXT',
+            kind,
+            characters: '内容',
+            textStyle: { fontSize: 20, lineHeightPx: 22 },
+        });
+        return methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: root.frame,
+            scale: 1,
+            updateExisting,
+            existingMap,
+            centerInCanvas: true,
+            roots: [root],
+        });
+    };
+    try {
+        const first = await importRoot('label');
+        const imported = environment.canvas.children[0];
+        assert.ok(imported.getComponent(Label));
+
+        FakeNode.deferComponentRemoval = true;
+        const second = await importRoot('richText', first.nodeMap, true);
+        assert.equal(imported.getComponent(Label), null);
+        assert.ok(imported.getComponent(RichText));
+
+        await importRoot('label', second.nodeMap, true);
+        assert.equal(imported.getComponent(RichText), null);
+        assert.ok(imported.getComponent(Label));
+    } finally {
+        FakeNode.deferComponentRemoval = false;
+        Module._load = originalLoad;
+    }
+});
+
+test('maps folded Figma aliases onto one node for a fresh linked-prefab build', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const folded = makeSpec({
+            figmaId: '15:320',
+            aliasFigmaIds: ['15:321', '15:321', '', '__root__'],
+            flattenBoundary: true,
+            name: 'txt_title',
+            kind: 'label',
+            characters: '规则详情',
+            children: [makeSpec({ figmaId: '15:321', name: 'MustNotBuild' })],
+        });
+        const result = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: folded.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            prefabUrl: 'db://assets/generated/PopupInstructionView.prefab',
+            centerInCanvas: true,
+            roots: [folded],
+        });
+        const imported = environment.canvas.children[0];
+
+        assert.equal(result.nodeMap.__root__, imported.uuid);
+        assert.equal(result.nodeMap['15:320'], imported.uuid);
+        assert.equal(result.nodeMap['15:321'], imported.uuid);
+        assert.equal(result.nodeMap[''], undefined);
+        assert.equal(imported.getComponent(Label).string, '规则详情');
+        assert.equal(imported.children.length, 0);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('promotes one aliased background while retaining semantic siblings and manual nodes', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    const importRoot = (root, existingMap = {}, updateExisting = false) => methods.importDocument({
+        packageName: 'figma-importer-cocos',
+        fileKey: 'file-key',
+        rootName: 'Test',
+        rootFrame: root.frame,
+        scale: 1,
+        updateExisting,
+        existingMap,
+        centerInCanvas: true,
+        roots: [root],
+    });
+    const labelSpec = () => makeSpec({
+        figmaId: '15:343',
+        name: 'txt_btns_0',
+        figmaType: 'TEXT',
+        kind: 'label',
+        characters: '确定',
+        frame: { x: 20, y: 15, width: 60, height: 30 },
+    });
+    const layeredSpec = () => {
+        const background = makeSpec({
+            figmaId: '15:342',
+            name: 'common_btn_tyanniu_01',
+        });
+        const label = labelSpec();
+        const root = makeSpec({
+            figmaId: '15:341',
+            name: 'btn_sure',
+            children: [background, label],
+        });
+        background.parentFrame = root.frame;
+        label.parentFrame = root.frame;
+        return root;
+    };
+    const promotedSpec = () => {
+        const label = labelSpec();
+        const root = makeSpec({
+            figmaId: '15:341',
+            aliasFigmaIds: ['15:342'],
+            flattenBoundary: false,
+            name: 'btn_sure',
+            kind: 'button',
+            sprite: { uuid: 'button-bg', url: 'db://assets/button-bg.png', sliced: true },
+            children: [label],
+        });
+        label.parentFrame = root.frame;
+        return root;
+    };
+    try {
+        const first = await importRoot(layeredSpec());
+        const imported = environment.canvas.children[0];
+        const oldBackground = imported.getChildByName('common_btn_tyanniu_01');
+        const existingLabel = imported.getChildByName('txt_btns_0');
+        const manualChild = new FakeNode('ManualBadge');
+        oldBackground.addChild(manualChild);
+
+        const second = await importRoot(promotedSpec(), first.nodeMap, true);
+
+        assert.ok(imported.getComponent(Sprite));
+        assert.ok(imported.getComponent(Button));
+        assert.equal(oldBackground.parent, null);
+        assert.equal(manualChild.parent, imported);
+        assert.equal(imported.getChildByName('txt_btns_0'), existingLabel);
+        assert.equal(second.nodeMap['15:341'], imported.uuid);
+        assert.equal(second.nodeMap['15:342'], imported.uuid);
+        assert.equal(second.nodeMap['15:343'], existingLabel.uuid);
+        assert.equal(
+            imported.children.filter((child) => child.name === 'txt_btns_0').length,
+            1,
+        );
+
+        const third = await importRoot(promotedSpec(), second.nodeMap, true);
+
+        assert.equal(third.created, 0);
+        assert.equal(imported.getChildByName('txt_btns_0'), existingLabel);
+        assert.equal(manualChild.parent, imported);
+
+        const fourth = await importRoot(layeredSpec(), third.nodeMap, true);
+        const expandedBackground = imported.getChildByName('common_btn_tyanniu_01');
+
+        assert.ok(expandedBackground);
+        assert.notEqual(expandedBackground, imported);
+        assert.equal(imported.getComponent(Sprite), null);
+        assert.equal(imported.getComponent(Button), null);
+        assert.equal(imported.getChildByName('txt_btns_0'), existingLabel);
+        assert.equal(manualChild.parent, imported);
+        assert.notEqual(fourth.nodeMap['15:341'], fourth.nodeMap['15:342']);
+        assert.equal(
+            imported.children.filter((child) => child.name === 'common_btn_tyanniu_01').length,
+            1,
+        );
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('switches repeatedly between layered and folded Label specs without stale or duplicate nodes', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    const importRoot = (root, existingMap = {}, updateExisting = false) => methods.importDocument({
+        packageName: 'figma-importer-cocos',
+        fileKey: 'file-key',
+        rootName: 'Test',
+        rootFrame: root.frame,
+        scale: 1,
+        updateExisting,
+        existingMap,
+        centerInCanvas: true,
+        roots: [root],
+    });
+    const layeredSpec = () => {
+        const text = makeSpec({
+            figmaId: '15:331',
+            name: 'RawText',
+            figmaType: 'TEXT',
+            kind: 'label',
+            frame: { x: 10, y: 8, width: 80, height: 24 },
+            characters: '规则详情',
+        });
+        const root = makeSpec({
+            figmaId: '15:330',
+            name: 'txt_title',
+            flattenBoundary: false,
+            children: [text],
+        });
+        text.parentFrame = root.frame;
+        return root;
+    };
+    const foldedSpec = (characters) => makeSpec({
+        figmaId: '15:330',
+        aliasFigmaIds: ['15:331'],
+        flattenBoundary: true,
+        name: 'txt_title',
+        kind: 'label',
+        characters,
+        children: [],
+    });
+    try {
+        const first = await importRoot(layeredSpec());
+        const imported = environment.canvas.children[0];
+        const oldText = imported.getChildByName('RawText');
+        const manualChild = new FakeNode('ManualBadge');
+        oldText.addChild(manualChild);
+
+        const second = await importRoot(foldedSpec('折叠一'), first.nodeMap, true);
+
+        assert.equal(oldText.parent, null);
+        assert.equal(manualChild.parent, imported);
+        assert.deepEqual(imported.children.map((child) => child.name), ['ManualBadge']);
+        assert.equal(second.nodeMap['15:330'], imported.uuid);
+        assert.equal(second.nodeMap['15:331'], imported.uuid);
+        assert.equal(imported.getComponent(Label).string, '折叠一');
+
+        const third = await importRoot(foldedSpec('折叠二'), second.nodeMap, true);
+
+        assert.equal(third.created, 0);
+        assert.equal(third.nodeMap['15:330'], imported.uuid);
+        assert.equal(third.nodeMap['15:331'], imported.uuid);
+        assert.deepEqual(imported.children.map((child) => child.name), ['ManualBadge']);
+        assert.equal(imported.getComponent(Label).string, '折叠二');
+
+        const fourth = await importRoot(layeredSpec(), third.nodeMap, true);
+        const expandedText = imported.getChildByName('RawText');
+
+        assert.ok(expandedText);
+        assert.notEqual(expandedText, imported);
+        assert.equal(imported.getComponent(Label), null);
+        assert.ok(expandedText.getComponent(Label));
+        assert.equal(manualChild.parent, imported);
+        assert.notEqual(fourth.nodeMap['15:330'], fourth.nodeMap['15:331']);
+        assert.equal(
+            imported.children.filter((child) => child.name === 'RawText').length,
+            1,
+        );
+
+        const fifth = await importRoot(layeredSpec(), fourth.nodeMap, true);
+
+        assert.equal(fifth.created, 0);
+        assert.equal(imported.getChildByName('RawText'), expandedText);
+        assert.equal(
+            imported.children.filter((child) => child.name === 'RawText').length,
+            1,
+        );
+        assert.equal(manualChild.parent, imported);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
 test('removes stale imported descendants when a layered node becomes one PNG while preserving manual children', async () => {
     const environment = fakeCocos();
     const originalLoad = Module._load;
@@ -2205,4 +2744,489 @@ test('restores reused roots when a direct-to-multi import fails', async () => {
         FakeNode.deferNodeDestruction = false;
         Module._load = originalLoad;
     }
+});
+
+test('updates an opened Prefab by fileId after runtime UUIDs change', async () => {
+    const environment = fakeCocos();
+    const prefabUuid = 'prefab-asset-uuid';
+    const rootFileId = 'prefabRootFileId';
+    const rootTransformFileId = 'prefabRootTransformFileId';
+    environment.canvas._prefab = {
+        fileId: rootFileId,
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+
+    const rootFrame = { x: 0, y: 0, width: 320, height: 240 };
+    const leftFrame = { x: 0, y: 0, width: 150, height: 240 };
+    const rightFrame = { x: 170, y: 0, width: 150, height: 240 };
+    const itemFrame = { x: 10, y: 20, width: 40, height: 30 };
+    const item = makeSpec({
+        figmaId: 'item-id',
+        name: 'Item Before',
+        action: 'render',
+        kind: 'sprite',
+        frame: itemFrame,
+        sprite: { uuid: 'sprite-frame', url: 'db://assets/item.png', sliced: false },
+    });
+    item.parentFrame = leftFrame;
+    const left = makeSpec({
+        figmaId: 'left-id',
+        name: 'Left',
+        frame: leftFrame,
+        children: [item],
+    });
+    left.parentFrame = rootFrame;
+    const right = makeSpec({
+        figmaId: 'right-id',
+        name: 'Right',
+        frame: rightFrame,
+    });
+    right.parentFrame = rootFrame;
+    const firstRoot = makeSpec({
+        figmaId: 'root-id',
+        name: 'Frame Prefab',
+        frame: rootFrame,
+        children: [left, right],
+    });
+    const first = await importWithPrefabContext(environment, firstRoot, {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'root-id': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+    assert.ok(first.prefabSync);
+    const importedItem = environment.canvas.children[0].children[0];
+    const stableItemFileId = importedItem._prefab.fileId;
+    class ManualScript extends Component {}
+    const manualScript = importedItem.addComponent(ManualScript);
+    manualScript.__prefab = { fileId: 'manualScriptFileId' };
+    const manualChild = new FakeNode('Manual Child');
+    manualChild._prefab = {
+        fileId: 'manualChildFileId',
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    environment.canvas.children[1].addChild(manualChild);
+
+    let runtimeUuid = 1000;
+    const replaceRuntimeUuids = (node) => {
+        node.uuid = `reopened-${runtimeUuid++}`;
+        node.children.forEach(replaceRuntimeUuids);
+    };
+    replaceRuntimeUuids(environment.canvas);
+
+    const movedItem = makeSpec({
+        figmaId: 'item-id',
+        name: 'Item After',
+        action: 'render',
+        kind: 'sprite',
+        frame: { x: 180, y: 40, width: 40, height: 30 },
+        sprite: { uuid: 'sprite-frame', url: 'db://assets/item.png', sliced: false },
+    });
+    movedItem.parentFrame = rightFrame;
+    const secondLeft = makeSpec({
+        figmaId: 'left-id',
+        name: 'Left',
+        frame: leftFrame,
+    });
+    secondLeft.parentFrame = rootFrame;
+    const secondRight = makeSpec({
+        figmaId: 'right-id',
+        name: 'Right',
+        frame: rightFrame,
+        children: [movedItem],
+    });
+    secondRight.parentFrame = rootFrame;
+    const secondRoot = makeSpec({
+        figmaId: 'root-id',
+        name: 'Frame Prefab',
+        frame: rootFrame,
+        children: [secondLeft, secondRight],
+    });
+    const second = await importWithPrefabContext(environment, secondRoot, {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: first.prefabSync.nodeFileIds,
+        managedNodeFileIds: first.prefabSync.managedNodeFileIds,
+        managedComponentFileIds: first.prefabSync.managedComponentFileIds,
+        managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+    });
+
+    const updatedRight = environment.canvas.children.find((node) => node.name === 'Right');
+    assert.equal(second.created, 0);
+    assert.equal(importedItem.name, 'Item After');
+    assert.equal(importedItem.parent, updatedRight);
+    assert.equal(importedItem._prefab.fileId, stableItemFileId);
+    assert.equal(importedItem.getComponent(ManualScript), manualScript);
+    assert.deepEqual(updatedRight.children.map((node) => node.name), ['Item After', 'Manual Child']);
+    assert.equal(second.prefabSync.nodeFileIds['item-id'], stableItemFileId);
+    assert.equal(environment.scene.children.length, 1);
+});
+
+test('removes only stale managed Prefab nodes and salvages manual descendants', async () => {
+    const environment = fakeCocos();
+    const prefabUuid = 'prefab-stale-uuid';
+    const rootFileId = 'staleRootFileId';
+    const rootTransformFileId = 'staleRootTransformFileId';
+    environment.canvas._prefab = {
+        fileId: rootFileId,
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+    const rootFrame = { x: 0, y: 0, width: 200, height: 200 };
+    const branchFrame = { x: 20, y: 20, width: 100, height: 100 };
+    const leaf = makeSpec({
+        figmaId: 'obsolete-leaf',
+        name: 'Obsolete Leaf',
+        frame: { x: 30, y: 30, width: 20, height: 20 },
+    });
+    leaf.parentFrame = branchFrame;
+    const branch = makeSpec({
+        figmaId: 'obsolete-branch',
+        name: 'Obsolete Branch',
+        frame: branchFrame,
+        children: [leaf],
+    });
+    branch.parentFrame = rootFrame;
+    const firstRoot = makeSpec({
+        figmaId: 'stale-root',
+        name: 'Stale Root',
+        frame: rootFrame,
+        children: [branch],
+    });
+    const first = await importWithPrefabContext(environment, firstRoot, {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'stale-root': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+    const importedBranch = environment.canvas.children[0];
+    const importedLeaf = importedBranch.children[0];
+    const manualGrandchild = new FakeNode('Manual Grandchild');
+    manualGrandchild._prefab = {
+        fileId: 'manualGrandchildFileId',
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    importedLeaf.addChild(manualGrandchild);
+    const worldBefore = manualGrandchild.worldPosition();
+
+    const secondRoot = makeSpec({
+        figmaId: 'stale-root',
+        name: 'Stale Root',
+        frame: rootFrame,
+        children: [],
+    });
+    await importWithPrefabContext(environment, secondRoot, {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: first.prefabSync.nodeFileIds,
+        managedNodeFileIds: first.prefabSync.managedNodeFileIds,
+        managedComponentFileIds: first.prefabSync.managedComponentFileIds,
+        managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+    });
+
+    assert.equal(importedBranch.parent, null);
+    assert.equal(importedLeaf.parent, importedBranch);
+    assert.equal(manualGrandchild.parent, environment.canvas);
+    assert.deepEqual(manualGrandchild.worldPosition(), worldBefore);
+    assert.deepEqual(environment.canvas.children.map((node) => node.name), ['Manual Grandchild']);
+});
+
+test('rejects a mismatched Prefab editor context before mutating its root', async () => {
+    const environment = fakeCocos();
+    environment.reportedPrefabUuid = 'another-prefab-uuid';
+    environment.canvas.name = 'Untouched Root';
+    environment.canvas._prefab = {
+        fileId: 'contextRootFileId',
+        root: environment.canvas,
+        asset: { uuid: 'expected-prefab-uuid' },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = {
+        fileId: 'contextRootTransformFileId',
+    };
+    await assert.rejects(
+        importWithPrefabContext(environment, makeSpec({
+            figmaId: 'context-root',
+            name: 'Must Not Apply',
+        }), {
+            prefabUuid: 'expected-prefab-uuid',
+            rootFileId: 'contextRootFileId',
+            existingNodeFileIds: { 'context-root': 'contextRootFileId' },
+            managedNodeFileIds: ['contextRootFileId'],
+            managedComponentFileIds: ['contextRootTransformFileId'],
+            managedHelperFileIds: [],
+        }),
+        /目标 Prefab 尚未安全打开/,
+    );
+    assert.equal(environment.canvas.name, 'Untouched Root');
+    assert.equal(environment.canvas.children.length, 0);
+});
+
+test('captures helpers and components that Creator assigns fileIds during creation', async () => {
+    const environment = fakeCocos();
+    environment.autoAssignPrefabInfo = true;
+    const prefabUuid = 'prefab-auto-fileid-uuid';
+    const rootFileId = 'autoRootFileId';
+    const rootTransformFileId = 'autoRootTransformFileId';
+    environment.canvas._prefab = {
+        fileId: rootFileId,
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+    const result = await importWithPrefabContext(environment, makeSpec({
+        figmaId: 'auto-root',
+        name: 'Auto FileId Scroll',
+        kind: 'scrollView',
+        overflowDirection: 'VERTICAL_SCROLLING',
+        layout: { mode: 'VERTICAL' },
+    }), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'auto-root': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+
+    const view = environment.canvas.getChildByName('view');
+    const content = view.getChildByName('content');
+    assert.ok(view._prefab.fileId);
+    assert.ok(content._prefab.fileId);
+    assert.ok(result.prefabSync.managedHelperFileIds.includes(view._prefab.fileId));
+    assert.ok(result.prefabSync.managedHelperFileIds.includes(content._prefab.fileId));
+    for (const component of [...view.components, ...content.components]) {
+        assert.ok(result.prefabSync.managedComponentFileIds.includes(component.__prefab.fileId));
+    }
+});
+
+test('blocks helper deletion when a user component is attached and keeps the subtree intact', async () => {
+    const environment = fakeCocos();
+    const prefabUuid = 'prefab-helper-guard-uuid';
+    const rootFileId = 'helperGuardRootFileId';
+    const rootTransformFileId = 'helperGuardRootTransformFileId';
+    environment.canvas._prefab = {
+        fileId: rootFileId,
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+    const first = await importWithPrefabContext(environment, makeSpec({
+        figmaId: 'helper-root',
+        name: 'Guarded Scroll',
+        kind: 'scrollView',
+        overflowDirection: 'VERTICAL_SCROLLING',
+        layout: { mode: 'VERTICAL' },
+    }), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'helper-root': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+    const view = environment.canvas.getChildByName('view');
+    class ManualHelperScript extends Component {}
+    const manual = view.addComponent(ManualHelperScript);
+    manual.__prefab = { fileId: 'manualHelperScriptFileId' };
+
+    await assert.rejects(
+        importWithPrefabContext(environment, makeSpec({
+            figmaId: 'helper-root',
+            name: 'Must Not Mutate',
+            kind: 'node',
+        }), {
+            prefabUuid,
+            rootFileId,
+            existingNodeFileIds: first.prefabSync.nodeFileIds,
+            managedNodeFileIds: first.prefabSync.managedNodeFileIds,
+            managedComponentFileIds: first.prefabSync.managedComponentFileIds,
+            managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+        }),
+        /不是 Figma Importer 创建的/,
+    );
+    assert.equal(environment.canvas.name, 'Guarded Scroll');
+    assert.equal(environment.canvas.getChildByName('view'), view);
+    assert.equal(view.getComponent(ManualHelperScript), manual);
+    assert.notEqual(view.destroyed, true);
+});
+
+test('rejects an unowned UITransform before changing a managed Prefab node', async () => {
+    const environment = fakeCocos();
+    const prefabUuid = 'prefab-transform-guard-uuid';
+    const rootFileId = 'transformGuardRootFileId';
+    const rootTransformFileId = 'transformGuardRootTransformFileId';
+    environment.canvas.name = 'Original Root';
+    environment.canvas._prefab = {
+        fileId: rootFileId,
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: 'manualTransformFileId' };
+
+    await assert.rejects(
+        importWithPrefabContext(environment, makeSpec({
+            figmaId: 'transform-root',
+            name: 'Must Not Rename',
+        }), {
+            prefabUuid,
+            rootFileId,
+            existingNodeFileIds: { 'transform-root': rootFileId },
+            managedNodeFileIds: [rootFileId],
+            managedComponentFileIds: [rootTransformFileId],
+            managedHelperFileIds: [],
+        }),
+        /UITransform 不是 Figma Importer 创建的/,
+    );
+    assert.equal(environment.canvas.name, 'Original Root');
+});
+
+test('rejects a user-replaced ScrollView content slot before any mutation', async () => {
+    const environment = fakeCocos();
+    const prefabUuid = 'prefab-content-slot-uuid';
+    const rootFileId = 'contentSlotRootFileId';
+    const rootTransformFileId = 'contentSlotRootTransformFileId';
+    environment.canvas._prefab = {
+        fileId: rootFileId,
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+    const scrollSpec = makeSpec({
+        figmaId: 'content-slot-root',
+        name: 'Owned Scroll Root',
+        kind: 'scrollView',
+        overflowDirection: 'VERTICAL_SCROLLING',
+        layout: { mode: 'VERTICAL' },
+    });
+    const first = await importWithPrefabContext(environment, scrollSpec, {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'content-slot-root': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+    const view = environment.canvas.getChildByName('view');
+    view.getChildByName('content').removeFromParent();
+    const manualContent = new FakeNode('content');
+    manualContent._prefab = {
+        fileId: 'manualContentSlotFileId',
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    const manualTransform = manualContent.addComponent(UITransform);
+    manualTransform.__prefab = { fileId: 'manualContentTransformFileId' };
+    manualTransform.setAnchorPoint(0.25, 0.75);
+    manualTransform.setContentSize(37, 19);
+    manualContent.setPosition(8, -6, 0);
+    view.addChild(manualContent);
+
+    await assert.rejects(
+        importWithPrefabContext(environment, makeSpec({
+            ...scrollSpec,
+            figmaId: 'content-slot-root',
+            name: 'Must Not Rename',
+            kind: 'scrollView',
+            overflowDirection: 'VERTICAL_SCROLLING',
+            layout: { mode: 'VERTICAL' },
+        }), {
+            prefabUuid,
+            rootFileId,
+            existingNodeFileIds: first.prefabSync.nodeFileIds,
+            managedNodeFileIds: first.prefabSync.managedNodeFileIds,
+            managedComponentFileIds: first.prefabSync.managedComponentFileIds,
+            managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+        }),
+        /content.*不是 Figma Importer 创建的/,
+    );
+    assert.equal(environment.canvas.name, 'Owned Scroll Root');
+    assert.equal(manualContent.parent, view);
+    assert.deepEqual(manualTransform.anchorPoint, { x: 0.25, y: 0.75 });
+    assert.deepEqual(manualTransform.contentSize, { width: 37, height: 19 });
+    assert.deepEqual(
+        { x: manualContent.position.x, y: manualContent.position.y },
+        { x: 8, y: -6 },
+    );
+});
+
+test('rejects a user-replaced nested tiled Sprite slot before any mutation', async () => {
+    const environment = fakeCocos();
+    const prefabUuid = 'prefab-tiled-slot-uuid';
+    const rootFileId = 'tiledSlotRootFileId';
+    const rootTransformFileId = 'tiledSlotRootTransformFileId';
+    environment.canvas._prefab = {
+        fileId: rootFileId,
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+    const tiledSpec = makeSpec({
+        figmaId: 'tiled-slot-root',
+        name: 'Owned Tiled Root',
+        figmaType: 'ELLIPSE',
+        action: 'render',
+        kind: 'sprite',
+        sprite: {
+            uuid: 'tiled-frame',
+            url: 'db://assets/tiled.png',
+            sliced: false,
+            tiled: true,
+        },
+    });
+    const first = await importWithPrefabContext(environment, tiledSpec, {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'tiled-slot-root': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+    const tiledMask = environment.canvas.getChildByName('__FigmaTiledMask');
+    tiledMask.getChildByName('__FigmaTiledSprite').removeFromParent();
+    const manualTiledSprite = new FakeNode('__FigmaTiledSprite');
+    manualTiledSprite._prefab = {
+        fileId: 'manualTiledSpriteFileId',
+        root: environment.canvas,
+        asset: { uuid: prefabUuid },
+    };
+    const manualTransform = manualTiledSprite.addComponent(UITransform);
+    manualTransform.__prefab = { fileId: 'manualTiledTransformFileId' };
+    manualTransform.setContentSize(13, 17);
+    const manualSprite = manualTiledSprite.addComponent(Sprite);
+    manualSprite.__prefab = { fileId: 'manualTiledSpriteCompFileId' };
+    manualSprite._spriteFrame = 'manual-frame';
+    tiledMask.addChild(manualTiledSprite);
+
+    await assert.rejects(
+        importWithPrefabContext(environment, makeSpec({
+            ...tiledSpec,
+            figmaId: 'tiled-slot-root',
+            name: 'Must Not Rename',
+            figmaType: 'ELLIPSE',
+            action: 'render',
+            kind: 'sprite',
+            sprite: tiledSpec.sprite,
+        }), {
+            prefabUuid,
+            rootFileId,
+            existingNodeFileIds: first.prefabSync.nodeFileIds,
+            managedNodeFileIds: first.prefabSync.managedNodeFileIds,
+            managedComponentFileIds: first.prefabSync.managedComponentFileIds,
+            managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+        }),
+        /__FigmaTiledSprite.*不是 Figma Importer 创建的/,
+    );
+    assert.equal(environment.canvas.name, 'Owned Tiled Root');
+    assert.equal(manualTiledSprite.parent, tiledMask);
+    assert.deepEqual(manualTransform.contentSize, { width: 13, height: 17 });
+    assert.equal(manualSprite._spriteFrame, 'manual-frame');
 });

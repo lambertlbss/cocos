@@ -4,7 +4,16 @@ import {
     kindForImportAction,
     normalizeImportAction,
 } from './import-actions';
-import type { FigmaColor, FigmaPaint, Rect, SceneNodeSpec } from './types';
+import type {
+    FigmaColor,
+    FigmaPaint,
+    PrefabEditingState,
+    PrefabSceneSyncCapture,
+    PrefabSceneSyncContext,
+    Rect,
+    SceneNodeSpec,
+} from './types';
+import { sanitizeNodeName } from './node-name';
 
 module.paths.push(join(Editor.App.path, 'node_modules'));
 
@@ -18,6 +27,7 @@ interface SceneImportPayload {
     existingMap: Record<string, string>;
     prefabUrl?: string;
     centerInCanvas?: boolean;
+    prefabContext?: PrefabSceneSyncContext;
     roots: SceneNodeSpec[];
 }
 
@@ -27,6 +37,7 @@ interface SceneImportResult {
     created: number;
     updated: number;
     temporaryRoot?: boolean;
+    prefabSync?: PrefabSceneSyncCapture;
 }
 
 const BACKGROUND_NODE_NAME = '__FigmaBackground';
@@ -41,7 +52,7 @@ const RASTER_VECTOR_TYPES = new Set([
 ]);
 
 function cleanName(input: string): string {
-    return input.replace(/[\u0000-\u001f/\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 96) || 'Figma Node';
+    return sanitizeNodeName(input) ?? 'Figma Node';
 }
 
 function toColor(Color: any, value: FigmaColor | undefined, opacity = 1): any {
@@ -65,6 +76,148 @@ function findByUuid(root: any, uuid: string): any | null {
         }
     }
     return null;
+}
+
+function nodePrefabFileId(node: any): string | undefined {
+    const value = node?._prefab?.fileId;
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function componentPrefabFileId(component: any): string | undefined {
+    const value = component?.__prefab?.fileId;
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function walkNodes(root: any, visit: (node: any) => void): void {
+    visit(root);
+    for (const child of root.children ?? []) {
+        walkNodes(child, visit);
+    }
+}
+
+function prefabAssetUuid(node: any): string | undefined {
+    const asset = node?._prefab?.asset;
+    const value = asset?._uuid ?? asset?.uuid;
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function prefabFileIdIndex(root: any, expectedPrefabUuid?: string): Map<string, any> {
+    const result = new Map<string, any>();
+    const componentFileIds = new Set<string>();
+    walkNodes(root, (node) => {
+        const prefabRoot = node?._prefab?.root;
+        if (node !== root && prefabRoot && prefabRoot !== root) {
+            return;
+        }
+        const assetUuid = prefabAssetUuid(node);
+        if (expectedPrefabUuid && assetUuid && assetUuid !== expectedPrefabUuid) {
+            return;
+        }
+        const fileId = nodePrefabFileId(node);
+        if (!fileId) {
+            return;
+        }
+        if (result.has(fileId)) {
+            throw new Error(`Prefab 内存在重复节点 fileId：${fileId}`);
+        }
+        result.set(fileId, node);
+        for (const component of node.components ?? node._components ?? []) {
+            const componentFileId = componentPrefabFileId(component);
+            if (!componentFileId) {
+                continue;
+            }
+            if (componentFileIds.has(componentFileId)) {
+                throw new Error(`Prefab 内存在重复组件 fileId：${componentFileId}`);
+            }
+            componentFileIds.add(componentFileId);
+        }
+    });
+    return result;
+}
+
+function prefabEditingState(
+    expectedUuid: string,
+    expectedRootFileId?: string,
+): PrefabEditingState {
+    const cceApi = (globalThis as any).cce;
+    const mode = String(cceApi?.SceneFacadeManager?.queryMode?.() ?? '');
+    const currentUuid = String(cceApi?.SceneFacadeManager?.queryCurrentSceneUuid?.() ?? '');
+    const root = cceApi?.Scene?.rootNode ?? null;
+    const rootFileId = nodePrefabFileId(root);
+    let reason = '';
+    if (mode !== 'prefab') {
+        reason = `当前编辑模式为 ${mode || 'unknown'}，尚未进入 Prefab`;
+    } else if (currentUuid !== expectedUuid) {
+        reason = `当前资源 UUID 与目标 Prefab 不一致`;
+    } else if (!root) {
+        reason = 'Prefab 根节点尚未就绪';
+    } else if (expectedRootFileId && rootFileId !== expectedRootFileId) {
+        reason = 'Prefab 根节点 fileId 与来源记录不一致';
+    }
+    return {
+        ready: !reason,
+        mode,
+        currentUuid,
+        rootUuid: root?.uuid,
+        rootFileId,
+        reason: reason || undefined,
+    };
+}
+
+function generatePrefabFileId(): string {
+    const generated = (globalThis as any).Editor?.Utils?.UUID?.generate?.(true);
+    if (typeof generated === 'string' && generated.length > 0) {
+        return generated;
+    }
+    // Unit-test/headless fallback. The real Creator scene process always uses
+    // Editor.Utils.UUID.generate(true), so production IDs follow Creator's own format.
+    return `figma${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`;
+}
+
+function ensureNodePrefabInfo(node: any, prefabRoot: any, cc: any): string {
+    let fileId = nodePrefabFileId(node);
+    if (fileId) {
+        return fileId;
+    }
+    const cceApi = (globalThis as any).cce;
+    cceApi?.Prefab?.onAddNode?.(node);
+    fileId = nodePrefabFileId(node);
+    if (fileId) {
+        return fileId;
+    }
+    const PrefabInfo = cc.Prefab?._utils?.PrefabInfo ?? cc.PrefabInfo;
+    if (!PrefabInfo) {
+        throw new Error('Cocos 3.8.7 PrefabInfo API 不可用，无法为新节点生成稳定 fileId。');
+    }
+    const info = new PrefabInfo();
+    info.root = prefabRoot;
+    info.asset = prefabRoot?._prefab?.asset ?? null;
+    info.fileId = generatePrefabFileId();
+    info.instance = null;
+    info.targetOverrides = null;
+    node._prefab = info;
+    return info.fileId;
+}
+
+function ensureComponentPrefabInfo(component: any, cc: any): string {
+    let fileId = componentPrefabFileId(component);
+    if (fileId) {
+        return fileId;
+    }
+    const cceApi = (globalThis as any).cce;
+    cceApi?.Prefab?.onAddComponent?.(component);
+    fileId = componentPrefabFileId(component);
+    if (fileId) {
+        return fileId;
+    }
+    const CompPrefabInfo = cc.Prefab?._utils?.CompPrefabInfo ?? cc.CompPrefabInfo;
+    if (!CompPrefabInfo) {
+        throw new Error('Cocos 3.8.7 CompPrefabInfo API 不可用，无法为新组件生成稳定 fileId。');
+    }
+    const info = new CompPrefabInfo();
+    info.fileId = generatePrefabFileId();
+    component.__prefab = info;
+    return info.fileId;
 }
 
 function setParentKeepingWorld(node: any, parent: any): void {
@@ -118,18 +271,47 @@ function normalizeSceneSpec(spec: SceneNodeSpec): SceneNodeSpec {
         ...spec,
         action,
         kind,
-        children: isTerminalAction(action)
+        children: isTerminalAction(action) || spec.flattenBoundary === true
             ? []
             : children.map((child) => normalizeSceneSpec(child)),
     };
 }
 
+function figmaIdsForSpec(spec: SceneNodeSpec): string[] {
+    const ids = [spec.figmaId, ...(spec.aliasFigmaIds ?? [])]
+        .filter((id): id is string => typeof id === 'string' && id.length > 0 && id !== '__root__');
+    return [...new Set(ids)];
+}
+
+function aliasFigmaIdsForSpec(spec: SceneNodeSpec): string[] {
+    return figmaIdsForSpec(spec).filter((figmaId) => figmaId !== spec.figmaId);
+}
+
+function existingUuidForSpec(
+    existingMap: Record<string, string>,
+    spec: SceneNodeSpec,
+): string | undefined {
+    for (const figmaId of figmaIdsForSpec(spec)) {
+        const uuid = existingMap[figmaId];
+        if (uuid) {
+            return uuid;
+        }
+    }
+    return undefined;
+}
+
 function flattensDescendants(spec: SceneNodeSpec): boolean {
+    if (typeof spec.flattenBoundary === 'boolean') {
+        return spec.flattenBoundary;
+    }
+    // Backward compatibility for SceneSpecs persisted by importer versions
+    // before flattenBoundary was introduced. New plans always set the flag so
+    // folded Labels and other promoted visuals use the same cleanup semantics.
     return spec.action === 'render'
         || (spec.action === 'generate' && Boolean(spec.sprite) && spec.children.length === 0);
 }
 
-function removeFlattenedMappedDescendants(
+function removeCollapsedMappedDescendants(
     importRoot: any,
     existingMap: Record<string, string>,
     currentMap: Record<string, string>,
@@ -137,22 +319,41 @@ function removeFlattenedMappedDescendants(
     cc: any,
 ): number {
     const retainedUuids = new Set(Object.values(currentMap));
-    const boundaryIds: string[] = [];
+    const boundarySpecs: Array<{
+        figmaId: string;
+        removesAllMappedDescendants: boolean;
+        aliasFigmaIds: Set<string>;
+    }> = [];
     const collectBoundaries = (nodes: SceneNodeSpec[]) => {
         for (const spec of nodes) {
             if (flattensDescendants(spec)) {
-                boundaryIds.push(spec.figmaId);
+                boundarySpecs.push({
+                    figmaId: spec.figmaId,
+                    removesAllMappedDescendants: true,
+                    aliasFigmaIds: new Set(),
+                });
                 continue;
+            }
+            const aliasFigmaIds = aliasFigmaIdsForSpec(spec);
+            if (aliasFigmaIds.length) {
+                boundarySpecs.push({
+                    figmaId: spec.figmaId,
+                    removesAllMappedDescendants: false,
+                    aliasFigmaIds: new Set(aliasFigmaIds),
+                });
             }
             collectBoundaries(spec.children);
         }
     };
     collectBoundaries(specs);
-    const boundaries = boundaryIds
-        .map((figmaId) => currentMap[figmaId])
-        .filter((uuid): uuid is string => Boolean(uuid))
-        .map((uuid) => findByUuid(importRoot, uuid))
-        .filter((node): node is any => Boolean(node));
+    const boundaries = boundarySpecs
+        .map((boundary) => ({
+            ...boundary,
+            node: currentMap[boundary.figmaId]
+                ? findByUuid(importRoot, currentMap[boundary.figmaId])
+                : null,
+        }))
+        .filter((boundary): boundary is typeof boundary & { node: any } => Boolean(boundary.node));
     if (!boundaries.length) {
         return 0;
     }
@@ -162,8 +363,12 @@ function removeFlattenedMappedDescendants(
             continue;
         }
         for (const boundary of boundaries) {
-            const node = findByUuid(boundary, uuid);
-            if (node && node !== boundary) {
+            if (!boundary.removesAllMappedDescendants
+                && !boundary.aliasFigmaIds.has(figmaId)) {
+                continue;
+            }
+            const node = findByUuid(boundary.node, uuid);
+            if (node && node !== boundary.node) {
                 staleNodes.set(node.uuid, node);
                 break;
             }
@@ -230,6 +435,7 @@ function removeGeneratedComponents(
     classes: any[],
     preserved: Set<any>,
     renderClasses: any[],
+    removableFileIds?: Set<string>,
 ): boolean {
     let removedRenderComponent = false;
     for (const type of classes) {
@@ -238,6 +444,17 @@ function removeGeneratedComponents(
         }
         const component = node.getComponent(type);
         if (component) {
+            if (removableFileIds) {
+                const fileId = componentPrefabFileId(component);
+                if (!fileId || !removableFileIds.has(fileId)) {
+                    if (renderClasses.some((renderType) => component instanceof renderType)) {
+                        throw new Error(
+                            `节点“${node.name}”上的渲染组件不是 Figma Importer 创建的，已停止更新以保护手工内容。`,
+                        );
+                    }
+                    continue;
+                }
+            }
             if (renderClasses.some((renderType) => component instanceof renderType)) {
                 removedRenderComponent = true;
             }
@@ -267,6 +484,8 @@ function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
         if (!usesTiledSpriteHelper(spec)) {
             desired.add(cc.Sprite);
         }
+    } else if (spec.kind === 'richText') {
+        desired.add(cc.RichText);
     } else if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
         desired.add(cc.Label);
     } else if (!RASTER_VECTOR_TYPES.has(spec.figmaType)) {
@@ -300,46 +519,108 @@ function waitForDeferredComponentRemoval(): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function removeGeneratedBackground(node: any): void {
+interface PrefabOwnershipGuard {
+    previousHelperFileIds: Set<string>;
+    previousComponentFileIds: Set<string>;
+    preexistingNodeUuids: Set<string>;
+    preexistingComponents: Set<any>;
+}
+
+function isOwnedHelperNode(node: any, guard: PrefabOwnershipGuard): boolean {
+    const fileId = nodePrefabFileId(node);
+    return !guard.preexistingNodeUuids.has(node.uuid)
+        || Boolean(fileId && guard.previousHelperFileIds.has(fileId));
+}
+
+function assertOwnedGeneratedComponent(
+    component: any,
+    guard: PrefabOwnershipGuard,
+    ownerName: string,
+): void {
+    if (!component || !guard.preexistingComponents.has(component)) {
+        return;
+    }
+    const fileId = componentPrefabFileId(component);
+    if (!fileId || !guard.previousComponentFileIds.has(fileId)) {
+        throw new Error(
+            `节点“${ownerName}”上的 ${component.constructor?.name ?? 'Component'} 不是 Figma Importer 创建的，已停止更新。`,
+        );
+    }
+}
+
+function assertOwnedHelperNode(node: any, guard: PrefabOwnershipGuard): void {
+    if (!isOwnedHelperNode(node, guard)) {
+        throw new Error(`辅助节点“${node.name}”不是 Figma Importer 创建的，已停止更新。`);
+    }
+    for (const component of nodeComponents(node)) {
+        assertOwnedGeneratedComponent(component, guard, node.name);
+    }
+}
+
+function assertOwnedHelperSubtree(node: any, guard: PrefabOwnershipGuard): void {
+    assertOwnedHelperNode(node, guard);
+    for (const child of node.children ?? []) {
+        if (isOwnedHelperNode(child, guard)) {
+            assertOwnedHelperSubtree(child, guard);
+        }
+    }
+}
+
+function destroyOwnedHelperSubtree(
+    helper: any,
+    survivor: any,
+    guard?: PrefabOwnershipGuard,
+): void {
+    if (guard) {
+        assertOwnedHelperSubtree(helper, guard);
+    }
+    const remove = (node: any) => {
+        for (const child of [...node.children]) {
+            if (guard && isOwnedHelperNode(child, guard)) {
+                remove(child);
+            } else {
+                setParentKeepingWorld(child, survivor);
+            }
+        }
+        node.removeFromParent();
+        node.destroy();
+    };
+    remove(helper);
+}
+
+function removeGeneratedBackground(node: any, guard?: PrefabOwnershipGuard): void {
     const background = node.getChildByName(BACKGROUND_NODE_NAME);
     if (!background) {
         return;
     }
-    for (const child of [...background.children]) {
-        setParentKeepingWorld(child, node);
-    }
-    background.removeFromParent();
-    background.destroy();
+    destroyOwnedHelperSubtree(background, node, guard);
 }
 
-function destroyGeneratedTiledSprite(tiledSprite: any, survivor: any): void {
-    for (const child of [...tiledSprite.children]) {
-        setParentKeepingWorld(child, survivor);
-    }
-    tiledSprite.removeFromParent();
-    tiledSprite.destroy();
+function destroyGeneratedTiledSprite(
+    tiledSprite: any,
+    survivor: any,
+    guard?: PrefabOwnershipGuard,
+): void {
+    destroyOwnedHelperSubtree(tiledSprite, survivor, guard);
 }
 
-function removeGeneratedTiledNodes(node: any): void {
+function removeGeneratedTiledNodes(node: any, guard?: PrefabOwnershipGuard): void {
     const tiledMask = node.getChildByName(TILED_MASK_NODE_NAME);
     if (tiledMask) {
-        for (const child of [...tiledMask.children]) {
-            if (child.name === TILED_SPRITE_NODE_NAME) {
-                destroyGeneratedTiledSprite(child, node);
-            } else {
-                setParentKeepingWorld(child, node);
-            }
-        }
-        tiledMask.removeFromParent();
-        tiledMask.destroy();
+        destroyOwnedHelperSubtree(tiledMask, node, guard);
     }
     const tiledSprite = node.getChildByName(TILED_SPRITE_NODE_NAME);
     if (tiledSprite) {
-        destroyGeneratedTiledSprite(tiledSprite, node);
+        destroyGeneratedTiledSprite(tiledSprite, node, guard);
     }
 }
 
-function removeObsoleteScrollHelpers(node: any, spec: SceneNodeSpec, cc: any): void {
+function removeObsoleteScrollHelpers(
+    node: any,
+    spec: SceneNodeSpec,
+    cc: any,
+    guard?: PrefabOwnershipGuard,
+): void {
     if (spec.kind === 'scrollView') {
         return;
     }
@@ -356,7 +637,10 @@ function removeObsoleteScrollHelpers(node: any, spec: SceneNodeSpec, cc: any): v
     };
     const legacy = node.getChildByName('__FigmaContent');
     if (legacy) {
-        if (preserveChildren) {
+        if (guard) {
+            assertOwnedHelperNode(legacy, guard);
+        }
+        if (guard || preserveChildren) {
             moveChildrenToNode(legacy);
         }
         legacy.removeFromParent();
@@ -367,6 +651,11 @@ function removeObsoleteScrollHelpers(node: any, spec: SceneNodeSpec, cc: any): v
     const content = view?.getChildByName('content');
     if (!scroll || !view || !content
         || (scroll.content !== content && scroll.content != null)) {
+        return;
+    }
+    if (guard) {
+        assertOwnedHelperSubtree(view, guard);
+        destroyOwnedHelperSubtree(view, node, guard);
         return;
     }
     if (preserveChildren) {
@@ -416,23 +705,56 @@ function framePosition(
     };
 }
 
+function relativeTransformPosition(
+    spec: SceneNodeSpec,
+    scale: number,
+    parentTransform?: any,
+): { x: number; y: number } | undefined {
+    if (spec.isRoot || !spec.intrinsicSize) return undefined;
+    const matrix = spec.relativeTransform;
+    const values = [
+        matrix?.[0]?.[0], matrix?.[0]?.[1], matrix?.[0]?.[2],
+        matrix?.[1]?.[0], matrix?.[1]?.[1], matrix?.[1]?.[2],
+    ];
+    if (!values.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+        return undefined;
+    }
+    const [m00, m01, tx, m10, m11, ty] = values as number[];
+    const parentAnchor = parentTransform?.anchorPoint ?? { x: 0.5, y: 0.5 };
+    const parentSize = parentTransform?.contentSize ?? {};
+    const parentWidth = Number(parentSize.width);
+    const parentHeight = Number(parentSize.height);
+    if (!Number.isFinite(parentWidth) || !Number.isFinite(parentHeight)) {
+        return undefined;
+    }
+    // Figma relativeTransform is top-left based. Transform the unrotated local
+    // center, then convert the parent's downward Y axis to Cocos upward Y.
+    const centerX = tx + m00 * spec.intrinsicSize.width / 2
+        + m01 * spec.intrinsicSize.height / 2;
+    const centerY = ty + m10 * spec.intrinsicSize.width / 2
+        + m11 * spec.intrinsicSize.height / 2;
+    return {
+        x: centerX * scale - parentWidth * parentAnchor.x,
+        y: parentHeight * (1 - parentAnchor.y) - centerY * scale,
+    };
+}
+
 function configureGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): any {
     const { UITransform, Vec3 } = cc;
     const transform = node.getComponent(UITransform) ?? node.addComponent(UITransform);
     transform.setAnchorPoint(0.5, 0.5);
+    const size = spec.intrinsicSize ?? spec.frame;
     transform.setContentSize(
-        Math.max(0, spec.frame.width * scale),
-        Math.max(0, spec.frame.height * scale),
+        Math.max(0, size.width * scale),
+        Math.max(0, size.height * scale),
     );
-    const position = framePosition(
-        spec.frame,
-        spec.parentFrame,
-        scale,
-        node.parent?.getComponent(UITransform),
-        transform,
-    );
+    const parentTransform = node.parent?.getComponent(UITransform);
+    const position = spec.isRoot
+        ? { x: 0, y: 0 }
+        : relativeTransformPosition(spec, scale, parentTransform)
+            ?? framePosition(spec.frame, spec.parentFrame, scale, parentTransform, transform);
     node.setPosition(new Vec3(position.x, position.y, node.position?.z ?? 0));
-    node.setRotationFromEuler(0, 0, -spec.rotation);
+    node.setRotationFromEuler(0, 0, spec.rotation);
     node.active = spec.visible;
     return transform;
 }
@@ -542,14 +864,42 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
     }
 }
 
+function configureRichText(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
+    const { RichText } = cc;
+    const richText = node.getComponent(RichText) ?? node.addComponent(RichText);
+    const style = spec.textStyle ?? {};
+    richText.string = normalizeLabelText(spec.characters);
+    richText.fontSize = Math.max(1, (style.fontSize ?? 16) * scale);
+    richText.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
+    richText.maxWidth = Math.max(0, spec.frame.width * scale);
+    richText.handleTouchEvent = false;
+    // RichText is primarily used for runtime-injected multi-line content. An
+    // empty Figma placeholder must therefore keep the same top-left contract
+    // after the game assigns its real string.
+    richText.horizontalAlign = RichText.HorizontalAlign.LEFT;
+    richText.verticalAlign = RichText.VerticalAlign.TOP;
+    richText.fontFamily = style.fontFamily ?? '';
+    richText.useSystemFont = !spec.fontUuid;
+    const fill = visiblePaint(spec.fills);
+    if (fill?.color) {
+        richText.fontColor = toColor(cc.Color, fill.color, fill.opacity ?? 1);
+    }
+}
+
 function finalizeLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const transform = node.getComponent(cc.UITransform);
     if (!transform) {
         return;
     }
+    const label = node.getComponent(cc.Label);
+    const outlineWidth = label?.enableOutline
+        ? Math.max(0, Number(label.outlineWidth) || 0)
+        : 0;
     // Label content and mapped fonts must never resize the imported Figma box.
+    // Expand symmetrically around the center anchor so an outline is not
+    // clipped while the node's imported center position remains unchanged.
     transform.setContentSize(
-        Math.max(0, spec.frame.width * scale),
+        Math.max(0, spec.frame.width * scale + outlineWidth * 2),
         Math.max(0, spec.frame.height * scale),
     );
 }
@@ -607,11 +957,20 @@ async function configureTiledSpriteHelper(
     spec: SceneNodeSpec,
     scale: number,
     cc: any,
+    guard?: PrefabOwnershipGuard,
 ): Promise<void> {
     const needsMask = requiresTiledMask(spec);
     let tiledMask = node.getChildByName(TILED_MASK_NODE_NAME);
     let tiledSprite = tiledMask?.getChildByName(TILED_SPRITE_NODE_NAME)
         ?? node.getChildByName(TILED_SPRITE_NODE_NAME);
+    if (guard) {
+        if (tiledMask) {
+            assertOwnedHelperSubtree(tiledMask, guard);
+        }
+        if (tiledSprite) {
+            assertOwnedHelperSubtree(tiledSprite, guard);
+        }
+    }
     if (needsMask) {
         if (!tiledMask) {
             tiledMask = new cc.Node(TILED_MASK_NODE_NAME);
@@ -840,13 +1199,21 @@ function configureScroll(
     transform: any,
     scale: number,
     cc: any,
+    guard?: PrefabOwnershipGuard,
 ): any {
     if (spec.kind !== 'scrollView') {
         return node;
     }
     const { Node, UITransform, Mask, ScrollView } = cc;
-    const scroll = node.getComponent(ScrollView) ?? node.addComponent(ScrollView);
     let view = node.getChildByName('view');
+    let content = view?.getChildByName('content') ?? null;
+    if (view && guard) {
+        assertOwnedHelperSubtree(view, guard);
+        if (content) {
+            assertOwnedHelperNode(content, guard);
+        }
+    }
+    const scroll = node.getComponent(ScrollView) ?? node.addComponent(ScrollView);
     if (!view) {
         view = new Node('view');
         view.layer = node.layer;
@@ -858,7 +1225,6 @@ function configureScroll(
     view.setPosition(0, 0, 0);
     const mask = view.getComponent(Mask) ?? view.addComponent(Mask);
     mask.type = Mask.Type.GRAPHICS_RECT ?? Mask.Type.RECT;
-    let content = view.getChildByName('content');
     if (!content) {
         content = new Node('content');
         content.layer = node.layer;
@@ -868,15 +1234,22 @@ function configureScroll(
     const previousLayout = content.getComponent(cc.Layout);
     const nextLayoutMode = spec.layout?.mode;
     if (previousLayout && (!nextLayoutMode || nextLayoutMode === 'NONE')) {
+        if (guard) {
+            assertOwnedGeneratedComponent(previousLayout, guard, content.name);
+        }
         content.removeComponent(previousLayout);
     }
     contentTransform.setAnchorPoint(0.5, 0.5);
     sizeAndPositionScrollContent(content, contentTransform, spec, transform, scale);
     const legacy = node.getChildByName('__FigmaContent');
     if (legacy && legacy !== content) {
-        for (const child of [...legacy.children]) {
-            child.parent = content;
+        if (guard) {
+            assertOwnedHelperNode(legacy, guard);
         }
+        for (const child of [...legacy.children]) {
+            setParentKeepingWorld(child, content);
+        }
+        legacy.removeFromParent();
         legacy.destroy();
     }
     // Cocos Creator 3.8.7 expects the content Node here. ScrollView.view is a
@@ -979,6 +1352,209 @@ function centerInCanvas(node: any, canvas: any, UITransform: any, Vec3: any): vo
     node.setPosition(new Vec3(x, y, node.position?.z ?? 0));
 }
 
+function nodeComponents(node: any): any[] {
+    const value = node?.components ?? node?._components;
+    return Array.isArray(value) ? value : [];
+}
+
+function reorderFigmaChildren(parent: any, orderedNodes: any[]): void {
+    const desired = [...new Set(orderedNodes.filter(Boolean))];
+    if (!desired.length || typeof desired[0]?.setSiblingIndex !== 'function') {
+        return;
+    }
+    // Figma-owned children are kept in Figma order. User-authored children are
+    // never reordered against one another; they follow the managed block.
+    desired.forEach((node, index) => node.setSiblingIndex(index));
+}
+
+function removeStalePrefabNodes(
+    prefabRoot: any,
+    previousNodeFileIds: Set<string>,
+    previousHelperFileIds: Set<string>,
+    previousComponentFileIds: Set<string>,
+    retainedNodeFileIds: Set<string>,
+): void {
+    const index = prefabFileIdIndex(prefabRoot);
+    const stale = new Map<string, any>();
+    for (const fileId of previousNodeFileIds) {
+        if (fileId === nodePrefabFileId(prefabRoot) || retainedNodeFileIds.has(fileId)) {
+            continue;
+        }
+        const node = index.get(fileId);
+        if (node) {
+            stale.set(fileId, node);
+        }
+    }
+    const staleIds = new Set(stale.keys());
+    for (const node of stale.values()) {
+        for (const component of nodeComponents(node)) {
+            const componentFileId = componentPrefabFileId(component);
+            if (!componentFileId || !previousComponentFileIds.has(componentFileId)) {
+                throw new Error(
+                    `待删除的 Figma 节点“${node.name}”含有手工组件，已停止同步以防止数据丢失。`,
+                );
+            }
+        }
+    }
+    const salvageManualDescendants = (container: any, survivorParent: any) => {
+        for (const child of [...container.children]) {
+            const childFileId = nodePrefabFileId(child);
+            if (childFileId
+                && (previousNodeFileIds.has(childFileId) || previousHelperFileIds.has(childFileId))) {
+                salvageManualDescendants(child, survivorParent);
+            } else {
+                setParentKeepingWorld(child, survivorParent);
+            }
+        }
+    };
+    for (const [fileId, node] of stale) {
+        let ancestor = node.parent;
+        let nestedUnderStale = false;
+        while (ancestor && ancestor !== prefabRoot.parent) {
+            const ancestorFileId = nodePrefabFileId(ancestor);
+            if (ancestorFileId && staleIds.has(ancestorFileId)) {
+                nestedUnderStale = true;
+                break;
+            }
+            ancestor = ancestor.parent;
+        }
+        if (nestedUnderStale || !node.parent) {
+            continue;
+        }
+        const survivorParent = node.parent;
+        salvageManualDescendants(node, survivorParent);
+        node.active = false;
+        node.removeFromParent();
+        node.destroy();
+        stale.delete(fileId);
+    }
+}
+
+function capturePrefabSync(
+    prefabRoot: any,
+    nodeMap: Record<string, string>,
+    previous: PrefabSceneSyncContext,
+    preexistingNodeUuids: Set<string>,
+    preexistingComponents: Set<any>,
+    generatedClasses: any[],
+    cc: any,
+): PrefabSceneSyncCapture {
+    const previousComponents = new Set(previous.managedComponentFileIds);
+    const previousHelpers = new Set(previous.managedHelperFileIds);
+    const nodeFileIds: Record<string, string> = {};
+    const managedNodes = new Set<string>();
+    const managedComponents = new Set<string>();
+    const managedHelpers = new Set<string>();
+    const managedHelperRuntimeUuids = new Set<string>();
+    const mappedUuids = new Set(Object.values(nodeMap));
+    const managedRuntimeNodes = new Map<string, any>();
+
+    for (const [figmaId, uuid] of Object.entries(nodeMap)) {
+        if (figmaId === '__root__') {
+            continue;
+        }
+        const node = findByUuid(prefabRoot, uuid);
+        if (!node) {
+            throw new Error(`Prefab 同步结果缺少 Figma 节点：${figmaId}`);
+        }
+        const fileId = ensureNodePrefabInfo(node, prefabRoot, cc);
+        nodeFileIds[figmaId] = fileId;
+        managedNodes.add(fileId);
+        managedRuntimeNodes.set(node.uuid, node);
+    }
+
+    const managedComponentTypes = new Set([cc.UITransform, ...generatedClasses]);
+    for (const node of managedRuntimeNodes.values()) {
+        for (const component of nodeComponents(node)) {
+            if (!managedComponentTypes.has(component.constructor)) {
+                continue;
+            }
+            const existingFileId = componentPrefabFileId(component);
+            if (preexistingComponents.has(component)
+                && (!existingFileId || !previousComponents.has(existingFileId))) {
+                continue;
+            }
+            managedComponents.add(ensureComponentPrefabInfo(component, cc));
+        }
+    }
+
+    walkNodes(prefabRoot, (node) => {
+        if (mappedUuids.has(node.uuid) || node === prefabRoot) {
+            return;
+        }
+        const parent = node.parent;
+        if (!parent
+            || (!mappedUuids.has(parent.uuid) && !managedHelperRuntimeUuids.has(parent.uuid))
+            || !isGeneratedHelperNode(node, parent, cc)) {
+            return;
+        }
+        const existingFileId = nodePrefabFileId(node);
+        if (preexistingNodeUuids.has(node.uuid)
+            && (!existingFileId || !previousHelpers.has(existingFileId))) {
+            throw new Error(
+                `节点“${parent.name}”下存在与导入辅助节点同名的手工节点“${node.name}”，已停止同步。`,
+            );
+        }
+        const fileId = ensureNodePrefabInfo(node, prefabRoot, cc);
+        managedHelpers.add(fileId);
+        managedHelperRuntimeUuids.add(node.uuid);
+        for (const component of nodeComponents(node)) {
+            const componentFileId = componentPrefabFileId(component);
+            if (preexistingComponents.has(component)
+                && (!componentFileId || !previousComponents.has(componentFileId))) {
+                continue;
+            }
+            managedComponents.add(ensureComponentPrefabInfo(component, cc));
+        }
+    });
+
+    return {
+        nodeFileIds,
+        managedNodeFileIds: [...managedNodes],
+        managedComponentFileIds: [...managedComponents],
+        managedHelperFileIds: [...managedHelpers],
+    };
+}
+
+function refreshPrefabLayouts(
+    specs: SceneNodeSpec[],
+    prefabRoot: any,
+    nodeMap: Record<string, string>,
+    scale: number,
+    cc: any,
+): void {
+    const visit = (spec: SceneNodeSpec) => {
+        const uuid = nodeMap[spec.figmaId];
+        const node = uuid ? findByUuid(prefabRoot, uuid) : null;
+        if (!node) {
+            return;
+        }
+        const childParent = spec.kind === 'scrollView'
+            ? node.getChildByName('view')?.getChildByName('content') ?? node
+            : node;
+        const layoutMode = spec.layout?.mode;
+        const layout = spec.action === 'generate' && layoutMode && layoutMode !== 'NONE'
+            ? childParent.getComponent(cc.Layout)
+            : null;
+        layout?.updateLayout();
+        if (layout) {
+            applyCounterAlignment(childParent, spec, nodeMap, scale, cc);
+        }
+        if (spec.kind === 'scrollView' && childParent !== node) {
+            finalizeScroll(
+                node,
+                spec,
+                childParent,
+                node.getComponent(cc.UITransform),
+                scale,
+                cc,
+            );
+        }
+        spec.children.forEach(visit);
+    };
+    specs.forEach(visit);
+}
+
 function emitSceneProgress(
     payload: SceneImportPayload,
     value: number,
@@ -1000,6 +1576,13 @@ export function load(): void {}
 export function unload(): void {}
 
 export const methods = {
+    inspectPrefabContext(payload: {
+        prefabUuid: string;
+        rootFileId?: string;
+    }): PrefabEditingState {
+        return prefabEditingState(payload.prefabUuid, payload.rootFileId);
+    },
+
     async importDocument(payload: SceneImportPayload): Promise<SceneImportResult> {
         const cc = require('cc') as any;
         const {
@@ -1010,6 +1593,7 @@ export const methods = {
             Graphics,
             Sprite,
             Label,
+            RichText,
             LabelOutline,
             Layout,
             ScrollView,
@@ -1022,16 +1606,52 @@ export const methods = {
         if (!scene) {
             throw new Error('当前没有打开的场景。');
         }
+        const prefabContext = payload.prefabContext;
+        let prefabRoot: any | null = null;
+        if (prefabContext) {
+            const state = prefabEditingState(prefabContext.prefabUuid, prefabContext.rootFileId);
+            if (!state.ready) {
+                throw new Error(`目标 Prefab 尚未安全打开：${state.reason ?? '未知原因'}`);
+            }
+            prefabRoot = (globalThis as any).cce.Scene.rootNode;
+            const fileIdIndex = prefabFileIdIndex(prefabRoot, prefabContext.prefabUuid);
+            const existingMap: Record<string, string> = {
+                __root__: prefabRoot.uuid,
+            };
+            for (const [figmaId, fileId] of Object.entries(prefabContext.existingNodeFileIds)) {
+                const node = fileIdIndex.get(fileId);
+                if (node) {
+                    existingMap[figmaId] = node.uuid;
+                }
+            }
+            payload.updateExisting = true;
+            payload.existingMap = existingMap;
+            payload.centerInCanvas = false;
+        }
+        const preexistingPrefabNodeUuids = new Set<string>();
+        const preexistingPrefabComponents = new Set<any>();
+        if (prefabRoot) {
+            walkNodes(prefabRoot, (node) => {
+                preexistingPrefabNodeUuids.add(node.uuid);
+                nodeComponents(node).forEach((component) => {
+                    preexistingPrefabComponents.add(component);
+                });
+            });
+        }
         const roots = payload.roots.map((root) => normalizeSceneSpec(root));
-        const fallbackParent = findCanvas(scene, Canvas) ?? scene;
+        if (prefabContext && roots.length !== 1) {
+            throw new Error('Prefab 增量同步只允许一个 Figma Frame 根节点。');
+        }
+        const fallbackParent = prefabRoot?.parent ?? findCanvas(scene, Canvas) ?? scene;
         const directRoot = roots.length === 1;
-        const canvas = findCanvas(scene, Canvas);
+        const canvas = prefabRoot ? null : findCanvas(scene, Canvas);
         const generatedClasses = [
             LabelOutline,
             Mask,
             Graphics,
             Sprite,
             Label,
+            RichText,
             Layout,
             ScrollView,
             Button,
@@ -1042,6 +1662,16 @@ export const methods = {
         let updated = 0;
         const totalNodes = Math.max(1, countSpecs(roots));
         let completedNodes = 0;
+        const previousManagedComponents = new Set(prefabContext?.managedComponentFileIds ?? []);
+        const previousManagedHelpers = new Set(prefabContext?.managedHelperFileIds ?? []);
+        const prefabOwnershipGuard: PrefabOwnershipGuard | undefined = prefabContext
+            ? {
+                previousHelperFileIds: previousManagedHelpers,
+                previousComponentFileIds: previousManagedComponents,
+                preexistingNodeUuids: preexistingPrefabNodeUuids,
+                preexistingComponents: preexistingPrefabComponents,
+            }
+            : undefined;
 
         const existingRootUuid = payload.updateExisting
             ? payload.existingMap.__root__
@@ -1061,12 +1691,12 @@ export const methods = {
         const previousDirectRoot = existingRootWasDirect ? existingRootNode : null;
         const previousWrapper = !existingRootWasDirect ? existingRootNode : null;
         const mappedRootUuid = directRoot
-            ? payload.existingMap[roots[0].figmaId]
+            ? existingUuidForSpec(payload.existingMap, roots[0])
             : (!existingRootWasDirect ? existingRootUuid : undefined);
-        let importRoot = payload.updateExisting && mappedRootUuid
+        let importRoot = prefabRoot ?? (payload.updateExisting && mappedRootUuid
             ? findByUuid(scene, mappedRootUuid)
-            : null;
-        if (importRoot?.getComponent(Camera)) {
+            : null);
+        if (!prefabContext && importRoot?.getComponent(Camera)) {
             importRoot = null;
         }
         const legacyWrapper = directRoot
@@ -1099,14 +1729,30 @@ export const methods = {
             parent.addChild(importRoot);
         }
 
+        // A collapsed SceneSpec can intentionally map several Figma IDs to a
+        // single Cocos node. If a later import expands that subtree again,
+        // those IDs still point at the same old UUID. Claim each reusable node
+        // once per build so a child can never reuse (and reparent) its parent.
+        const claimedNodeUuids = new Set<string>();
         const build = async (
             spec: SceneNodeSpec,
             nodeParent: any,
             providedNode?: any,
         ): Promise<void> => {
-            let node = providedNode ?? (payload.updateExisting && payload.existingMap[spec.figmaId]
-                ? findByUuid(scene, payload.existingMap[spec.figmaId])
-                : null);
+            let node = providedNode ?? null;
+            if (!node && payload.updateExisting) {
+                for (const figmaId of figmaIdsForSpec(spec)) {
+                    const mappedUuid = payload.existingMap[figmaId];
+                    const mappedNode = mappedUuid ? findByUuid(scene, mappedUuid) : null;
+                    if (mappedNode && !claimedNodeUuids.has(mappedNode.uuid)) {
+                        node = mappedNode;
+                        break;
+                    }
+                }
+            }
+            if (node && claimedNodeUuids.has(node.uuid)) {
+                node = null;
+            }
             const existed = Boolean(node);
             if (!node) {
                 node = new Node(cleanName(spec.name));
@@ -1114,13 +1760,56 @@ export const methods = {
             } else {
                 updated += 1;
             }
-            node.parent = nodeParent;
+            if (prefabOwnershipGuard && existed) {
+                const existingTransform = node.getComponent(UITransform);
+                if (existingTransform) {
+                    assertOwnedGeneratedComponent(
+                        existingTransform,
+                        prefabOwnershipGuard,
+                        node.name,
+                    );
+                }
+                if (spec.action !== 'transform') {
+                    for (const helper of node.children.filter((child: any) =>
+                        isGeneratedHelperNode(child, node, cc)
+                        || (spec.kind === 'scrollView' && child.name === 'view'))) {
+                        assertOwnedHelperSubtree(helper, prefabOwnershipGuard);
+                        if (spec.kind === 'scrollView' && helper.name === 'view') {
+                            const content = helper.getChildByName?.('content');
+                            if (content) {
+                                assertOwnedHelperNode(content, prefabOwnershipGuard);
+                            }
+                        }
+                        if (helper.name === TILED_MASK_NODE_NAME) {
+                            const tiledSprite = helper.getChildByName?.(TILED_SPRITE_NODE_NAME);
+                            if (tiledSprite) {
+                                assertOwnedHelperNode(tiledSprite, prefabOwnershipGuard);
+                            }
+                        }
+                    }
+                    for (const component of nodeComponents(node)) {
+                        if (generatedClasses.includes(component.constructor)) {
+                            assertOwnedGeneratedComponent(
+                                component,
+                                prefabOwnershipGuard,
+                                node.name,
+                            );
+                        }
+                    }
+                }
+            }
+            claimedNodeUuids.add(node.uuid);
+            if (!(prefabContext && node === prefabRoot)) {
+                node.parent = nodeParent;
+            }
             node.name = cleanName(spec.name);
-            nodeMap[spec.figmaId] = node.uuid;
+            for (const figmaId of figmaIdsForSpec(spec)) {
+                nodeMap[figmaId] = node.uuid;
+            }
             configureGeometry(node, spec, payload.scale, cc);
 
             if (spec.action !== 'transform') {
-                removeObsoleteScrollHelpers(node, spec, cc);
+                removeObsoleteScrollHelpers(node, spec, cc, prefabOwnershipGuard);
                 await removeObsoleteLabelOutline(node, cc);
                 const preserved = desiredGeneratedComponents(spec, cc);
                 // Mask owns and disables its shared Graphics during the
@@ -1136,15 +1825,16 @@ export const methods = {
                     node,
                     generatedClasses,
                     preserved,
-                    [Graphics, Sprite, Label],
+                    [Graphics, Sprite, Label, RichText],
+                    prefabContext ? previousManagedComponents : undefined,
                 );
                 if (removedRenderComponent) {
                     await waitForDeferredComponentRemoval();
                 }
-                removeGeneratedBackground(node);
+                removeGeneratedBackground(node, prefabOwnershipGuard);
                 const tiledSpriteHelper = usesTiledSpriteHelper(spec);
                 if (!tiledSpriteHelper) {
-                    removeGeneratedTiledNodes(node);
+                    removeGeneratedTiledNodes(node, prefabOwnershipGuard);
                 }
                 configureGeometry(node, spec, payload.scale, cc);
                 const clipsChildren = clipsGeneratedChildren(spec);
@@ -1153,10 +1843,31 @@ export const methods = {
                         throw new Error(`PNG 整层节点“${spec.name}”没有绑定 SpriteFrame，资源可能未成功导入。`);
                     }
                     if (tiledSpriteHelper) {
-                        await configureTiledSpriteHelper(node, spec, payload.scale, cc);
+                        await configureTiledSpriteHelper(
+                            node,
+                            spec,
+                            payload.scale,
+                            cc,
+                            prefabOwnershipGuard,
+                        );
                     } else {
                         await configureSprite(node, spec, payload.scale, cc);
                     }
+                } else if (spec.kind === 'richText') {
+                    configureRichText(node, spec, payload.scale, cc);
+                    const richText = node.getComponent(RichText);
+                    if (spec.fontUuid) {
+                        const font = await loadAsset(cc.assetManager, spec.fontUuid);
+                        if (cc.TTFFont && !(font instanceof cc.TTFFont)) {
+                            throw new Error(
+                                `RichText 节点“${spec.name}”只能使用 TTF/OTF 字体，当前映射可能是 BitmapFont（.fnt）。`,
+                            );
+                        }
+                        richText.font = font;
+                    } else {
+                        richText.font = null;
+                    }
+                    finalizeLabelGeometry(node, spec, payload.scale, cc);
                 } else if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
                     configureLabel(node, spec, payload.scale, cc);
                     if (spec.fontUuid) {
@@ -1180,12 +1891,28 @@ export const methods = {
             const transform = node.getComponent(UITransform);
             const childParent = spec.action === 'transform'
                 ? node
-                : configureScroll(node, spec, transform, payload.scale, cc);
+                : configureScroll(
+                    node,
+                    spec,
+                    transform,
+                    payload.scale,
+                    cc,
+                    prefabOwnershipGuard,
+                );
             if (spec.action === 'generate') {
                 configureLayout(childParent, spec, payload.scale, cc);
             }
             for (const child of spec.children) {
                 await build(child, childParent);
+            }
+            if (prefabContext) {
+                reorderFigmaChildren(
+                    childParent,
+                    spec.children.map((child) => {
+                        const uuid = nodeMap[child.figmaId];
+                        return uuid ? findByUuid(childParent, uuid) : null;
+                    }),
+                );
             }
             const layoutMode = spec.layout?.mode;
             const layout = spec.action === 'generate' && layoutMode && layoutMode !== 'NONE'
@@ -1211,8 +1938,8 @@ export const methods = {
             for (const root of roots) {
                 await build(root, directRoot ? parent : importRoot, directRoot ? importRoot : undefined);
             }
-            if (payload.updateExisting) {
-                removeFlattenedMappedDescendants(
+            if (payload.updateExisting && !prefabContext) {
+                removeCollapsedMappedDescendants(
                     importRoot,
                     payload.existingMap,
                     nodeMap,
@@ -1232,10 +1959,10 @@ export const methods = {
                     .filter(([figmaId, uuid]) => figmaId !== '__root__' && !retainedUuids.has(uuid))
                     .map(([, uuid]) => uuid),
             );
-            if (legacyWrapper && legacyWrapper !== importRoot && legacyWrapper.parent) {
+            if (!prefabContext && legacyWrapper && legacyWrapper !== importRoot && legacyWrapper.parent) {
                 removeMappedNodeTree(legacyWrapper, parent, staleTransitionUuids, cc);
             }
-            if (previousDirectRoot
+            if (!prefabContext && previousDirectRoot
                 && previousDirectRoot !== importRoot
                 && !retainedUuids.has(previousDirectRoot.uuid)
                 && previousDirectRoot.parent) {
@@ -1246,7 +1973,9 @@ export const methods = {
                     cc,
                 );
             }
-            mergePreservedMappings(importRoot, payload.existingMap, nodeMap);
+            if (!prefabContext) {
+                mergePreservedMappings(importRoot, payload.existingMap, nodeMap);
+            }
         } catch (error) {
             if (!reusedImportRoot) {
                 salvageExistingMappedNodes(
@@ -1259,12 +1988,47 @@ export const methods = {
             }
             throw error;
         }
+        let prefabSync: PrefabSceneSyncCapture | undefined;
+        if (prefabContext) {
+            const retainedNodeFileIds = new Set<string>();
+            for (const [figmaId, uuid] of Object.entries(nodeMap)) {
+                if (figmaId === '__root__') {
+                    continue;
+                }
+                const node = findByUuid(importRoot, uuid);
+                if (!node) {
+                    throw new Error(`无法定位导入后的节点：${figmaId}`);
+                }
+                retainedNodeFileIds.add(ensureNodePrefabInfo(node, importRoot, cc));
+            }
+            removeStalePrefabNodes(
+                importRoot,
+                new Set(prefabContext.managedNodeFileIds),
+                previousManagedHelpers,
+                previousManagedComponents,
+                retainedNodeFileIds,
+            );
+            refreshPrefabLayouts(roots, importRoot, nodeMap, payload.scale, cc);
+            prefabSync = capturePrefabSync(
+                importRoot,
+                nodeMap,
+                prefabContext,
+                preexistingPrefabNodeUuids,
+                preexistingPrefabComponents,
+                [UITransform, ...generatedClasses],
+                cc,
+            );
+            if (nodePrefabFileId(importRoot) !== prefabContext.rootFileId) {
+                throw new Error('Prefab 根节点 fileId 在同步过程中发生变化，已拒绝保存。');
+            }
+        }
         return {
             rootUuid: importRoot.uuid,
             nodeMap,
             created,
             updated,
-            temporaryRoot: directRoot && !reusedImportRoot,
+            temporaryRoot: !prefabContext && directRoot && !reusedImportRoot,
+            prefabSync,
         };
     },
 
