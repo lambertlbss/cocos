@@ -11,6 +11,7 @@ const {
 const {
     actionOptionsForNode,
     effectiveKindForNode,
+    rerenderPreservingScroll,
     resolveEffectiveActions,
     smartActionForNode,
 } = require('../dist/panels/default/model');
@@ -44,6 +45,22 @@ test('normalizes legacy merge and svg actions to the single PNG render action', 
     assert.equal(kindForImportAction('scrollView', 'render'), 'sprite');
     assert.equal(kindForImportAction('layout', 'render'), 'sprite');
     assert.equal(kindForImportAction('button', 'render'), 'button');
+});
+
+test('keeps the node-list scroll position while strategy changes rerender the tree', () => {
+    const tree = { scrollTop: 360, scrollLeft: 18 };
+
+    rerenderPreservingScroll(tree, () => {
+        tree.scrollTop = 0;
+        tree.scrollLeft = 0;
+    });
+    assert.deepEqual(tree, { scrollTop: 360, scrollLeft: 18 });
+
+    rerenderPreservingScroll(tree, () => {
+        tree.scrollTop = 120;
+        tree.scrollLeft = 6;
+    }, true);
+    assert.deepEqual(tree, { scrollTop: 0, scrollLeft: 0 });
 });
 
 test('smart mode preserves only explicitly recommended container PNG subtrees', () => {
