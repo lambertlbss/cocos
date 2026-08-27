@@ -12,7 +12,7 @@ export interface NodeStrategySummary {
 }
 
 const REASON_LABELS: Record<NonNullable<TreeNodeDto['reason']>, string> = {
-    hidden: '隐藏节点',
+    ignored: '节点已忽略',
     'root-structure': '保留根节点结构',
     'manual-export': 'Figma Export 资源边界',
     'slice-resource': '三/九宫资源边界',

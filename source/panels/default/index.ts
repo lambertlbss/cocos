@@ -789,11 +789,9 @@ function applyPreset(name: string): void {
         }
     } else {
         for (const node of all) {
-            state.preferredActions.set(node.id, !node.visible
-                ? 'ignore'
-                : node.children.length
-                    ? 'generate'
-                    : 'render');
+            state.preferredActions.set(node.id, node.children.length
+                ? 'generate'
+                : 'render');
             state.explicitIds.add(node.id);
         }
     }

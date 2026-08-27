@@ -10,6 +10,7 @@ import type {
     VisualFoldPlan,
 } from '../types';
 import {
+    hasHiddenDescendant,
     hasManualExport,
     inferAction,
     inferKind,
@@ -147,8 +148,14 @@ function effectiveChildren(
     node: FigmaNode,
     decisions: ReadonlyMap<string, ImportDecision>,
 ): FigmaNode[] {
-    return node.children.filter((child) => child.visible !== false
-        && resolvedDecision(child, decisions).action !== 'ignore');
+    return node.children.filter((child) => resolvedDecision(child, decisions).action !== 'ignore');
+}
+
+function canFoldSourceVisibility(host: FigmaNode, source: FigmaNode): boolean {
+    // A hidden source under a visible host needs its own Inactive node. Folding
+    // it onto the host would make the visual appear immediately in Cocos.
+    return (host.visible === false || source.visible !== false)
+        && !hasHiddenDescendant(source);
 }
 
 function collectSubtreeIds(node: FigmaNode): string[] {
@@ -188,7 +195,7 @@ function baseReason(
     isRoot: boolean,
 ): ImportPlanReason {
     if (decision.explicit) return 'user-override';
-    if (!node.visible || decision.action === 'ignore') return 'hidden';
+    if (decision.action === 'ignore') return 'ignored';
     if (isRoot) return 'root-structure';
     if (node.type === 'TEXT') return 'editable-text';
     if (hasManualExport(node)) return 'manual-export';
@@ -236,6 +243,7 @@ function visualFoldForNode(
     if (role === 'text' && children.length === 1) {
         const child = children[0];
         if (child.type === 'TEXT'
+            && canFoldSourceVisibility(node, child)
             && !subtreeHasExplicitConflict(child, decisions)
             && framesEquivalent(node.absoluteBoundingBox, child.absoluteBoundingBox)
             && transformsFoldable(node, child)) {
@@ -249,6 +257,7 @@ function visualFoldForNode(
     if (role === 'image' && children.length === 1) {
         const child = children[0];
         if (canUseChildAsSprite(child, decisions)
+            && canFoldSourceVisibility(node, child)
             && !subtreeHasExplicitConflict(child, decisions)
             && framesEquivalent(node.absoluteBoundingBox, child.absoluteBoundingBox)
             && transformsFoldable(node, child)) {
@@ -261,6 +270,7 @@ function visualFoldForNode(
     }
     if (role === 'button' && (decision.kind === 'button' || decision.kind === 'auto')) {
         const candidates = children.filter((child) => canUseChildAsSprite(child, decisions)
+            && canFoldSourceVisibility(node, child)
             && framesEquivalent(node.absoluteBoundingBox, child.absoluteBoundingBox)
             && transformsFoldable(node, child)
             && opacityIsNeutral(child));
@@ -323,7 +333,7 @@ export function annotateTreeWithImportPlan(
 
 export function importPlanReasonText(reason: ImportPlanReason | undefined): string {
     switch (reason) {
-        case 'hidden': return '隐藏节点，不导入';
+        case 'ignored': return '节点策略设为忽略，不导入';
         case 'root-structure': return '保留为 Prefab 根结构';
         case 'manual-export': return '检测到 Figma Export，按整层资源导入';
         case 'slice-resource': return '识别为三/九宫资源';

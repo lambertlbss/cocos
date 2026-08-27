@@ -23,7 +23,7 @@ function treeNode(overrides = {}) {
         id: overrides.id ?? '1:1',
         name: overrides.name ?? 'img_reward_bg',
         type: overrides.type ?? 'FRAME',
-        visible: true,
+        visible: overrides.visible ?? true,
         width: 100,
         height: 80,
         action: overrides.action ?? 'generate',
@@ -85,6 +85,29 @@ test('smart mode preserves only explicitly recommended container PNG subtrees', 
         action: 'merge',
         children: [child],
     })), 'render');
+});
+
+test('hidden nodes keep their normal smart actions and do not suppress generated descendants', () => {
+    const child = treeNode({
+        id: 'hidden:child',
+        visible: false,
+        type: 'TEXT',
+        action: 'generate',
+        kind: 'label',
+    });
+    const parent = treeNode({
+        id: 'hidden:parent',
+        visible: false,
+        action: 'generate',
+        children: [child],
+    });
+
+    assert.equal(smartActionForNode(parent), 'generate');
+    assert.equal(smartActionForNode(child), 'generate');
+    const effective = resolveEffectiveActions([parent], new Map());
+    assert.equal(effective.actions.get(parent.id), 'generate');
+    assert.equal(effective.actions.get(child.id), 'generate');
+    assert.equal(effective.suppressed.size, 0);
 });
 
 test('panel exposes PNG whole-layer without a duplicate merge-subtree option', () => {

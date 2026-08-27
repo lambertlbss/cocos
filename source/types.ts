@@ -26,7 +26,7 @@ export type NodeSemanticRole =
     | 'unknown';
 
 export type ImportPlanReason =
-    | 'hidden'
+    | 'ignored'
     | 'root-structure'
     | 'manual-export'
     | 'slice-resource'

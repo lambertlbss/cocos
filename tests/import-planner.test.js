@@ -146,6 +146,60 @@ test('writes a custom name into SceneNodeSpec without changing the original Figm
     assert.equal(root.name, 'OriginalFrame');
 });
 
+test('keeps hidden containers and their descendants in Scene specs with inactive state', () => {
+    const hiddenPanel = node({
+        id: 'hidden:panel',
+        name: 'panel_hidden',
+        visible: false,
+        children: [{
+            id: 'hidden:text',
+            name: 'txt_title',
+            type: 'TEXT',
+            visible: true,
+            characters: '稍后显示',
+            absoluteBoundingBox: { x: 20, y: 20, width: 100, height: 24 },
+        }],
+    });
+    const root = node({
+        id: 'hidden:root',
+        name: 'PopupRoot',
+        children: [hiddenPanel],
+    });
+    const decisions = decisionsFor([root]);
+    const plans = compileImportPlan([root], decisions);
+    const spec = makeSpec(
+        root,
+        root.absoluteBoundingBox,
+        decisions,
+        plans,
+        indexNodes([root]),
+        new Map(),
+        new Map(),
+        true,
+    );
+
+    assert.equal(plans.get(hiddenPanel.id).reason, 'semantic-container');
+    assert.equal(spec.children.length, 1);
+    assert.equal(spec.children[0].visible, false);
+    assert.equal(spec.children[0].children.length, 1);
+    assert.equal(spec.children[0].children[0].visible, true);
+    assert.equal(spec.children[0].children[0].kind, 'label');
+});
+
+test('does not fold a hidden visual source into a visible host', () => {
+    const image = node({
+        id: 'hidden-fold:host',
+        name: 'img_reward',
+        children: [{
+            ...slicedChild('hidden-fold:source', 'common_reward'),
+            visible: false,
+        }],
+    });
+    const plan = planForChild(image);
+
+    assert.equal(plan.fold, undefined);
+});
+
 test('folds one geometrically equivalent TEXT child into its txt parent', () => {
     const text = node({
         id: '3:0',

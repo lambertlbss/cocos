@@ -316,7 +316,7 @@ function makeSpec(overrides = {}) {
         relativeTransform: overrides.relativeTransform,
         rotation: overrides.rotation ?? 0,
         opacity: overrides.opacity ?? 1,
-        visible: true,
+        visible: overrides.visible ?? true,
         clipsContent: overrides.clipsContent ?? false,
         cornerRadii: [0, 0, 0, 0],
         fills: overrides.fills ?? [],
@@ -732,6 +732,45 @@ test('does not auto-create Widget for Figma constraints', async () => {
     const imported = environment.canvas.children[0];
 
     assert.equal(imported.getComponent(Widget), null);
+});
+
+test('imports hidden Figma layers with their full subtree and keeps only hidden nodes inactive', async () => {
+    const text = makeSpec({
+        figmaId: 'inactive:text',
+        name: 'txt_inactive_child',
+        figmaType: 'TEXT',
+        kind: 'label',
+        frame: { x: 20, y: 20, width: 100, height: 24 },
+        characters: '稍后显示',
+        textStyle: { fontSize: 18, lineHeightPx: 22 },
+        visible: true,
+    });
+    const hiddenPanel = makeSpec({
+        figmaId: 'inactive:panel',
+        name: 'panel_inactive',
+        frame: { x: 10, y: 10, width: 140, height: 60 },
+        visible: false,
+        children: [text],
+    });
+    const root = makeSpec({
+        figmaId: 'inactive:root',
+        name: 'InactiveRoot',
+        frame: { x: 0, y: 0, width: 200, height: 100 },
+        children: [hiddenPanel],
+    });
+    hiddenPanel.parentFrame = root.frame;
+    text.parentFrame = hiddenPanel.frame;
+
+    const environment = await importWithFakeCocos(root);
+    const importedRoot = environment.canvas.children[0];
+    const importedPanel = importedRoot.children[0];
+    const importedText = importedPanel.children[0];
+
+    assert.equal(importedPanel.name, 'panel_inactive');
+    assert.equal(importedPanel.active, false);
+    assert.equal(importedText.name, 'txt_inactive_child');
+    assert.equal(importedText.active, true);
+    assert.ok(importedText.getComponent(Label));
 });
 
 test('expands a single-line Label equally on both sides by its outline width', async () => {

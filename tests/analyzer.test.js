@@ -116,10 +116,24 @@ test('treats manual Figma Export as an explicit PNG whole-layer boundary', () =>
         }],
     });
     const [hiddenTree] = analyzeTree([hidden]);
-    assert.equal(inferAction(hidden), 'ignore');
-    assert.equal(hiddenTree.action, 'ignore');
-    assert.equal(hiddenTree.renderSubtree, false);
-    assert.equal(hiddenTree.warning, undefined);
+    assert.equal(inferAction(hidden), 'render');
+    assert.equal(hiddenTree.action, 'render');
+    assert.equal(hiddenTree.renderSubtree, true);
+    assert.match(hiddenTree.warning, /Inactive/);
+    assert.match(hiddenTree.warning, /PNG 整层/);
+
+    const hiddenText = node({
+        type: 'TEXT',
+        visible: false,
+        characters: 'Inactive label',
+        exportSettings,
+        absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 20 },
+    });
+    const [hiddenTextTree] = analyzeTree([hiddenText]);
+    assert.equal(inferAction(hiddenText), 'generate');
+    assert.equal(hiddenTextTree.action, 'generate');
+    assert.equal(hiddenTextTree.renderSubtree, false);
+    assert.match(hiddenTextTree.warning, /Inactive/);
 
     const exportedText = node({
         type: 'TEXT',
@@ -417,7 +431,7 @@ test('does not flatten all-messy wrappers that contain editable or runtime struc
     }
 });
 
-test('only counts effective visible children when deciding a pure-visual PNG boundary', () => {
+test('keeps a parent editable when an inactive child needs an independent runtime node', () => {
     const wrapper = node({
         name: 'img_effective_visual',
         children: [
@@ -451,7 +465,7 @@ test('only counts effective visible children when deciding a pure-visual PNG bou
         ],
     });
 
-    assert.equal(shouldRenderMessySubtree(wrapper, false), true);
+    assert.equal(shouldRenderMessySubtree(wrapper, false), false);
 });
 
 test('does not flatten structured, hidden-noise, root, or explicit ScrollView containers', () => {
@@ -732,7 +746,7 @@ test('automatically renders parents containing three or nine Rectangle-named chi
     assert.equal(inferAction(unrelated), 'generate');
 });
 
-test('keeps hidden named three- and nine-slice groups ignored', () => {
+test('imports hidden named three- and nine-slice groups as inactive PNG resources', () => {
     for (const count of [3, 9]) {
         const candidate = node({
             visible: false,
@@ -746,10 +760,11 @@ test('keeps hidden named three- and nine-slice groups ignored', () => {
         const [tree] = analyzeTree([candidate]);
 
         assert.equal(isNamedSliceGroup(candidate), true);
-        assert.equal(inferAction(candidate), 'ignore');
-        assert.equal(tree.action, 'ignore');
-        assert.equal(tree.renderSubtree, false);
-        assert.equal(tree.warning, undefined);
+        assert.equal(inferAction(candidate), 'render');
+        assert.equal(tree.action, 'render');
+        assert.equal(tree.renderSubtree, true);
+        assert.match(tree.warning, /Inactive/);
+        assert.match(tree.warning, /Rectangle/);
     }
 });
 

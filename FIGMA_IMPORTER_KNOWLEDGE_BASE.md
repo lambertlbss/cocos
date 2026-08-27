@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.32`
+> 当前插件版本：`1.0.33`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-26
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -217,10 +217,12 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 
 ### 6.2 节点动作决策
 
-智能默认决策在 `analyzer.ts`，优先级和规则如下。主进程的 `decisionForNode()` 只会对未选择 `ignore` 的 TEXT 与矢量动作再次收紧；隐藏与手动 Export 均是可由用户修改的智能默认策略：
+智能默认决策在 `analyzer.ts`，优先级和规则如下。主进程的 `decisionForNode()` 只会对未选择 `ignore` 的 TEXT 与矢量动作再次收紧；隐藏状态与节点导入策略相互独立：
 
 - `TEXT` 除显式 `ignore` 外始终为 `generate`，导入为 Cocos `Label`，不导出文字切图；
-- 隐藏节点在智能模式中默认 `ignore`；可见非 `TEXT` 节点只要原始 `exportSettings` 是非空数组，就视为设计者显式指定的资源边界，智能模式默认 `render` 为 PNG 整层并抑制其设计子树；
+- Figma 隐藏节点与可见节点使用相同的文字、矢量、容器、Export、三/九宫、本地资源和 PNG 决策；节点及其可生成子树照常进入 SceneSpec，Cocos 仅把该节点自身设置为 `active=false`（Inactive）；
+- 隐藏父节点默认保留完整子树，子节点各自保留 Figma 可见性。可见父节点不会自动折叠或通过同名母资源提升吞掉隐藏后代，避免丢失可独立启用的 Inactive 状态边界；显式 `ignore` 和显式 PNG 整层仍按用户选择阻断后代；
+- 非 `TEXT` 节点只要原始 `exportSettings` 是非空数组，就视为设计者显式指定的资源边界，智能模式默认 `render` 为 PNG 整层并抑制其设计子树；隐藏状态不取消该 Export 规则；
 - 手动 Export 规则同样作用于导入根节点和明确滚动方向的 ScrollView，不受结构化命名自动规则的根节点/ScrollView 保护限制；缺失、空数组或非数组 Export 设置不触发；
 - Figma 矢量类型 `VECTOR`、`BOOLEAN_OPERATION`、`STAR`、`LINE`、`REGULAR_POLYGON`、`RECTANGLE`、`ELLIPSE` 始终为 `render`；
 - 矢量节点最终为 PNG Sprite，不使用 `cc.Graphics` 近似任意路径；
@@ -288,6 +290,7 @@ Figma Export 中的 format（JPG/PNG/SVG/PDF）、suffix 和 constraint（SCALE/
 - 单根与多根导入之间切换时，会区分“直接 Figma 根”和“合成包装根”，不会把旧根挂到自身；切回单根时清理旧包装与映射兄弟，同时迁出其中未映射的用户节点；
 - Scene Script 会独立归一旧 `merge/svg` 动作并收口最终 kind，即使 Cocos 热重载期间主进程与 Scene Script 版本短暂不一致，也不会重新生成空 Layout/ScrollView；
 - Cocos 节点名使用 Figma 名称，经过文件系统/节点名安全清理。
+- 每个生成节点都从 Figma `visible` 同步 `Node.active`；隐藏节点导入为 Inactive，重新导入后会继续跟随 Figma 显隐状态，而不是被当作缺失节点删除。
 
 ### 6.5 Frame Prefab 导入生命周期
 
@@ -503,7 +506,7 @@ Cocos Creator 3.8.7 的 `ScrollView.content` 类型是 `Node`，而 `ScrollView.
 
 ### 12.13 Figma 手动 Export 为何自动变成 PNG 整层
 
-Figma 节点的 `exportSettings` 为非空数组，表示设计者明确把该节点当作可导出的资源边界。对可见非 `TEXT` 节点，智能模式因此默认选择“PNG 整层”并抑制其设计子树；这条显式意图规则不受结构化命名、是否为导入根节点或是否声明 ScrollView 滚动方向限制。隐藏节点在智能模式中仍默认 `ignore`，文字仍导入为可编辑 `Label`，缺失、空数组或非数组 Export 设置不会触发。
+Figma 节点的 `exportSettings` 为非空数组，表示设计者明确把该节点当作可导出的资源边界。对非 `TEXT` 节点，智能模式因此默认选择“PNG 整层”并抑制其设计子树；这条显式意图规则不受节点显隐、结构化命名、是否为导入根节点或是否声明 ScrollView 滚动方向限制。隐藏节点仍会准备资源并导入，但 Cocos 节点为 Inactive；文字仍导入为可编辑 `Label`，缺失、空数组或非数组 Export 设置不会触发。
 
 插件不会照搬 Export 条目的输出细节。JPG/PNG/SVG/PDF、文件名后缀以及 SCALE/WIDTH/HEIGHT 约束都只用于确认“人工设置过 Export”；实际资源固定走 PNG，并使用插件导入倍率，默认 `1`。因此 Figma 中的 @2x、固定宽度或固定高度不会导致 Cocos 资源被二次缩放。
 
@@ -539,7 +542,7 @@ npm test
 - 多页面文档解析和缺失边界保护；
 - 节点动作、矢量/基础形状 PNG 策略和安全 Layout 降级；
 - 结构化命名识别、全非结构化纯视觉子树 PNG 收口、语义保护、旧 merge/svg 动作归一和面板选项；
-- Figma Export 标记解析、显式 PNG 整层边界、根节点/ScrollView 生效以及 hidden/TEXT/空 Export 优先级；
+- Figma Export 标记解析、显式 PNG 整层边界、根节点/ScrollView 生效，以及隐藏节点统一策略、Inactive 状态、TEXT/空 Export 优先级；
 - 嵌套 PNG 边界的动作恢复与后代抑制重算；
 - 三宫/九宫候选与真实边界；
 - PNG/SVG、渐变和本地同名资源；
@@ -572,6 +575,8 @@ npm test
 `1.0.31` 代码级回归（2026-08-26）：TypeScript 构建通过；Parser 与 Scene 几何定向测试 `63/63` 通过。完整 `npm test` 为 `169/170`，新增的 180° 旋转、未旋转本地尺寸和嵌套父级局部坐标测试全部通过；唯一失败仍是未修改的 Round-trip 冻结文件 CRLF 原始字节哈希差异。既有 Prefab 需要重启插件后重新导入才能更新，真实 Cocos Creator 3.8.7 的视觉结果仍需实机验收。
 
 `1.0.32` 代码级回归（2026-08-26）：TypeScript 构建通过，Scene 定向测试 `57/57`；完整 `npm test` 为 `169/170`。Label 描边宽度、Content Size 对称扩张和中心位置回归通过；唯一失败仍是未修改的 Round-trip 冻结文件 CRLF 原始字节哈希差异。既有 Prefab 需要重新导入才能更新文字框宽度。
+
+`1.0.33` 代码级回归（2026-08-27）：TypeScript 构建通过；分析器、导入规划与 Scene 定向测试 `99/99` 通过。完整 `npm test` 为 `173/174`，隐藏文字、隐藏父子树、显式 Export、三/九宫及折叠边界回归全部通过；唯一失败仍是未修改的 Round-trip 冻结文件在 Windows CRLF 检出下产生原始字节 SHA-256 差异，本版本未修改或放宽该门禁。真实 Cocos Creator 3.8.7 仍需验证隐藏父子节点在 Prefab 编辑模式中的显隐切换和连续重新导入。
 
 ## 14. 发布与版本策略
 
@@ -607,7 +612,8 @@ npm test
 | 用统一规划器表达语义与折叠 | 分散在分析器、面板和 Scene 的重复推断容易产生显示与实际导入不一致 | `NodeImportPlan` 统一输出角色、原因、最终类型和折叠来源，三端消费同一结果 |
 | 安全提升视觉子层 | `img/txt` 包装层和 Button 背景应减少无价值层级，但不能破坏坐标、组件或增量更新 | 满足几何/变换/组件约束才折叠；`aliasFigmaIds` 与 `flattenBoundary` 保证分层↔折叠可逆且不留残影 |
 | 节点覆盖按设计文件持久化 | RichText、忽略占位和项目业务类型无法完全由 Figma 自动推断 | 只保存用户显式修改，并按 `fileKey + nodeId` 隔离和恢复；用户覆盖优先于自动规划 |
-| Figma 手动 Export 作为显式资源边界 | 设计者已明确声明节点应整体输出，继续拆分会违背设计语义 | 可见非 TEXT 节点默认 PNG 整层，根节点和显式 ScrollView 也生效；格式、后缀和尺寸约束不改变插件 PNG/倍率策略 |
+| Figma 手动 Export 作为显式资源边界 | 设计者已明确声明节点应整体输出，继续拆分会违背设计语义 | 非 TEXT 节点默认 PNG 整层，隐藏节点同样准备资源但导入为 Inactive；根节点和显式 ScrollView 也生效，格式、后缀和尺寸约束不改变插件 PNG/倍率策略 |
+| 隐藏状态与导入策略分离 | Figma 隐藏只表达初始运行状态，不代表节点、资源或子树可以丢弃 | 隐藏层继续走文字、图片、矢量、Export、三/九宫和本地资源统一逻辑，生成节点写入 `active=false`；自动折叠和同名母资源提升不得吞掉独立隐藏边界 |
 | 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
@@ -617,6 +623,15 @@ npm test
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-27 · `1.0.33`
+
+- 移除“Figma 隐藏层默认忽略”的分支：隐藏层与可见层统一执行文字、矢量、容器、手动 Export、三/九宫、本地同名资源和 PNG 策略，并正常准备所需资源。
+- SceneSpec 保留隐藏节点及其子树，Cocos 节点从 Figma `visible` 同步 `active`；隐藏父节点导入为 Inactive，子节点仍保留各自可见性，重新导入会继续同步状态。
+- 自动折叠、Button 背景提升和同名母资源提升增加显隐边界保护：可见父节点不会吞掉隐藏来源，带隐藏后代的子树不会被隐式压平；显式“忽略”和显式“PNG 整层”仍作为用户指定的终止边界。
+- “分层高保真”预设不再把隐藏节点改成忽略；策略原因中的旧“隐藏节点”改为准确的“节点已忽略”。
+- TypeScript 构建通过；分析器、导入规划和 Scene 定向测试 `99/99`，完整测试 `173/174`。唯一失败仍为未修改的 Round-trip 冻结文件 CRLF 原始字节哈希差异。
+- 迁移：重新导入同一 Frame 后，旧版本曾省略的隐藏层会作为受管 Inactive 节点补入 Prefab；显式设置为“忽略”的节点不会恢复。
 
 ### 2026-08-26 · `1.0.32`
 
@@ -832,10 +847,10 @@ npm test
 - 智能模式只在全部有效直接子层均非结构化、整棵子树为纯视觉且没有运行时/可编辑边界时收口；`panel_view` 等语义容器不会再因单个默认命名子层被压平。
 - 统一 import planner 已成为角色、原因、类型与视觉折叠的事实来源；`img/txt` 单子层折叠和 Button 背景提升具备几何、变换、父节点视觉及手动覆盖保护。
 - 折叠来源通过 `aliasFigmaIds` 共用节点；普通场景用 runtime UUID，Frame Prefab 用持久 fileId，`flattenBoundary` 区分完整吸收与背景提升，支持分层和折叠间安全增量切换。
-- Figma 手动 Export 已形成更高优先级的显式资源边界：可见非文字节点自动 PNG 整层，根节点和显式 ScrollView 同样生效；隐藏、文字与空 Export 的边界行为明确。
+- Figma 手动 Export 已形成更高优先级的显式资源边界：非文字节点自动 PNG 整层，根节点、显式 ScrollView 和隐藏节点同样生效；隐藏节点最终以 Inactive 状态进入 Cocos。
 - Figma Export 的格式、后缀及尺寸约束不会改变插件输出：整层资源固定 PNG，倍率继续由插件设置控制并默认 `1`。
 - 子树压平对用户仅暴露“PNG 整层”，旧动作值在入口兼容归一。
 - 节点策略原因和警告已在面板分开展示；RichText 可手动选择，节点策略和 Cocos 节点名覆盖按 Figma 文件与节点持久化。
 - 资源、缓存、字体、三/九宫和滚动节点均有明确实现入口和测试覆盖。
 - 不自动生成 Widget；自定义 Cocos 脚本/运行时组件、设计占位忽略和 Label/RichText 业务选择仍需要显式配置。
-- `1.0.32` 的纯逻辑、Scene 增量、旋转/中心坐标和 Label 描边宽度回归已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中回归：描边文字框横向扩张、180° 与嵌套旋转视觉、节点名输入、首次创建、连续导入、Frame 改名/目录移动、目标 Prefab dirty 阻断、Asset DB 慢导入/Meta 恢复和旧版无来源标记 Prefab 迁移。
+- `1.0.33` 的隐藏节点统一导入、Inactive 同步、隐藏父子树保留和显隐折叠边界已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中回归：隐藏父子节点显隐切换、连续重新导入、描边文字框横向扩张、180° 与嵌套旋转视觉、节点名输入、首次创建、Frame 改名/目录移动、目标 Prefab dirty 阻断、Asset DB 慢导入/Meta 恢复和旧版无来源标记 Prefab 迁移。

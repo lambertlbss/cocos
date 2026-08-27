@@ -5,6 +5,7 @@ import { readFile, readdir } from 'fs/promises';
 import packageJSON from '../package.json';
 import { FigmaClient, CancelledError, clampImageScale } from './figma/client';
 import {
+    hasHiddenDescendant,
     inferAction,
     inferCocosLayoutMode,
     inferKind,
@@ -608,7 +609,10 @@ async function buildAssets(
             // Renaming this container does not change resource matching; only
             // a strategy override on itself or any override below it blocks
             // promotion because descendants would otherwise disappear.
-            && !subtreeHasExplicitOverride(node, decisions, false)) {
+            && !subtreeHasExplicitOverride(node, decisions, false)
+            // A local parent resource cannot represent independently inactive
+            // descendants. Keep the hierarchy whenever such a boundary exists.
+            && !hasHiddenDescendant(node)) {
             let localMatch = null;
             for (const library of localResources) {
                 localMatch = await library.find(node.name, 'png');

@@ -224,9 +224,6 @@ export function inferKind(node: FigmaNode): NodeKind {
 }
 
 export function inferAction(node: FigmaNode): ImportAction {
-    if (!node.visible) {
-        return 'ignore';
-    }
     if (node.type === 'TEXT') {
         // Text remains an editable Cocos Label. Even when Figma reports fills,
         // shadows, export settings, or other paint data, exporting a bitmap
@@ -254,6 +251,10 @@ export function inferAction(node: FigmaNode): ImportAction {
             : 'generate';
     }
     return 'render';
+}
+
+export function hasHiddenDescendant(node: Pick<FigmaNode, 'children'>): boolean {
+    return node.children.some((child) => child.visible === false || hasHiddenDescendant(child));
 }
 
 function hasExplicitScroll(node: FigmaNode): boolean {
@@ -316,12 +317,18 @@ function subtreeHasVisualContent(node: FigmaNode): boolean {
 
 export function shouldRenderMessySubtree(node: FigmaNode, isRoot: boolean): boolean {
     if (isRoot
-        || node.visible === false
         || !CONTAINER_TYPES.has(node.type)
         || !isStructuredNodeName(node.name)
         || hasManualExport(node)
         || isNamedSliceGroup(node)
         || isRuntimeRoleBoundary(node)) {
+        return false;
+    }
+    // Hidden children must remain independent Cocos nodes so their Inactive
+    // state can be restored later. An automatic parent PNG would erase that
+    // runtime boundary. An already-hidden host may still use the same visual
+    // heuristic as a visible host when its direct children are visible.
+    if (node.children.some((child) => child.visible === false)) {
         return false;
     }
     const visibleChildren = node.children.filter(isEffectivelyVisible);
@@ -340,33 +347,38 @@ function warningFor(
     renderManualExportSubtree: boolean,
     renderMessySubtree: boolean,
 ): string | undefined {
+    const inactive = node.visible
+        ? undefined
+        : 'Figma 图层已隐藏，导入后节点将在 Cocos 中保持 Inactive';
+    const withInactive = (warning?: string): string | undefined =>
+        [inactive, warning].filter((item): item is string => Boolean(item)).join('；') || undefined;
     if (!node.absoluteBoundingBox) {
-        return '缺少边界信息，将按 0×0 导入';
+        return withInactive('缺少边界信息，将按 0×0 导入');
     }
     if (renderManualExportSubtree) {
-        return '检测到 Figma Export 设置，智能模式将按 PNG 整层导入；Figma 的格式、后缀和倍率不沿用';
+        return withInactive('检测到 Figma Export 设置，智能模式将按 PNG 整层导入；Figma 的格式、后缀和倍率不沿用');
     }
     if (isNamedSliceGroup(node)) {
-        return '检测到 3/9 个 Rectangle 切片，将按 PNG 整层导入并优先复用同名资源';
+        return withInactive('检测到 3/9 个 Rectangle 切片，将按 PNG 整层导入并优先复用同名资源');
     }
     if (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode)) {
-        return `混合模式 ${node.blendMode} 将近似处理`;
+        return withInactive(`混合模式 ${node.blendMode} 将近似处理`);
     }
     if (renderMessySubtree) {
-        return '所有有效可见直接子层均为非结构化纯视觉内容，且未检测到文字或运行时结构，智能模式将按 PNG 整层导入';
+        return withInactive('所有有效可见直接子层均为非结构化纯视觉内容，且未检测到文字或运行时结构，智能模式将按 PNG 整层导入');
     }
     if (node.type === 'TEXT' && node.characters && !/[\r\n\u2028\u2029]/.test(node.characters)) {
         const lineHeight = node.style?.lineHeightPx ?? node.style?.fontSize ?? 0;
         const frameHeight = node.absoluteBoundingBox?.height ?? 0;
         if (lineHeight > 0 && frameHeight > lineHeight * 1.25) {
-            return '文本疑似由 Figma 自动换行；NONE 模式只识别手动换行，请在 Figma 中插入换行符';
+            return withInactive('文本疑似由 Figma 自动换行；NONE 模式只识别手动换行，请在 Figma 中插入换行符');
         }
     }
     if (CONTAINER_TYPES.has(node.type) && node.children.length
         && (hasVisibleImage(node) || hasComplexEffects(node) || hasComplexPaint(node))) {
-        return '复杂容器将优先保留可编辑子节点，背景会近似处理';
+        return withInactive('复杂容器将优先保留可编辑子节点，背景会近似处理');
     }
-    return undefined;
+    return withInactive();
 }
 
 function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
@@ -389,9 +401,7 @@ function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
         kind: inferKind(node),
         renderSubtree,
         patchCandidate: isPatchCandidate(node),
-        warning: inferredAction === 'ignore'
-            ? undefined
-            : warningFor(node, renderManualExportSubtree, renderMessySubtree),
+        warning: warningFor(node, renderManualExportSubtree, renderMessySubtree),
         children: node.children.map((child) => toTree(child, false)),
     };
 }
