@@ -189,6 +189,8 @@ export interface TreeNodeDto {
     /** 智能模式是否应把该容器及其后代收口为当前节点的一张 PNG。 */
     renderSubtree?: boolean;
     patchCandidate: boolean;
+    /** 已通过几何校验、可直接写入 Cocos SpriteFrame 的切片模式。 */
+    sliceMode?: 'horizontal' | 'vertical' | 'nine';
     /** 智能策略的正常判定原因；与 warning（风险提示）分开。 */
     reason?: ImportPlanReason;
     /** 面板预告的视觉折叠类型。最终导入仍会按用户覆盖重新规划。 */

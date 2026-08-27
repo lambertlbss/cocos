@@ -95,6 +95,73 @@ test('detects three- and nine-slice borders from an existing Cocos SpriteFrame',
     }), false);
 });
 
+test('writes and verifies SpriteFrame borders before reporting a sliced asset', async () => {
+    const url = 'db://assets/figma-importer/img_yushi_line.png';
+    const info = {
+        uuid: 'image-uuid',
+        url,
+        importer: 'image',
+        type: 'cc.ImageAsset',
+        imported: true,
+        invalid: false,
+        subAssets: {
+            spriteFrame: {
+                uuid: 'sprite-frame-uuid',
+                url: `${url}/spriteFrame`,
+                importer: 'sprite-frame',
+                type: 'cc.SpriteFrame',
+                imported: true,
+                invalid: false,
+            },
+        },
+    };
+    const meta = {
+        uuid: info.uuid,
+        subMetas: {
+            spriteFrame: {
+                importer: 'sprite-frame',
+                uuid: 'sprite-frame-uuid',
+                userData: {
+                    trimType: 'auto',
+                    borderLeft: 0,
+                    borderRight: 0,
+                    borderTop: 0,
+                    borderBottom: 0,
+                },
+            },
+        },
+    };
+    const calls = [];
+    const previousEditor = global.Editor;
+    global.Editor = {
+        Message: {
+            async request(channel, method, ...args) {
+                calls.push([channel, method, ...args]);
+                if (method === 'query-asset-info') return info;
+                if (method === 'query-asset-meta') return meta;
+                return undefined;
+            },
+        },
+    };
+    try {
+        const asset = await new AssetWriter('figma-importer').write(
+            url,
+            Buffer.from('png'),
+            { left: 24.4, right: 18.6, top: 0, bottom: 0 },
+        );
+
+        assert.equal(asset.sliced, true);
+        assert.equal(meta.subMetas.spriteFrame.userData.trimType, 'none');
+        assert.equal(meta.subMetas.spriteFrame.userData.borderLeft, 24);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderRight, 19);
+        assert.ok(calls.some(([, method]) => method === 'save-asset-meta'));
+        assert.ok(calls.some(([, method]) => method === 'reimport-asset'));
+        assert.ok(calls.filter(([, method]) => method === 'query-asset-meta').length >= 2);
+    } finally {
+        global.Editor = previousEditor;
+    }
+});
+
 test('disables trimming and atlas packing for an existing tiled SpriteFrame', async () => {
     const url = 'db://assets/figma-importer/Ellipse 1__tile_deadbeef00.png';
     const info = {

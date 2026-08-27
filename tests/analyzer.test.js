@@ -692,7 +692,7 @@ test('recognizes Figma PATTERN paints and their source nodes as native tiles', (
     })), tiledPaintSource(pattern));
 });
 
-test('detects three- and nine-slice candidates without enabling them automatically', () => {
+test('detects executable three- and nine-slice candidates with their slice mode', () => {
     const candidate = node({
         absoluteBoundingBox: { x: 0, y: 0, width: 30, height: 10 },
         children: [0, 1, 2].map((index) => ({
@@ -703,6 +703,7 @@ test('detects three- and nine-slice candidates without enabling them automatical
         })),
     });
     assert.equal(isPatchCandidate(candidate), true);
+    assert.equal(analyzeTree([candidate])[0].sliceMode, 'horizontal');
 
     const arbitraryChildren = node({
         children: [0, 1, 2].map((index) => ({
@@ -713,6 +714,7 @@ test('detects three- and nine-slice candidates without enabling them automatical
         })),
     });
     assert.equal(isPatchCandidate(arbitraryChildren), false);
+    assert.equal(analyzeTree([arbitraryChildren])[0].sliceMode, undefined);
 });
 
 test('automatically renders parents containing three or nine Rectangle-named children as one PNG', () => {

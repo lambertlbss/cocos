@@ -73,6 +73,18 @@ export function smartActionForNode(node: TreeNodeDto): ImportAction {
     return inferred;
 }
 
+export function defaultNineSliceIds(roots: TreeNodeDto[]): Set<string> {
+    const result = new Set<string>();
+    const visit = (node: TreeNodeDto): void => {
+        if (node.patchCandidate) {
+            result.add(node.id);
+        }
+        node.children.forEach(visit);
+    };
+    roots.forEach(visit);
+    return result;
+}
+
 export function actionOptionsForNode(node: TreeNodeDto): Array<[ImportAction, string]> {
     return [
         ['ignore', '忽略'],

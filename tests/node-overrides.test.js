@@ -15,7 +15,32 @@ global.Editor = {
     },
 };
 
-const { methods } = require('../dist/main');
+const { decisionMap, methods } = require('../dist/main');
+
+test('enables recognized slice decisions by default and preserves an explicit opt-out', () => {
+    const tree = [{
+        id: 'slice:1',
+        name: 'img_yushi_line',
+        type: 'FRAME',
+        visible: true,
+        width: 437,
+        height: 294,
+        action: 'render',
+        kind: 'sprite',
+        renderSubtree: true,
+        patchCandidate: true,
+        children: [],
+    }];
+
+    assert.equal(decisionMap([], tree).get('slice:1').nineSlice, true);
+    assert.equal(decisionMap([{
+        id: 'slice:1',
+        action: 'render',
+        kind: 'sprite',
+        nineSlice: false,
+        explicit: true,
+    }], tree).get('slice:1').nineSlice, false);
+});
 
 test('persists only explicit, sanitized node strategy overrides by Figma file key', async () => {
     const saved = await methods.saveNodeOverrides('file-key', [

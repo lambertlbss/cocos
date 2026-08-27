@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.34`
+> 当前插件版本：`1.0.37`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-27
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -235,11 +235,11 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 - Button 可把位于首位、与父节点同框且自身 opacity 为 `1` 的唯一背景资源提升到父节点 Sprite，同时保留文字、图标等语义兄弟；父节点有独立视觉、运行时行为、变换不兼容或被吸收子树任一节点存在手动覆盖时不折叠；
 - `TreeNodeDto.renderSubtree` 继续表示终端 PNG 边界；折叠则由独立的 `fold` 计划表达，不能再依赖“无 children 的 Sprite”猜测；
 - 面板分别保存“用户/预设希望使用的动作”和“考虑父级终端动作后的有效动作”；每次切换动作都会从根节点重新计算抑制关系。外层 PNG 整层改回“生成”后，内层自动 PNG 边界会恢复，而该内层边界的后代仍保持忽略；
-- 用户可对可编辑节点手动选择 `RichText`。动作、节点类型和九宫选项只保存显式变化，并按 Figma `fileKey + nodeId` 持久化；再次读取同一文件时自动恢复，不影响其他 Figma 文件；
+- 用户可对可编辑节点手动选择 `RichText`。动作、节点类型和九宫选项只保存显式变化，并按 Figma `fileKey + nodeId` 持久化；三/九宫候选智能默认开启，用户手动关闭后会保存为显式覆盖；再次读取同一文件时自动恢复，不影响其他 Figma 文件；
 - 图片填充、复杂效果、不支持的渐变/描边等情况走 PNG；
 - 可安全表达的 Auto Layout 才映射为 Cocos Layout；
 - 智能模式只在 Figma `overflowDirection` 为已知横向、纵向或双向滚动枚举时映射 ScrollView；`NONE`、未知值、节点名称或 `clipsContent` 不会改变组件类型，普通裁剪容器映射 Mask；
-- 三宫/九宫候选按子节点名和几何覆盖关系识别，默认不强制开启切片。
+- 三宫/九宫候选按子节点名和几何覆盖关系识别；一旦 `patchCandidate=true`，智能模式与主进程默认将 `nineSlice` 设为 `true`，写入 SpriteFrame border 并把 Sprite 设置为 `SLICED`。用户仍可手动关闭；边界计算或 Cocos 元数据回读失败时必须报错，不允许静默降级为 SIMPLE。
 
 面板“智能”预设会对矢量节点强制使用 `render`。面板文案中：
 
@@ -259,7 +259,7 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 5. 没有本地命中时才调用 Figma Images API；
 6. 下载图片写入项目缓存，再由 `AssetWriter` 生成项目资源和 SpriteFrame UUID；
 7. 同一项目输出目录下同名节点使用首次导入资源，不在文件名中追加随机 UUID 或倍率后缀；
-8. 母节点命中本地同名资源前会递归检查整棵子树；只要后代存在 RichText、忽略、九宫或其他显式覆盖，就不把母节点提升为终端 Sprite，避免静默吞掉用户策略。
+8. 母节点命中本地同名资源前会递归检查整棵子树；当前节点已自动启用三/九宫，或后代存在 RichText、忽略、三/九宫及其他显式覆盖时，不走会清除切片状态的普通母资源提升；切片节点仍由统一资源写入链处理。
 
 Figma Export 中的 format（JPG/PNG/SVG/PDF）、suffix 和 constraint（SCALE/WIDTH/HEIGHT）只用于表明设计者人工设置过资源边界。整层资源始终走插件统一的 PNG 路径，下载与缓存继续使用 `ImportSettings.scale`；默认值为 `1`，不会读取或叠加 Figma Export 自带倍率、目标宽度或目标高度。
 
@@ -268,7 +268,7 @@ Figma Export 中的 format（JPG/PNG/SVG/PDF）、suffix 和 constraint（SCALE/
 - REST 节点的 `absoluteBoundingBox` 是旋转后的页面轴对齐包围盒，不能同时作为节点本地尺寸再叠加旋转；本地尺寸优先使用 `size`，仅在旧数据缺失时回退到 `absoluteBoundingBox`。
 - 子节点角度优先从 `relativeTransform` 的线性矩阵通过 `atan2(-m10, m00)` 提取，并统一转换为 Cocos 使用的度数；原始 `rotation` 只作为矩阵缺失时的回退值，不能把 `PI` 直接传给 `setRotationFromEuler()`。
 - 中心锚点位置由父级局部矩阵变换节点本地中心计算：先对 `(width / 2, height / 2)` 应用 `relativeTransform`，再按父节点中心锚点和 Cocos Y 轴方向换算；不再用旋转后的页面包围盒左上角反推位置。
-- 普通 Label 使用内置描边时，最终 Content Size 宽度在 Figma 原宽基础上左右各增加一个实际 Cocos `outlineWidth`；高度、中心锚点和节点位置保持不变，防止描边被原始文字框横向裁切。无描边 Label 与 RichText 保持原宽。
+- 普通 Label 使用内置描边时，最终 Content Size 宽度在 Figma 原宽基础上左右各增加一个实际 Cocos `outlineWidth`。若 Figma 原高度小于最终 Cocos `fontSize`，高度调整为 `fontSize + 2 × outlineWidth`，上下各补一个描边宽度；否则保留 Figma 原高度。两种补偿均保持中心锚点和节点位置不变；RichText 不参与此规则。
 - 最外层 Frame 仍固定放在 Prefab 根中心，普通子节点由各自父级局部矩阵逐层组合，因此嵌套旋转不会被当成页面绝对坐标重复计算。
 - Cocos Node 没有直接对应 Figma 仿射斜切的通用 UI 属性；普通旋转、缩放前的本地尺寸和父级局部位置可精确还原，含斜切或非标准镜像的节点必须转 PNG 或增加专门矩阵渲染方案，不能宣称无损生成普通 Node。
 
@@ -549,7 +549,7 @@ npm test
 - 三宫/九宫候选与真实边界；
 - PNG/SVG、渐变和本地同名资源；
 - 字体匹配；
-- Cocos Sprite/Mask/ScrollView/Prefab 根布局；
+- Cocos Sprite/Mask/ScrollView/Prefab 根布局，以及普通 Sprite 的 `TRIMMED`/`CUSTOM` 尺寸模式切换；
 - 普通节点与 ScrollView 辅助节点的中心锚点、内容扩容和坐标补偿；
 - Figma `size`/`relativeTransform` 到 Cocos 中心锚点的位置、尺寸和角度换算，包括 `PI → 180°` 与嵌套旋转父子坐标；
 - 增量导入时 Mask/Graphics、Label/LabelOutline 的延迟销毁生命周期；
@@ -582,6 +582,12 @@ npm test
 `1.0.33` 代码级回归（2026-08-27）：TypeScript 构建通过；分析器、导入规划与 Scene 定向测试 `99/99` 通过。完整 `npm test` 为 `173/174`，隐藏文字、隐藏父子树、显式 Export、三/九宫及折叠边界回归全部通过；唯一失败仍是未修改的 Round-trip 冻结文件在 Windows CRLF 检出下产生原始字节 SHA-256 差异，本版本未修改或放宽该门禁。真实 Cocos Creator 3.8.7 仍需验证隐藏父子节点在 Prefab 编辑模式中的显隐切换和连续重新导入。
 
 `1.0.34` 代码级回归（2026-08-27）：清理后 TypeScript 构建通过，下载即用分发门禁通过；生成 `34` 个 `dist` 文件，主进程、Scene、Panel 和所有本地模块可解析，运行时仅依赖 Node 内置模块及 Cocos 提供的 `cc`/Electron，不需要 `node_modules`。完整 `npm test` 为 `173/174`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
+`1.0.35` 代码级回归（2026-08-27）：TypeScript 构建、分发门禁和 Scene 定向测试 `59/59` 通过；完整 `npm test` 为 `174/175`。新增文字框高度下限、描边上下对称扩张和中心位置不变回归；唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
+`1.0.36` 代码级回归（2026-08-27）：TypeScript 构建、分发门禁及三/九宫相关定向测试 `100/100` 通过；完整 `npm test` 为 `177/178`。候选默认启用、显式关闭、SpriteFrame border 写入回读和 Scene `SLICED` 路径均有回归；唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
+`1.0.37` 代码级回归（2026-08-27）：TypeScript 构建、分发门禁及 Sprite 尺寸模式定向测试通过；完整 `npm test` 为 `182/183`。普通 Sprite 的 Figma 目标尺寸等于 SpriteFrame `originalSize` 时保持 `TRIMMED`，透明像素裁剪不会误判为缩放；发生等比缩放时按裁剪尺寸同比例调整并转为 `CUSTOM`，非等比缩放保留目标尺寸，三/九宫与 Tiled 始终使用 `CUSTOM`。唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
 
 ## 14. 发布与版本策略
 
@@ -621,6 +627,8 @@ npm test
 | 节点覆盖按设计文件持久化 | RichText、忽略占位和项目业务类型无法完全由 Figma 自动推断 | 只保存用户显式修改，并按 `fileKey + nodeId` 隔离和恢复；用户覆盖优先于自动规划 |
 | Figma 手动 Export 作为显式资源边界 | 设计者已明确声明节点应整体输出，继续拆分会违背设计语义 | 非 TEXT 节点默认 PNG 整层，隐藏节点同样准备资源但导入为 Inactive；根节点和显式 ScrollView 也生效，格式、后缀和尺寸约束不改变插件 PNG/倍率策略 |
 | 隐藏状态与导入策略分离 | Figma 隐藏只表达初始运行状态，不代表节点、资源或子树可以丢弃 | 隐藏层继续走文字、图片、矢量、Export、三/九宫和本地资源统一逻辑，生成节点写入 `active=false`；自动折叠和同名母资源提升不得吞掉独立隐藏边界 |
+| 三/九宫识别即默认启用 | 只显示候选但把执行端 `nineSlice` 默认为 `false` 会造成面板识别成功、Cocos 却仍是 SIMPLE 的假成功 | `patchCandidate=true` 自动进入 border 写入和 `Sprite.Type.SLICED`；用户可显式关闭，计算或回读失败直接报错 |
+| 普通 Sprite 原生尺寸优先使用 TRIMMED | 所有图片无条件写成 `CUSTOM` 会丢失 Cocos 对裁剪后原生尺寸的语义，但用裁剪矩形判断缩放又会把透明像素误判为尺寸变化 | 普通 SIMPLE Sprite 先应用 `TRIMMED`，以 SpriteFrame `originalSize` 判断是否缩放；未缩放保留 TRIMMED，等比缩放按裁剪尺寸同比例转 CUSTOM，非等比缩放使用目标尺寸；SLICED/TILED 固定 CUSTOM |
 | 仓库下载后可直接拖入 Cocos | 插件使用者不应安装 Node.js 或理解 TypeScript 构建流程；缺失 `dist` 会让主进程和 `openPanel` 连锁失败 | `dist` 纳入版本控制；构建前安全清空旧产物，分发门禁验证全部 Cocos 入口和运行时模块，`node_modules` 继续不分发 |
 | 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
@@ -631,6 +639,28 @@ npm test
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-27 · `1.0.37`
+
+- 普通 `Sprite.Type.SIMPLE` 资源默认使用 `Sprite.SizeMode.TRIMMED`，让节点自动采用 SpriteFrame 裁剪后的原生尺寸。
+- Scene 执行端以 SpriteFrame `originalSize` 与 Figma 目标尺寸判断是否缩放，而不是用裁剪后的 `rect` 判断，因此透明留白被裁掉时仍保持 `TRIMMED`。未缩放比较容差为 `0.51 px`，用于吸收栅格图片整数像素取整误差。
+- 若宽高缩放倍率一致，则把 TRIMMED 后的 Content Size 按相同倍率等比放大并显式改为 `CUSTOM`；若宽高倍率不同，则以 Figma 目标尺寸使用 `CUSTOM`，避免丢失设计中的非等比拉伸。
+- 三/九宫 `SLICED`、平铺 `TILED` 仍固定为 `CUSTOM`，因为两者必须依赖目标 Content Size 才能正确拉伸或平铺；SpriteFrame 赋值前临时设为 `CUSTOM`，避免新组件默认模式提前改写节点尺寸。
+- 新增原生尺寸保持 `TRIMMED`、透明像素裁剪不误判、等比缩放裁剪矩形、非等比目标尺寸、缩放后转 `CUSTOM`、SLICED/TILED 保持 `CUSTOM` 的 Scene 回归；构建与分发检查通过，完整测试 `182/183`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。既有 Prefab 需重新导入后才会更新 Size Mode。
+
+### 2026-08-27 · `1.0.36`
+
+- 修复三/九宫识别结果未传入执行端：`patchCandidate=true` 时，面板智能状态与主进程默认决策同步设置 `nineSlice=true`，无需再手动点击切片按钮；用户显式关闭仍会持久化并优先于智能默认。
+- 切片节点不再进入会把 `nineSlice` 强制清零的普通本地母资源提升分支；资源写入后重新读取 SpriteFrame `.meta`，确认至少一个 border 大于 `0` 后才返回 `sliced=true`。
+- Scene 继续根据资源的 `sliced` 设置 `Sprite.Type.SLICED`；无法计算连续边界或 Cocos 未能保存 border 时直接给出节点/资源错误，不再静默生成 `SIMPLE`。
+- TypeScript 构建、分发门禁及三/九宫相关定向测试 `100/100` 通过；完整测试 `177/178`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。既有 `YushiView.prefab` 和 `img_yushi_line.png.meta` 需在安装 `1.0.36`、完整重启 Cocos 后重新导入才会更新。
+
+### 2026-08-27 · `1.0.35`
+
+- 普通 Label 新增高度下限：当 `Figma 文字框高度 × 导入倍率 < Cocos 最终 fontSize` 时，最终高度设置为 `fontSize + 2 × outlineWidth`，上下对称补足字体和描边空间。
+- 当 Figma 文字框高度不小于字号时继续保留原高度；节点中心锚点与位置不变，避免补高造成视觉中心偏移。无描边时公式中的 `outlineWidth` 为 `0`，RichText 不受影响。
+- 新增 `12 px` 原高、`16 px` 字号、`5 px` 描边得到 `26 px` 最终高度的回归测试；既有 Prefab 需使用新版本重新导入后生效。
+- TypeScript 构建、分发门禁和 Scene 定向测试 `59/59` 通过；完整测试 `174/175`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
 
 ### 2026-08-27 · `1.0.34`
 
@@ -871,4 +901,4 @@ npm test
 - 资源、缓存、字体、三/九宫和滚动节点均有明确实现入口和测试覆盖。
 - 仓库已包含清理后生成的完整 `dist`，下载后可直接放入 Cocos；分发门禁阻止入口缺失、陈旧 JS、未随包分发的外部模块和再次忽略 `dist`。
 - 不自动生成 Widget；自定义 Cocos 脚本/运行时组件、设计占位忽略和 Label/RichText 业务选择仍需要显式配置。
-- `1.0.34` 的下载即用分发与 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在干净目录下载仓库后用真实 Cocos Creator 3.8.7 回归首次启用，并继续验证隐藏父子节点显隐切换、连续重新导入、描边文字框横向扩张、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。
+- `1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.36` 的三/九宫识别即启用与 border 回读门禁、`1.0.35` 的文字框横纵描边补偿、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证 Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。

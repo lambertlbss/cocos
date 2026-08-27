@@ -10,6 +10,7 @@ const {
 } = require('../dist/import-actions');
 const {
     actionOptionsForNode,
+    defaultNineSliceIds,
     effectiveKindForNode,
     kindOptionsForAction,
     rerenderPreservingScroll,
@@ -29,7 +30,8 @@ function treeNode(overrides = {}) {
         action: overrides.action ?? 'generate',
         kind: overrides.kind ?? 'node',
         renderSubtree: overrides.renderSubtree ?? false,
-        patchCandidate: false,
+        patchCandidate: overrides.patchCandidate ?? false,
+        sliceMode: overrides.sliceMode,
         reason: overrides.reason,
         fold: overrides.fold,
         absorbedNodeIds: overrides.absorbedNodeIds,
@@ -85,6 +87,32 @@ test('smart mode preserves only explicitly recommended container PNG subtrees', 
         action: 'merge',
         children: [child],
     })), 'render');
+});
+
+test('smart mode enables every recognized three- and nine-slice candidate', () => {
+    const horizontal = treeNode({
+        id: 'slice:horizontal',
+        patchCandidate: true,
+        sliceMode: 'horizontal',
+    });
+    const namedOnly = treeNode({
+        id: 'slice:named-only',
+        patchCandidate: true,
+    });
+    const nine = treeNode({
+        id: 'slice:nine',
+        patchCandidate: true,
+        sliceMode: 'nine',
+    });
+    const root = treeNode({
+        id: 'root',
+        children: [horizontal, namedOnly, nine],
+    });
+
+    assert.deepEqual(
+        [...defaultNineSliceIds([root])].sort(),
+        ['slice:horizontal', 'slice:named-only', 'slice:nine'],
+    );
 });
 
 test('hidden nodes keep their normal smart actions and do not suppress generated descendants', () => {

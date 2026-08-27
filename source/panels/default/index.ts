@@ -6,6 +6,7 @@ import { normalizeImportAction } from '../../import-actions';
 import { sanitizeNodeName } from '../../node-name';
 import {
     actionOptionsForNode,
+    defaultNineSliceIds,
     effectiveKindForNode,
     isVectorNodeType,
     kindOptionsForAction,
@@ -260,6 +261,7 @@ function initializeDocument(document: DocumentDto): void {
         state.defaults.set(node.id, { action, kind: node.kind });
         state.names.set(node.id, node.name);
     }
+    state.patches = defaultNineSliceIds(document.tree);
     for (const override of document.nodeOverrides ?? []) {
         const node = findNode(override.id, document.tree);
         if (!node) {
@@ -275,6 +277,8 @@ function initializeDocument(document: DocumentDto): void {
             state.kinds.set(node.id, override.kind);
             if (override.nineSlice && node.patchCandidate) {
                 state.patches.add(node.id);
+            } else {
+                state.patches.delete(node.id);
             }
             state.explicitIds.add(node.id);
         }
@@ -687,7 +691,11 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
 
     const patch = document.createElement('label');
     patch.className = 'patch-toggle';
-    patch.title = node.patchCandidate ? '启用九宫格/三宫格切片' : '该节点不是自动识别的切片候选';
+    patch.title = node.sliceMode
+        ? `启用${node.sliceMode === 'nine' ? '九宫格' : '三宫格'}切片`
+        : node.patchCandidate
+            ? '启用自动识别的三/九宫格切片'
+            : '该节点不是自动识别的切片候选';
     const patchInput = document.createElement('input');
     patchInput.type = 'checkbox';
     patchInput.dataset.patchFor = node.id;
@@ -776,7 +784,7 @@ function applyPreset(name: string): void {
     const all = flatten(state.document.tree);
     if (name === 'smart') {
         state.explicitIds.clear();
-        state.patches.clear();
+        state.patches = defaultNineSliceIds(state.document.tree);
         for (const node of all) {
             const original = state.defaults.get(node.id)!;
             state.preferredActions.set(node.id, original.action);

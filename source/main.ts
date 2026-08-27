@@ -9,6 +9,7 @@ import {
     inferAction,
     inferCocosLayoutMode,
     inferKind,
+    isPatchCandidate,
     isVectorNode,
     nativeTiledPaintSource,
     type TiledPaintSource,
@@ -404,7 +405,7 @@ function defaultDecision(node: FigmaNode): Decision {
     return {
         action: inferAction(node),
         kind: inferKind(node),
-        nineSlice: false,
+        nineSlice: isPatchCandidate(node),
         explicit: false,
     };
 }
@@ -427,7 +428,7 @@ export function decisionMap(overrides: ImportOverride[], tree: TreeNodeDto[]): M
             decisions.set(node.id, {
                 action: normalizeImportAction(node.action),
                 kind: node.kind,
-                nineSlice: false,
+                nineSlice: node.patchCandidate,
                 explicit: false,
             });
             addDefaults(node.children);
@@ -606,6 +607,7 @@ async function buildAssets(
         }
         if (node.children.length
             && node.type !== 'TEXT'
+            && !decision.nineSlice
             // Renaming this container does not change resource matching; only
             // a strategy override on itself or any override below it blocks
             // promotion because descendants would otherwise disappear.
@@ -880,9 +882,13 @@ async function buildAssets(
             }
             const node = groupedNodes[0];
             const decision = decisions.get(node.id) ?? defaultDecision(node);
-            const borders = decision.nineSlice && format === 'png'
-                ? analyzeSliceGrid(node, importSettings.scale)?.borders
-                : undefined;
+            const sliceAnalysis = decision.nineSlice && format === 'png'
+                ? analyzeSliceGrid(node, importSettings.scale)
+                : null;
+            if (decision.nineSlice && !sliceAnalysis) {
+                throw new Error(`三/九宫节点“${node.name}”已启用切片，但无法计算有效的连续切片边界。`);
+            }
+            const borders = sliceAnalysis?.borders;
             let localMatch = null;
             for (const library of localResources) {
                 localMatch = await library.find(node.name, format);

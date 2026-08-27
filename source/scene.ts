@@ -895,12 +895,19 @@ function finalizeLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc
     const outlineWidth = label?.enableOutline
         ? Math.max(0, Number(label.outlineWidth) || 0)
         : 0;
-    // Label content and mapped fonts must never resize the imported Figma box.
-    // Expand symmetrically around the center anchor so an outline is not
-    // clipped while the node's imported center position remains unchanged.
+    const figmaHeight = Math.max(0, spec.frame.height * scale);
+    const fontSize = Math.max(0, Number(label?.fontSize) || 0);
+    const finalHeight = figmaHeight < fontSize
+        ? fontSize + outlineWidth * 2
+        : figmaHeight;
+    // Keep the imported Figma box unless a deterministic outline/font lower
+    // bound requires expansion. Expand symmetrically around the center anchor
+    // so the node's imported center position remains unchanged.
+    // An undersized Figma text box must at least contain the final Cocos font
+    // size, plus one outline width above and below when outline is enabled.
     transform.setContentSize(
         Math.max(0, spec.frame.width * scale + outlineWidth * 2),
-        Math.max(0, spec.frame.height * scale),
+        finalHeight,
     );
 }
 
@@ -922,18 +929,53 @@ async function configureSprite(node: any, spec: SceneNodeSpec, scale: number, cc
     }
     const { Sprite, UITransform, assetManager } = cc;
     const sprite = node.getComponent(Sprite) ?? node.addComponent(Sprite);
-    sprite.spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
+    const transform = node.getComponent(UITransform);
+    const targetWidth = Math.max(0, spec.frame.width * scale);
+    const targetHeight = Math.max(0, spec.frame.height * scale);
+
+    // Keep assignment deterministic: a new Sprite may default to TRIMMED and
+    // immediately rewrite UITransform when its SpriteFrame is assigned.
     sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+    const spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
+    sprite.spriteFrame = spriteFrame;
     sprite.type = spec.sprite.tiled
         ? Sprite.Type.TILED
         : spec.sprite.sliced
             ? Sprite.Type.SLICED
             : Sprite.Type.SIMPLE;
-    const transform = node.getComponent(UITransform);
-    transform?.setContentSize(
-        Math.max(0, spec.frame.width * scale),
-        Math.max(0, spec.frame.height * scale),
-    );
+
+    if (!spec.sprite.sliced && !spec.sprite.tiled) {
+        sprite.sizeMode = Sprite.SizeMode.TRIMMED;
+        const trimmedWidth = Number(transform?.contentSize?.width);
+        const trimmedHeight = Number(transform?.contentSize?.height);
+        const rawWidth = Number(spriteFrame?.originalSize?.width ?? spriteFrame?.width);
+        const rawHeight = Number(spriteFrame?.originalSize?.height ?? spriteFrame?.height);
+        const hasValidSpriteSize = Number.isFinite(trimmedWidth)
+            && Number.isFinite(trimmedHeight)
+            && Number.isFinite(rawWidth)
+            && Number.isFinite(rawHeight)
+            && rawWidth > 0
+            && rawHeight > 0;
+        if (hasValidSpriteSize
+            && Math.abs(rawWidth - targetWidth) <= 0.51
+            && Math.abs(rawHeight - targetHeight) <= 0.51) {
+            return;
+        }
+        if (hasValidSpriteSize) {
+            const scaleX = targetWidth / rawWidth;
+            const scaleY = targetHeight / rawHeight;
+            if (Math.abs(scaleX - scaleY) <= 0.0001) {
+                sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+                transform?.setContentSize(trimmedWidth * scaleX, trimmedHeight * scaleY);
+                return;
+            }
+        }
+    }
+
+    // Sliced/tiled sprites and sprites resized in Figma must retain the design
+    // size. Cocos represents that state as CUSTOM.
+    sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+    transform?.setContentSize(targetWidth, targetHeight);
 }
 
 function requiresTiledMask(spec: SceneNodeSpec): boolean {

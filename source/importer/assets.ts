@@ -212,9 +212,13 @@ export class AssetWriter {
         }
         let info = await waitForAsset(url);
         const sliced = !tiled && Boolean(borders && Object.values(borders).some((value) => value > 0));
-        const meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
+        let meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
         if (meta && await this.applySpriteMeta(info, meta, sliced ? borders : undefined, tiled)) {
             info = await waitForAsset(url);
+            meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
+        }
+        if (sliced && !hasSlicedBorders(meta)) {
+            throw new Error(`Cocos 未能写入三/九宫 SpriteFrame 边界：${url}`);
         }
         const spriteFrame = findSpriteFrame(info);
         if (!spriteFrame) {

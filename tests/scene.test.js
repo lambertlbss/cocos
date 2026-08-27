@@ -43,6 +43,20 @@ class Graphics extends Component {
 }
 
 class Sprite extends Component {
+    set sizeMode(value) {
+        this._sizeMode = value;
+        if (value !== Sprite.SizeMode.CUSTOM && this._spriteFrame) {
+            this.node.getComponent(UITransform)?.setContentSize(
+                this._spriteFrame.width ?? 0,
+                this._spriteFrame.height ?? 0,
+            );
+        }
+    }
+
+    get sizeMode() {
+        return this._sizeMode;
+    }
+
     set spriteFrame(value) {
         this._spriteFrame = value;
         if (this.sizeMode !== Sprite.SizeMode.CUSTOM) {
@@ -57,7 +71,7 @@ class Sprite extends Component {
         return this._spriteFrame;
     }
 }
-Sprite.SizeMode = { CUSTOM: 1 };
+Sprite.SizeMode = { CUSTOM: 0, TRIMMED: 1, RAW: 2 };
 Sprite.Type = { SIMPLE: 0, SLICED: 1, TILED: 2 };
 
 class Label extends Component {
@@ -390,9 +404,23 @@ function fakeCocos() {
             Size: class Size {},
             assetManager: {
                 loadAny(request, callback) {
-                    callback(null, request.uuid === 'bitmap-font'
-                        ? new BitmapFont()
-                        : new TTFFont());
+                    if (request.uuid === 'bitmap-font') {
+                        callback(null, new BitmapFont());
+                        return;
+                    }
+                    if (request.uuid === 'mapped-font') {
+                        callback(null, new TTFFont());
+                        return;
+                    }
+                    const trimmed = request.uuid === 'trimmed-sprite-frame';
+                    callback(null, {
+                        width: 24,
+                        height: 16,
+                        rect: { width: 24, height: 16 },
+                        originalSize: trimmed
+                            ? { width: 30, height: 20 }
+                            : { width: 24, height: 16 },
+                    });
                 },
             },
         },
@@ -824,6 +852,49 @@ test('expands a single-line Label equally on both sides by its outline width', a
     assert.equal(title.position.x + transform.width / 2, 55);
 });
 
+test('expands an undersized Label vertically to font size plus both outline widths', async () => {
+    const root = makeSpec({
+        name: 'TextRoot',
+        frame: { x: 0, y: 0, width: 200, height: 80 },
+        children: [makeSpec({
+            figmaId: '15:196:height',
+            name: 'ShortTitle',
+            figmaType: 'TEXT',
+            kind: 'label',
+            frame: { x: 50, y: 10, width: 100, height: 12 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    root.children[0].characters = '标题';
+    root.children[0].textStyle = {
+        fontSize: 16,
+        lineHeightPx: 18,
+        textAlignHorizontal: 'CENTER',
+        textAlignVertical: 'CENTER',
+        textAutoResize: 'NONE',
+    };
+    root.children[0].strokes = [{
+        type: 'SOLID',
+        visible: true,
+        color: { r: 1, g: 0, b: 0, a: 1 },
+    }];
+    root.children[0].strokeWeight = 5;
+    const environment = await importWithFakeCocos(root);
+    const title = environment.canvas.children[0].children[0];
+    const label = title.getComponent(Label);
+    const transform = title.getComponent(UITransform);
+
+    assert.equal(label.fontSize, 16);
+    assert.equal(label.outlineWidth, 5);
+    assert.deepEqual(transform.contentSize, { width: 110, height: 26 });
+    assert.deepEqual(
+        { x: title.position.x, y: title.position.y },
+        { x: 0, y: 24 },
+    );
+    assert.equal(title.position.y - transform.height / 2, 11);
+    assert.equal(title.position.y + transform.height / 2, 37);
+});
+
 test('keeps a multiline Label at the Figma frame size', async () => {
     const root = makeSpec({
         name: 'TextRoot',
@@ -978,7 +1049,85 @@ test('keeps the Figma node size when an existing sliced SpriteFrame is assigned'
     const sprite = imported.getComponent(Sprite);
 
     assert.equal(sprite.type, Sprite.Type.SLICED);
+    assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
+});
+
+test('keeps an unscaled simple Sprite in TRIMMED size mode', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        frame: { x: 0, y: 0, width: 24, height: 16 },
+        sprite: { uuid: 'sprite-frame', url: 'db://assets/icon.png', sliced: false },
+    }));
+    const imported = environment.canvas.children[0];
+    const transform = imported.getComponent(UITransform);
+    const sprite = imported.getComponent(Sprite);
+
+    assert.equal(sprite.type, Sprite.Type.SIMPLE);
+    assert.equal(sprite.sizeMode, Sprite.SizeMode.TRIMMED);
+    assert.deepEqual(transform.contentSize, { width: 24, height: 16 });
+});
+
+test('keeps TRIMMED when only transparent pixels make the SpriteFrame rect smaller', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        frame: { x: 0, y: 0, width: 30, height: 20 },
+        sprite: { uuid: 'trimmed-sprite-frame', url: 'db://assets/icon.png', sliced: false },
+    }));
+    const imported = environment.canvas.children[0];
+    const transform = imported.getComponent(UITransform);
+    const sprite = imported.getComponent(Sprite);
+
+    assert.equal(sprite.sizeMode, Sprite.SizeMode.TRIMMED);
+    assert.deepEqual(transform.contentSize, { width: 24, height: 16 });
+});
+
+test('scales the trimmed rect proportionally when the raw SpriteFrame was resized', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        frame: { x: 0, y: 0, width: 60, height: 40 },
+        sprite: { uuid: 'trimmed-sprite-frame', url: 'db://assets/icon.png', sliced: false },
+    }));
+    const imported = environment.canvas.children[0];
+    const transform = imported.getComponent(UITransform);
+    const sprite = imported.getComponent(Sprite);
+
+    assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
+    assert.deepEqual(transform.contentSize, { width: 48, height: 32 });
+});
+
+test('switches a resized simple Sprite to CUSTOM while preserving the Figma size', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        frame: { x: 0, y: 0, width: 48, height: 32 },
+        sprite: { uuid: 'sprite-frame', url: 'db://assets/icon.png', sliced: false },
+    }));
+    const imported = environment.canvas.children[0];
+    const transform = imported.getComponent(UITransform);
+    const sprite = imported.getComponent(Sprite);
+
+    assert.equal(sprite.type, Sprite.Type.SIMPLE);
+    assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
+    assert.deepEqual(transform.contentSize, { width: 48, height: 32 });
+});
+
+test('preserves a non-uniform Figma resize as CUSTOM content size', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        frame: { x: 0, y: 0, width: 48, height: 40 },
+        sprite: { uuid: 'sprite-frame', url: 'db://assets/icon.png', sliced: false },
+    }));
+    const imported = environment.canvas.children[0];
+    const transform = imported.getComponent(UITransform);
+    const sprite = imported.getComponent(Sprite);
+
+    assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
+    assert.deepEqual(transform.contentSize, { width: 48, height: 40 });
 });
 
 test('uses Cocos tiled rendering for a Figma TILE image fill', async () => {
@@ -993,6 +1142,7 @@ test('uses Cocos tiled rendering for a Figma TILE image fill', async () => {
     const sprite = imported.getComponent(Sprite);
 
     assert.equal(sprite.type, Sprite.Type.TILED);
+    assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
 });
 

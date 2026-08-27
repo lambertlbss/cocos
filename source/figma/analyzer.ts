@@ -383,6 +383,7 @@ function warningFor(
 
 function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
     const frame = node.absoluteBoundingBox;
+    const sliceAnalysis = analyzeSliceGrid(node);
     const inferredAction = inferAction(node);
     const renderManualExportSubtree = inferredAction !== 'ignore'
         && node.type !== 'TEXT'
@@ -401,6 +402,7 @@ function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
         kind: inferKind(node),
         renderSubtree,
         patchCandidate: isPatchCandidate(node),
+        sliceMode: sliceAnalysis?.mode,
         warning: warningFor(node, renderManualExportSubtree, renderMessySubtree),
         children: node.children.map((child) => toTree(child, false)),
     };
