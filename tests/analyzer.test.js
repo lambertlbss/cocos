@@ -729,11 +729,13 @@ test('automatically renders parents containing three or nine Rectangle-named chi
         });
         assert.equal(isNamedSliceGroup(candidate), true);
         assert.equal(inferAction(candidate), 'render');
-        assert.equal(isPatchCandidate(candidate), true);
+        assert.equal(isPatchCandidate(candidate), false);
         const [tree] = analyzeTree([candidate]);
         assert.equal(tree.action, 'render');
         assert.equal(tree.renderSubtree, true);
         assert.match(tree.warning, /PNG 整层/);
+        assert.equal(tree.patchCandidate, false);
+        assert.match(tree.warning, /不自动启用切片/);
     }
 
     const unrelated = node({
@@ -800,4 +802,55 @@ test('derives asymmetric Cocos borders from a real nine-slice layout', () => {
     assert.ok(Math.abs(analysis.borders.right - 183.4) < 0.001);
     assert.ok(Math.abs(analysis.borders.top - 102.8) < 0.001);
     assert.ok(Math.abs(analysis.borders.bottom - 65.6) < 0.001);
+});
+
+test('detects a vertical three-slice with a one-pixel center band', () => {
+    const candidate = node({
+        name: 'img_yushi_line',
+        absoluteBoundingBox: { x: 0, y: 0, width: 437, height: 294 },
+        children: [
+            { id: '430:5317', name: 'Rectangle', type: 'RECTANGLE', absoluteBoundingBox: { x: 0, y: 0, width: 437, height: 115 } },
+            { id: '430:5318', name: 'Rectangle 1', type: 'RECTANGLE', absoluteBoundingBox: { x: 0, y: 115, width: 437, height: 1 } },
+            { id: '430:5319', name: 'Rectangle 2', type: 'RECTANGLE', absoluteBoundingBox: { x: 0, y: 116, width: 437, height: 178 } },
+        ],
+    });
+
+    assert.deepEqual(analyzeSliceGrid(candidate), {
+        mode: 'vertical',
+        borders: { left: 0, right: 0, top: 115, bottom: 178 },
+    });
+    assert.equal(isPatchCandidate(candidate), true);
+    const [tree] = analyzeTree([candidate]);
+    assert.equal(tree.patchCandidate, true);
+    assert.equal(tree.sliceMode, 'vertical');
+});
+
+test('detects one-pixel center rows and columns in a nine-slice grid', () => {
+    const widths = [10, 1, 20];
+    const heights = [8, 1, 12];
+    const children = [];
+    let id = 0;
+    let y = 0;
+    for (const height of heights) {
+        let x = 0;
+        for (const width of widths) {
+            children.push({
+                id: `thin-9:${id++}`,
+                name: id === 1 ? 'Rectangle' : `Rectangle ${id - 1}`,
+                type: 'RECTANGLE',
+                absoluteBoundingBox: { x, y, width, height },
+            });
+            x += width;
+        }
+        y += height;
+    }
+    const candidate = node({
+        absoluteBoundingBox: { x: 0, y: 0, width: 31, height: 21 },
+        children,
+    });
+
+    assert.deepEqual(analyzeSliceGrid(candidate), {
+        mode: 'nine',
+        borders: { left: 10, right: 20, top: 8, bottom: 12 },
+    });
 });

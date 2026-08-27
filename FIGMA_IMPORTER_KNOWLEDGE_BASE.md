@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.37`
+> 当前插件版本：`1.0.39`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-27
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -263,6 +263,8 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 
 Figma Export 中的 format（JPG/PNG/SVG/PDF）、suffix 和 constraint（SCALE/WIDTH/HEIGHT）只用于表明设计者人工设置过资源边界。整层资源始终走插件统一的 PNG 路径，下载与缓存继续使用 `ImportSettings.scale`；默认值为 `1`，不会读取或叠加 Figma Export 自带倍率、目标宽度或目标高度。
 
+三/九宫几何识别不再用固定距离阈值合并相邻段起点。三宫直接验证三段是否沿同一轴首尾连续且覆盖父节点；九宫先按每列/每行应各含 3 个单元的拓扑分组，再验证 3×3 每个格子唯一、同行同高、同列同宽及全部接缝连续。`2 px` 容差只用于吸收 Figma 浮点坐标误差和轻微接缝误差，不用于判定相邻切片是否属于同一行/列，因此中心伸缩带为 `1 px` 或 `2 px` 都不会被误合并。Rectangle 命名只决定 PNG 整层资源边界；只有几何分析成功才设置 `patchCandidate=true` 并自动启用 Cocos `SLICED`，命名匹配但几何无效时不再自动进入必然报错的切片执行链。
+
 ### 6.3.1 旋转、尺寸与中心锚点坐标
 
 - REST 节点的 `absoluteBoundingBox` 是旋转后的页面轴对齐包围盒，不能同时作为节点本地尺寸再叠加旋转；本地尺寸优先使用 `size`，仅在旧数据缺失时回退到 `absoluteBoundingBox`。
@@ -518,7 +520,7 @@ Figma 节点的 `exportSettings` 为非空数组，表示设计者明确把该�
 
 P0 Writer 选择 Raw Prefab Copy-on-write，只修改 `_lpos.x/y`、`UITransform._contentSize.width/height`、经 PaintProjection 与 AssetDB 双重证明的 `_spriteFrame.__uuid__`。事务包含 opaque one-use token、Figma version/Prefab/meta/ledger generation 二次校验、排他锁、exact backup、prepare journal、原子 replace、reimport、semantic preserve post-audit、字段级 baseline 推进、receipt 与失败 rollback。启动恢复只清理 owner bytes 完全匹配且 PID 已不存在的 stale lock。
 
-面板中的 Round-trip 区域与旧导入按钮分离；首次 Pair 只建立 genesis ledger，不改 Prefab。`.cocos-figma-sync` 位于项目根且不进入 AssetDB，插件不自动修改用户 `.gitignore`。当前代码级实现候选已完成；真实 Creator 3.8.7/Figma Desktop 证据未归档前仍不能标记 G2。
+Round-trip 区域与普通导入按钮保持代码隔离；首次 Pair 只建立 genesis ledger，不改 Prefab。自 `1.0.38` 起该区域通过模板功能开关暂时隐藏并设为不可交互，主进程接口、协议实现、测试夹具和已有同步数据均保留，普通 Figma → Cocos 导入不受影响。`.cocos-figma-sync` 位于项目根且不进入 AssetDB，插件不自动修改用户 `.gitignore`。当前代码级实现候选已完成；真实 Creator 3.8.7/Figma Desktop 证据未归档前仍不能标记 G2。
 
 ### 12.15 自动折叠与运行时语义的边界
 
@@ -589,6 +591,10 @@ npm test
 
 `1.0.37` 代码级回归（2026-08-27）：TypeScript 构建、分发门禁及 Sprite 尺寸模式定向测试通过；完整 `npm test` 为 `182/183`。普通 Sprite 的 Figma 目标尺寸等于 SpriteFrame `originalSize` 时保持 `TRIMMED`，透明像素裁剪不会误判为缩放；发生等比缩放时按裁剪尺寸同比例调整并转为 `CUSTOM`，非等比缩放保留目标尺寸，三/九宫与 Tiled 始终使用 `CUSTOM`。唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
 
+`1.0.38` 代码级回归（2026-08-27）：面板 Round-trip 卡片从初始 HTML 即隐藏并通过 `inert`、`aria-hidden` 和强制 CSS 规则禁止交互，避免面板加载闪现或留下空白；底层 Round-trip 实现未删除。模板功能开关回归、TypeScript 构建与分发门禁通过；完整 `npm test` 为 `183/184`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
+`1.0.39` 代码级回归（2026-08-27）：修复三/九宫薄中心带被坐标聚类吞并的问题；Figma 实例 `img_yushi_line` 的 `437×294` 纵向三宫（`115 + 1 + 178`）正确得到 `top=115`、`bottom=178`，1 px 中心行列的九宫同样通过。命名匹配但几何不连续的节点继续 PNG 整层导入但不自动启用切片。TypeScript 构建、分发门禁及定向测试 `38/38` 通过；完整 `npm test` 为 `185/186`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
 ## 14. 发布与版本策略
 
 1. 修改 `source`、`static`、脚本或测试；
@@ -627,7 +633,7 @@ npm test
 | 节点覆盖按设计文件持久化 | RichText、忽略占位和项目业务类型无法完全由 Figma 自动推断 | 只保存用户显式修改，并按 `fileKey + nodeId` 隔离和恢复；用户覆盖优先于自动规划 |
 | Figma 手动 Export 作为显式资源边界 | 设计者已明确声明节点应整体输出，继续拆分会违背设计语义 | 非 TEXT 节点默认 PNG 整层，隐藏节点同样准备资源但导入为 Inactive；根节点和显式 ScrollView 也生效，格式、后缀和尺寸约束不改变插件 PNG/倍率策略 |
 | 隐藏状态与导入策略分离 | Figma 隐藏只表达初始运行状态，不代表节点、资源或子树可以丢弃 | 隐藏层继续走文字、图片、矢量、Export、三/九宫和本地资源统一逻辑，生成节点写入 `active=false`；自动折叠和同名母资源提升不得吞掉独立隐藏边界 |
-| 三/九宫识别即默认启用 | 只显示候选但把执行端 `nineSlice` 默认为 `false` 会造成面板识别成功、Cocos 却仍是 SIMPLE 的假成功 | `patchCandidate=true` 自动进入 border 写入和 `Sprite.Type.SLICED`；用户可显式关闭，计算或回读失败直接报错 |
+| 有效三/九宫识别即默认启用 | 只看 Rectangle 数量会把无效几何送入切片执行链；按距离聚类又会吞掉 1/2 px 薄中心带 | 按三段/九格拓扑验证连续边界；只有几何成功才令 `patchCandidate=true` 并自动写入 border、设置 `Sprite.Type.SLICED`，命名匹配但几何无效只做 PNG 整层 |
 | 普通 Sprite 原生尺寸优先使用 TRIMMED | 所有图片无条件写成 `CUSTOM` 会丢失 Cocos 对裁剪后原生尺寸的语义，但用裁剪矩形判断缩放又会把透明像素误判为尺寸变化 | 普通 SIMPLE Sprite 先应用 `TRIMMED`，以 SpriteFrame `originalSize` 判断是否缩放；未缩放保留 TRIMMED，等比缩放按裁剪尺寸同比例转 CUSTOM，非等比缩放使用目标尺寸；SLICED/TILED 固定 CUSTOM |
 | 仓库下载后可直接拖入 Cocos | 插件使用者不应安装 Node.js 或理解 TypeScript 构建流程；缺失 `dist` 会让主进程和 `openPanel` 连锁失败 | `dist` 纳入版本控制；构建前安全清空旧产物，分发门禁验证全部 Cocos 入口和运行时模块，`node_modules` 继续不分发 |
 | 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
@@ -635,10 +641,25 @@ npm test
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
 | 旋转使用 `relativeTransform` 并以度数写入 Cocos | Figma 页面包围盒已经包含旋转，原始角度值直接传给 Cocos 会把 `PI` 错当成约 `3.14°` | 使用未旋转 `size`、父级局部矩阵和中心点换算；普通 180° 与嵌套旋转不再产生二次包围盒误差 |
 | Round-trip 使用 Raw Prefab Copy-on-write | 需要逐字段 patch，同时机器化证明脚本、未知组件和结构保持不变 | 完整 pre/post/rollback projection；仅 Creator 3.8.7 可 Apply，真机证据完成前不称 G2 |
+| Round-trip 面板暂时关闭但不删除实现 | 当前优先稳定单向导入，同时保留后续恢复双向能力 | 模板功能开关设为关闭，卡片隐藏且不可交互；主进程消息、协议、ledger 与测试继续保留 |
 
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-27 · `1.0.39`
+
+- 修复 `img_yushi_line` 三宫计算失败：旧实现把 Y 起点 `115` 与 `116` 按 `≤2 px` 聚成同一行，导致三段被误判为两段；新实现按首尾连续的三段拓扑判断，不再用段间距离聚类。
+- 九宫改为每列/每行各 3 个单元的拓扑分组，再验证 3×3 单元唯一性、同行/同列尺寸以及四周和内部接缝；1 px、2 px 中心伸缩带均可识别，原 `2 px` 容差仅承担浮点和接缝误差。
+- Rectangle 命名组仍按 PNG 整层导入，但只有连续边界计算成功才默认启用三/九宫；无效几何在面板中给出“不自动启用切片”的明确提示，避免导入阶段才失败。
+- 新增真实 `437×294 = 115 + 1 + 178` 纵向三宫与 1 px 中心行列九宫回归；构建、分发门禁和定向测试 `38/38` 通过，完整测试 `185/186`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。既有资源需要使用本版本重新导入，才能写入正确 SpriteFrame border 和 `SLICED` 类型。
+
+### 2026-08-27 · `1.0.38`
+
+- 暂时关闭面板 Round-trip 模块：卡片在初始模板中设置 `data-feature-enabled="false"`、`hidden`、`inert` 和 `aria-hidden="true"`，配合强制 CSS 隐藏规则，面板打开过程中不会闪现，也不会留下可聚焦控件或布局空白。
+- 只关闭用户界面，不删除 Round-trip 主进程消息、协议、事务、ledger、测试夹具或已有项目同步数据；普通读取 Figma、节点策略和 Prefab 导入流程不受影响。
+- 新增面板模板回归，确认功能开关保持关闭，同时保留检测和应用控件的实现，未来恢复时只需显式开启模板开关并重新验收。
+- TypeScript 构建和分发检查通过；完整测试 `183/184`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
 
 ### 2026-08-27 · `1.0.37`
 
@@ -900,5 +921,6 @@ npm test
 - 节点策略原因和警告已在面板分开展示；RichText 可手动选择，节点策略和 Cocos 节点名覆盖按 Figma 文件与节点持久化。
 - 资源、缓存、字体、三/九宫和滚动节点均有明确实现入口和测试覆盖。
 - 仓库已包含清理后生成的完整 `dist`，下载后可直接放入 Cocos；分发门禁阻止入口缺失、陈旧 JS、未随包分发的外部模块和再次忽略 `dist`。
+- Round-trip 底层实现仍保留，但 `1.0.38` 已暂时关闭面板入口；当前用户界面只暴露稳定的 Figma → Cocos 导入流程。
 - 不自动生成 Widget；自定义 Cocos 脚本/运行时组件、设计占位忽略和 Label/RichText 业务选择仍需要显式配置。
-- `1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.36` 的三/九宫识别即启用与 border 回读门禁、`1.0.35` 的文字框横纵描边补偿、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证 Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。
+- `1.0.39` 的 1/2 px 薄中心带三/九宫拓扑识别、`1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.36` 的有效切片识别即启用与 border 回读门禁、`1.0.35` 的文字框横纵描边补偿、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证 Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。

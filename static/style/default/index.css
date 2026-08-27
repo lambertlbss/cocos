@@ -1118,6 +1118,10 @@ input[readonly] {
     cursor: pointer;
 }
 
+.roundtrip-card[data-feature-enabled="false"] {
+    display: none !important;
+}
+
 .roundtrip-note,
 .roundtrip-summary {
     color: var(--text-muted);

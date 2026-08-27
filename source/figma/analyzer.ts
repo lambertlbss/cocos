@@ -339,7 +339,7 @@ export function shouldRenderMessySubtree(node: FigmaNode, isRoot: boolean): bool
 }
 
 export function isPatchCandidate(node: FigmaNode): boolean {
-    return isNamedSliceGroup(node) || Boolean(analyzeSliceGrid(node));
+    return Boolean(analyzeSliceGrid(node));
 }
 
 function warningFor(
@@ -359,7 +359,9 @@ function warningFor(
         return withInactive('检测到 Figma Export 设置，智能模式将按 PNG 整层导入；Figma 的格式、后缀和倍率不沿用');
     }
     if (isNamedSliceGroup(node)) {
-        return withInactive('检测到 3/9 个 Rectangle 切片，将按 PNG 整层导入并优先复用同名资源');
+        return withInactive(analyzeSliceGrid(node)
+            ? '检测到有效的 3/9 个 Rectangle 连续切片，将按 PNG 整层导入、自动启用切片并优先复用同名资源'
+            : '检测到 3/9 个 Rectangle 命名节点，但几何未形成连续切片；将按 PNG 整层导入，不自动启用切片');
     }
     if (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode)) {
         return withInactive(`混合模式 ${node.blendMode} 将近似处理`);
@@ -401,7 +403,7 @@ function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
         action: renderSubtree ? 'render' : inferredAction,
         kind: inferKind(node),
         renderSubtree,
-        patchCandidate: isPatchCandidate(node),
+        patchCandidate: Boolean(sliceAnalysis),
         sliceMode: sliceAnalysis?.mode,
         warning: warningFor(node, renderManualExportSubtree, renderMessySubtree),
         children: node.children.map((child) => toTree(child, false)),
