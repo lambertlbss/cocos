@@ -2,7 +2,7 @@
   "package_version": 2,
   "name": "figma-importer-cocos",
   "title": "Figma Importer",
-  "version": "1.0.33",
+  "version": "1.0.34",
   "description": "Figma UI importer for Cocos Creator 3.8.7",
   "main": "./dist/main.js",
   "author": "Figma Importer contributors",
@@ -11,9 +11,11 @@
     "creator": ">=3.8.7 <3.9.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node scripts/clean-dist.js",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",
-    "test": "npm run build && node --test tests/*.test.js",
+    "verify:distribution": "node scripts/verify-distribution.js",
+    "test": "npm run build && npm run verify:distribution && node --test tests/*.test.js",
     "check": "npm run test"
   },
   "devDependencies": {

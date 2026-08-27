@@ -2,9 +2,9 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.33`
+> 当前插件版本：`1.0.34`
 > 当前文档状态：持续维护  
-> 最近审计：2026-08-26
+> 最近审计：2026-08-27
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
 
 ## 1. 文档目的
@@ -423,12 +423,14 @@ Frame Prefab 不使用 runtime `nodeMaps`；其节点映射保存在 Prefab Meta
 
 ### 12.1 `The plug-in main process failed to load. Cannot find module 'uuid'`
 
-可能原因：Cocos 使用旧版 `dist` 或扩展依赖未安装。处理顺序：
+`1.0.34` 起，仓库直接版本化完整 `dist`，正式下载内容不需要安装依赖或本地构建。若仍出现该错误，说明 Cocos 正在加载旧插件副本、旧扩展注册路径或不完整的历史压缩包，而不是当前构建：
 
-1. 在插件目录执行 `npm install`；
-2. 执行 `npm run build`；
-3. 完整退出并重启 Cocos Creator；
-4. 检查 `package.json` 版本与面板 `runtimeCompatible` 是否一致。
+1. 完整退出 Cocos Creator；
+2. 删除或在扩展管理器中移除重复的旧插件目录和提交号临时目录；
+3. 确认唯一保留目录含 `package.json`、`dist/main.js`、`dist/scene.js`、`dist/panels/default/index.js`、`static` 与 `i18n`；
+4. 重新打开项目并启用插件，检查 `package.json` 版本与面板 `runtimeCompatible` 是否一致。
+
+开发者修改 TypeScript 后仍必须执行 `npm run build` 并把更新后的 `dist` 一并提交；使用者直接下载正式仓库时不执行 `npm install`。
 
 ### 12.2 矢量不可见或出现 `cc.Graphics` 冲突
 
@@ -562,6 +564,7 @@ npm test
 - 保留映射回填、节点恢复不重复、单根/多根双向切换及失败回滚；
 - Token 加密和明文不落盘；
 - 缓存哈希键不泄露 fileKey/nodeId；
+- 下载即用分发门禁：主进程、Scene、Panel、模板、样式、语言包、本地 `require` 完整性、未随包分发的外部模块以及 `dist` Git 忽略状态；
 - Round-trip 协议 hash/canonical/Geometry、Shared Data reader、Cocos identity reader、Diff3、ledger、事务、资源 proof、精确回滚与启动恢复。
 
 已发布基线：`104` 项测试通过（截至 2026-08-21）。其中原有 `68` 项单向导入回归保持通过，新增 `36` 项覆盖 Round-trip 协议、读取、Creator fixture、Diff3、ledger、事务与恢复。
@@ -578,14 +581,18 @@ npm test
 
 `1.0.33` 代码级回归（2026-08-27）：TypeScript 构建通过；分析器、导入规划与 Scene 定向测试 `99/99` 通过。完整 `npm test` 为 `173/174`，隐藏文字、隐藏父子树、显式 Export、三/九宫及折叠边界回归全部通过；唯一失败仍是未修改的 Round-trip 冻结文件在 Windows CRLF 检出下产生原始字节 SHA-256 差异，本版本未修改或放宽该门禁。真实 Cocos Creator 3.8.7 仍需验证隐藏父子节点在 Prefab 编辑模式中的显隐切换和连续重新导入。
 
+`1.0.34` 代码级回归（2026-08-27）：清理后 TypeScript 构建通过，下载即用分发门禁通过；生成 `34` 个 `dist` 文件，主进程、Scene、Panel 和所有本地模块可解析，运行时仅依赖 Node 内置模块及 Cocos 提供的 `cc`/Electron，不需要 `node_modules`。完整 `npm test` 为 `173/174`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
 ## 14. 发布与版本策略
 
-1. 修改 `source`、`static` 或测试；
+1. 修改 `source`、`static`、脚本或测试；
 2. 更新 `package.json` 与 `package-lock.json` 版本；
-3. `npm test`；
-4. 在实际 Cocos Creator 3.8.7 项目重启插件验证；
-5. 更新本文档的变更记录；
-6. 提交中文变更说明，并将同一个 `main` 提交推送到两个指定 Git 远端；两个远端都成功才算发布完成。
+3. 执行 `npm run build`，先清空旧 `dist` 再生成当前源码对应的完整构建产物；
+4. 执行 `npm run verify:distribution` 与 `npm test`，确认所有入口存在、没有未分发的运行时模块，并确认 `dist` 不再被 Git 忽略；
+5. 提交时必须包含完整 `dist`，使仓库下载后无需 Node.js、`npm install` 或本地构建即可直接放入 Cocos `extensions`；
+6. 在实际 Cocos Creator 3.8.7 项目重启插件验证；
+7. 更新本文档的变更记录；
+8. 提交中文变更说明，并将同一个当前分支提交推送到两个指定 Git 远端；两个远端都成功才算发布完成。
 
 版本递增原因：Cocos 可能继续加载旧主进程；版本变化可让面板检测到主进程/面板不一致并提示重启。
 
@@ -614,6 +621,7 @@ npm test
 | 节点覆盖按设计文件持久化 | RichText、忽略占位和项目业务类型无法完全由 Figma 自动推断 | 只保存用户显式修改，并按 `fileKey + nodeId` 隔离和恢复；用户覆盖优先于自动规划 |
 | Figma 手动 Export 作为显式资源边界 | 设计者已明确声明节点应整体输出，继续拆分会违背设计语义 | 非 TEXT 节点默认 PNG 整层，隐藏节点同样准备资源但导入为 Inactive；根节点和显式 ScrollView 也生效，格式、后缀和尺寸约束不改变插件 PNG/倍率策略 |
 | 隐藏状态与导入策略分离 | Figma 隐藏只表达初始运行状态，不代表节点、资源或子树可以丢弃 | 隐藏层继续走文字、图片、矢量、Export、三/九宫和本地资源统一逻辑，生成节点写入 `active=false`；自动折叠和同名母资源提升不得吞掉独立隐藏边界 |
+| 仓库下载后可直接拖入 Cocos | 插件使用者不应安装 Node.js 或理解 TypeScript 构建流程；缺失 `dist` 会让主进程和 `openPanel` 连锁失败 | `dist` 纳入版本控制；构建前安全清空旧产物，分发门禁验证全部 Cocos 入口和运行时模块，`node_modules` 继续不分发 |
 | 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
@@ -623,6 +631,15 @@ npm test
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-27 · `1.0.34`
+
+- 修复仓库下载后直接放入 Cocos 时缺少 `dist/main.js` 的发布缺陷：取消对 `dist/` 的 Git 忽略，完整编译产物作为插件正式组成部分随仓库版本化。
+- 安装说明改为下载整个目录后直接放入项目 `extensions`，普通使用者不再需要 Node.js、`npm install` 或 `npm run build`；开发者修改源码后仍必须同步提交新 `dist`。
+- 构建新增受限的 `dist` 清理步骤，删除旧源码遗留的陈旧 JS，避免已经删除的模块继续混入发布包；本轮因此移除了残留且未被当前入口使用的 `sliced-png.js`/`pngjs` 引用。
+- 新增分发完整性门禁：校验主进程、Scene Script、全部 Panel 入口、模板、样式、语言包、本地模块解析、Cocos/Electron 宿主模块白名单和 Git 忽略状态，并冒烟加载三个入口及验证 `openPanel`/`importDocument`/Panel `ready` 导出；未来出现新的未随仓库分发的外部运行时依赖时测试会直接失败。
+- 清理构建生成 `34` 个文件，分发门禁通过；完整测试 `173/174`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 字节哈希差异。
+- 迁移：旧下载目录应整体替换为 `1.0.34` 仓库内容并完整重启 Cocos；不要同时保留旧插件目录或提交号临时副本。
 
 ### 2026-08-27 · `1.0.33`
 
@@ -852,5 +869,6 @@ npm test
 - 子树压平对用户仅暴露“PNG 整层”，旧动作值在入口兼容归一。
 - 节点策略原因和警告已在面板分开展示；RichText 可手动选择，节点策略和 Cocos 节点名覆盖按 Figma 文件与节点持久化。
 - 资源、缓存、字体、三/九宫和滚动节点均有明确实现入口和测试覆盖。
+- 仓库已包含清理后生成的完整 `dist`，下载后可直接放入 Cocos；分发门禁阻止入口缺失、陈旧 JS、未随包分发的外部模块和再次忽略 `dist`。
 - 不自动生成 Widget；自定义 Cocos 脚本/运行时组件、设计占位忽略和 Label/RichText 业务选择仍需要显式配置。
-- `1.0.33` 的隐藏节点统一导入、Inactive 同步、隐藏父子树保留和显隐折叠边界已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中回归：隐藏父子节点显隐切换、连续重新导入、描边文字框横向扩张、180° 与嵌套旋转视觉、节点名输入、首次创建、Frame 改名/目录移动、目标 Prefab dirty 阻断、Asset DB 慢导入/Meta 恢复和旧版无来源标记 Prefab 迁移。
+- `1.0.34` 的下载即用分发与 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在干净目录下载仓库后用真实 Cocos Creator 3.8.7 回归首次启用，并继续验证隐藏父子节点显隐切换、连续重新导入、描边文字框横向扩张、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。
