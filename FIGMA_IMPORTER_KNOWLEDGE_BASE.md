@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.39`
+> 当前插件版本：`1.0.40`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-27
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -270,7 +270,7 @@ Figma Export 中的 format（JPG/PNG/SVG/PDF）、suffix 和 constraint（SCALE/
 - REST 节点的 `absoluteBoundingBox` 是旋转后的页面轴对齐包围盒，不能同时作为节点本地尺寸再叠加旋转；本地尺寸优先使用 `size`，仅在旧数据缺失时回退到 `absoluteBoundingBox`。
 - 子节点角度优先从 `relativeTransform` 的线性矩阵通过 `atan2(-m10, m00)` 提取，并统一转换为 Cocos 使用的度数；原始 `rotation` 只作为矩阵缺失时的回退值，不能把 `PI` 直接传给 `setRotationFromEuler()`。
 - 中心锚点位置由父级局部矩阵变换节点本地中心计算：先对 `(width / 2, height / 2)` 应用 `relativeTransform`，再按父节点中心锚点和 Cocos Y 轴方向换算；不再用旋转后的页面包围盒左上角反推位置。
-- 普通 Label 使用内置描边时，最终 Content Size 宽度在 Figma 原宽基础上左右各增加一个实际 Cocos `outlineWidth`。若 Figma 原高度小于最终 Cocos `fontSize`，高度调整为 `fontSize + 2 × outlineWidth`，上下各补一个描边宽度；否则保留 Figma 原高度。两种补偿均保持中心锚点和节点位置不变；RichText 不参与此规则。
+- 普通 Label 使用内置描边时，最终 Content Size 宽度在 Figma 原宽基础上左右各增加一个实际 Cocos `outlineWidth`；高度以 `max(Figma 原高, Cocos fontSize)` 为基础，再在上下各增加一个实际 `outlineWidth`。因此最终公式为 `width = FigmaWidth + 2 × outlineWidth`、`height = max(FigmaHeight, fontSize) + 2 × outlineWidth`，两轴补偿均保持中心锚点和节点位置不变；RichText 不参与此规则。
 - 最外层 Frame 仍固定放在 Prefab 根中心，普通子节点由各自父级局部矩阵逐层组合，因此嵌套旋转不会被当成页面绝对坐标重复计算。
 - Cocos Node 没有直接对应 Figma 仿射斜切的通用 UI 属性；普通旋转、缩放前的本地尺寸和父级局部位置可精确还原，含斜切或非标准镜像的节点必须转 PNG 或增加专门矩阵渲染方案，不能宣称无损生成普通 Node。
 
@@ -595,6 +595,8 @@ npm test
 
 `1.0.39` 代码级回归（2026-08-27）：修复三/九宫薄中心带被坐标聚类吞并的问题；Figma 实例 `img_yushi_line` 的 `437×294` 纵向三宫（`115 + 1 + 178`）正确得到 `top=115`、`bottom=178`，1 px 中心行列的九宫同样通过。命名匹配但几何不连续的节点继续 PNG 整层导入但不自动启用切片。TypeScript 构建、分发门禁及定向测试 `38/38` 通过；完整 `npm test` 为 `185/186`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
 
+`1.0.40` 代码级回归（2026-08-27）：普通 Label 的 Content Size 高度无论 Figma 原框是否小于字号，都会在基础高度上下各增加一个 Cocos 实际描边宽度；基础高度仍取 `max(FigmaHeight, fontSize)`。中心锚点和位置保持不变，描边框向四周对称扩张。TypeScript 构建、分发门禁及 Scene 定向测试 `64/64` 通过；完整 `npm test` 为 `185/186`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
 ## 14. 发布与版本策略
 
 1. 修改 `source`、`static`、脚本或测试；
@@ -646,6 +648,13 @@ npm test
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-27 · `1.0.40`
+
+- 修改普通 Label 高度补偿：从“仅原框低于字号时加入上下描边”改为始终使用 `max(FigmaHeight, fontSize) + 2 × outlineWidth`，确保上、下各预留一个 Cocos 实际描边宽度。
+- 宽度继续使用 `FigmaWidth + 2 × outlineWidth`；节点仍为中心锚点且不修改中心位置，因此四个方向对称扩张，不产生单侧位移。
+- 更新回归：`100×20`、字号 `16`、描边 `5` 的文字框由 `110×20` 改为 `110×30`；原框 `100×12` 时仍得到 `110×26`。
+- TypeScript 构建、分发门禁及 Scene 定向测试 `64/64` 通过；完整测试 `185/186`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。既有 Prefab 需重新导入后才会更新文字 Content Size。
 
 ### 2026-08-27 · `1.0.39`
 
@@ -923,4 +932,4 @@ npm test
 - 仓库已包含清理后生成的完整 `dist`，下载后可直接放入 Cocos；分发门禁阻止入口缺失、陈旧 JS、未随包分发的外部模块和再次忽略 `dist`。
 - Round-trip 底层实现仍保留，但 `1.0.38` 已暂时关闭面板入口；当前用户界面只暴露稳定的 Figma → Cocos 导入流程。
 - 不自动生成 Widget；自定义 Cocos 脚本/运行时组件、设计占位忽略和 Label/RichText 业务选择仍需要显式配置。
-- `1.0.39` 的 1/2 px 薄中心带三/九宫拓扑识别、`1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.36` 的有效切片识别即启用与 border 回读门禁、`1.0.35` 的文字框横纵描边补偿、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证 Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。
+- `1.0.40` 的文字框四向描边补偿、`1.0.39` 的 1/2 px 薄中心带三/九宫拓扑识别、`1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.36` 的有效切片识别即启用与 border 回读门禁、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证 Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。

@@ -897,14 +897,12 @@ function finalizeLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc
         : 0;
     const figmaHeight = Math.max(0, spec.frame.height * scale);
     const fontSize = Math.max(0, Number(label?.fontSize) || 0);
-    const finalHeight = figmaHeight < fontSize
-        ? fontSize + outlineWidth * 2
-        : figmaHeight;
+    const finalHeight = Math.max(figmaHeight, fontSize) + outlineWidth * 2;
     // Keep the imported Figma box unless a deterministic outline/font lower
     // bound requires expansion. Expand symmetrically around the center anchor
     // so the node's imported center position remains unchanged.
-    // An undersized Figma text box must at least contain the final Cocos font
-    // size, plus one outline width above and below when outline is enabled.
+    // The base box must at least contain the final Cocos font size. When an
+    // outline is enabled, reserve one actual Cocos outline width on every side.
     transform.setContentSize(
         Math.max(0, spec.frame.width * scale + outlineWidth * 2),
         finalHeight,

@@ -801,7 +801,7 @@ test('imports hidden Figma layers with their full subtree and keeps only hidden 
     assert.ok(importedText.getComponent(Label));
 });
 
-test('expands a single-line Label equally on both sides by its outline width', async () => {
+test('expands a single-line Label on all four sides by its outline width', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 200, height: 80 },
@@ -843,13 +843,15 @@ test('expands a single-line Label equally on both sides by its outline width', a
     assert.equal(label.horizontalAlign, Label.HorizontalAlign.CENTER);
     assert.equal(label.verticalAlign, Label.VerticalAlign.CENTER);
     assert.equal(label.lineHeight, 18);
-    assert.deepEqual(transform.contentSize, { width: 110, height: 20 });
+    assert.deepEqual(transform.contentSize, { width: 110, height: 30 });
     assert.deepEqual(
         { x: title.position.x, y: title.position.y },
         { x: 0, y: 25 },
     );
     assert.equal(title.position.x - transform.width / 2, -55);
     assert.equal(title.position.x + transform.width / 2, 55);
+    assert.equal(title.position.y - transform.height / 2, 10);
+    assert.equal(title.position.y + transform.height / 2, 40);
 });
 
 test('expands an undersized Label vertically to font size plus both outline widths', async () => {
