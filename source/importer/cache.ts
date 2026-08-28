@@ -8,6 +8,8 @@ export interface CacheEntryKey {
     nodeId: string;
     format: RasterImageExtension | 'svg';
     scale: number;
+    /** Changes whenever the same node is rendered with different canvas semantics. */
+    variant?: string;
 }
 
 function digest(value: string): string {
@@ -40,7 +42,11 @@ export class LocalAssetCache {
     pathFor(key: CacheEntryKey): string {
         const fileFolder = digest(key.fileKey).slice(0, 16);
         const scale = Number.isFinite(key.scale) ? key.scale : 1;
-        const fileName = `${digest(`${key.nodeId}:${key.format}:${scale}`).slice(0, 24)}.${key.format}`;
+        const legacyIdentity = `${key.nodeId}:${key.format}:${scale}`;
+        const identity = key.variant
+            ? `${legacyIdentity}:${key.variant}`
+            : legacyIdentity;
+        const fileName = `${digest(identity).slice(0, 24)}.${key.format}`;
         return join(this.root, fileFolder, fileName);
     }
 

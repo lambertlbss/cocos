@@ -12,6 +12,7 @@ import {
     isPatchCandidate,
     isVectorNode,
     nativeTiledPaintSource,
+    plainImageSourceRef,
     type TiledPaintSource,
 } from './figma/analyzer';
 import { parseDocument } from './figma/parser';
@@ -89,6 +90,11 @@ type Decision = ImportDecision;
 interface TiledAssetRequest {
     node: FigmaNode;
     source: TiledPaintSource;
+}
+
+interface RawImageAssetRequest {
+    node: FigmaNode;
+    imageRef: string;
 }
 
 interface SceneImportPayload {
@@ -393,6 +399,31 @@ function nodeFrame(node: FigmaNode): Rect {
     return { x: 0, y: 0, width: 0, height: 0 };
 }
 
+const RENDER_OVERFLOW_EPSILON = 0.5;
+
+/**
+ * Only expand rasters whose visible pixels escape the geometric frame. A
+ * render frame contained inside the geometry often represents intentional
+ * transparent padding and must keep the legacy fixed-canvas path.
+ */
+export function overflowingRenderFrame(node: FigmaNode): Rect | undefined {
+    const geometry = node.absoluteBoundingBox;
+    const render = node.absoluteRenderBounds;
+    if (!geometry || !render || render.width <= 0 || render.height <= 0) {
+        return undefined;
+    }
+    const geometryRight = geometry.x + geometry.width;
+    const geometryBottom = geometry.y + geometry.height;
+    const renderRight = render.x + render.width;
+    const renderBottom = render.y + render.height;
+    return render.x < geometry.x - RENDER_OVERFLOW_EPSILON
+        || render.y < geometry.y - RENDER_OVERFLOW_EPSILON
+        || renderRight > geometryRight + RENDER_OVERFLOW_EPSILON
+        || renderBottom > geometryBottom + RENDER_OVERFLOW_EPSILON
+        ? render
+        : undefined;
+}
+
 function cornerRadii(node: FigmaNode): [number, number, number, number] {
     if (node.rectangleCornerRadii?.length === 4) {
         return node.rectangleCornerRadii as [number, number, number, number];
@@ -546,17 +577,19 @@ function annotateDocumentPlan(session: DocumentSession): DocumentSession {
 function collectAssetRequests(
     roots: FigmaNode[],
     decisions: Map<string, Decision>,
-): { png: FigmaNode[]; tiled: TiledAssetRequest[]; gradients: FigmaNode[] } {
+): { png: FigmaNode[]; tiled: TiledAssetRequest[]; rawImages: RawImageAssetRequest[]; gradients: FigmaNode[] } {
     const png: FigmaNode[] = [];
     const tiled: TiledAssetRequest[] = [];
+    const rawImages: RawImageAssetRequest[] = [];
     const gradients: FigmaNode[] = [];
-    const visit = (node: FigmaNode) => {
+    const visit = (node: FigmaNode, ancestorsVisible: boolean) => {
         const decision = decisionForNode(node, decisions);
         if (decision.action === 'ignore') {
             return;
         }
+        const effectivelyVisible = ancestorsVisible && node.visible !== false && node.opacity > 0;
         if (node.type === 'TEXT') {
-            node.children.forEach(visit);
+            node.children.forEach((child) => visit(child, effectivelyVisible));
             return;
         }
         if (decision.nineSlice) {
@@ -568,7 +601,12 @@ function collectAssetRequests(
             if (source) {
                 tiled.push({ node, source });
             } else {
-                png.push(node);
+                const imageRef = effectivelyVisible ? undefined : plainImageSourceRef(node);
+                if (imageRef) {
+                    rawImages.push({ node, imageRef });
+                } else {
+                    png.push(node);
+                }
             }
             return;
         }
@@ -582,10 +620,10 @@ function collectAssetRequests(
                 }
             }
         }
-        node.children.forEach(visit);
+        node.children.forEach((child) => visit(child, effectivelyVisible));
     };
-    roots.forEach(visit);
-    return { png, tiled, gradients };
+    roots.forEach((root) => visit(root, true));
+    return { png, tiled, rawImages, gradients };
 }
 
 async function buildAssets(
@@ -632,7 +670,8 @@ async function buildAssets(
     await Promise.all(session.roots.map(promoteLocalParents));
     const requests = collectAssetRequests(session.roots, decisions);
     const assets = new Map<string, SpriteAssetSpec>();
-    const total = requests.png.length + requests.tiled.length + requests.gradients.length;
+    const total = requests.png.length + requests.tiled.length
+        + requests.rawImages.length + requests.gradients.length;
     let completed = 0;
     let apiPromise: Promise<FigmaClient> | null = null;
 
@@ -863,6 +902,7 @@ async function buildAssets(
             nodes: FigmaNode[];
             url: string;
             borders?: { left: number; right: number; top: number; bottom: number };
+            renderFrame?: Rect;
             key: CacheEntryKey;
             contents: Buffer | null;
             source: 'local' | 'cache' | 'figma';
@@ -889,6 +929,9 @@ async function buildAssets(
                 throw new Error(`三/九宫节点“${node.name}”已启用切片，但无法计算有效的连续切片边界。`);
             }
             const borders = sliceAnalysis?.borders;
+            // Sliced assets retain their exact geometric canvas because their
+            // border metadata is expressed in that coordinate space.
+            const renderFrame = borders ? undefined : overflowingRenderFrame(node);
             let localMatch = null;
             for (const library of localResources) {
                 localMatch = await library.find(node.name, format);
@@ -905,7 +948,7 @@ async function buildAssets(
                 continue;
             }
             const existing = !importSettings.refreshAssets ? await writer.existing(url) : null;
-            if (!localMatch && existing && !borders) {
+            if (!localMatch && existing && !borders && !renderFrame) {
                 completeGroup(groupedNodes, existing, 'existing');
                 continue;
             }
@@ -914,6 +957,7 @@ async function buildAssets(
                 nodeId: node.id,
                 format,
                 scale: importSettings.scale,
+                variant: renderFrame ? 'visual-overflow-v1' : undefined,
             };
             const cached = localMatch || importSettings.refreshAssets
                 ? null
@@ -923,20 +967,29 @@ async function buildAssets(
                 nodes: groupedNodes,
                 url,
                 borders,
+                renderFrame: localMatch ? undefined : renderFrame,
                 key,
                 contents: localMatch?.contents ?? cached,
                 source: localMatch ? 'local' : cached ? 'cache' : 'figma',
             });
         }
-        const remoteNodes = pending.filter((item) => !item.contents).map((item) => item.node);
-        const urls = remoteNodes.length
-            ? await (await getApi()).getImageUrls(
+        const urls: Record<string, string | null> = {};
+        const remoteItems = pending.filter((item) => !item.contents);
+        for (const useAbsoluteBounds of [true, false]) {
+            const batch = remoteItems.filter((item) => (
+                useAbsoluteBounds ? !item.renderFrame : Boolean(item.renderFrame)
+            ));
+            if (!batch.length) {
+                continue;
+            }
+            Object.assign(urls, await (await getApi()).getImageUrls(
                 session.fileKey,
-                remoteNodes.map((node) => node.id),
+                batch.map((item) => item.node.id),
                 format,
                 importSettings.scale,
-            )
-            : {};
+                useAbsoluteBounds,
+            ));
+        }
         for (const item of pending) {
             if (activeController?.signal.aborted) {
                 throw new CancelledError();
@@ -950,16 +1003,93 @@ async function buildAssets(
                 contents = await (await getApi()).download(remoteUrl);
                 await cache.write(item.key, contents);
             }
-            completeGroup(
-                item.nodes,
-                await writer.write(item.url, contents, item.borders),
-                item.source,
+            const asset = await writer.write(item.url, contents, item.borders);
+            for (const groupedNode of item.nodes) {
+                completeAsset(
+                    groupedNode,
+                    item.renderFrame
+                        ? { ...asset, renderFrame: overflowingRenderFrame(groupedNode) ?? item.renderFrame }
+                        : asset,
+                    item.source,
+                );
+            }
+        }
+    };
+
+    const processRawImages = async (items: RawImageAssetRequest[]) => {
+        if (!items.length) return;
+        const groups = new Map<string, { node: FigmaNode; nodes: FigmaNode[]; imageRef: string }>();
+        for (const item of items) {
+            const key = `${item.node.name.normalize('NFKC').toLocaleLowerCase('en-US')}\0${item.imageRef}`;
+            const group = groups.get(key) ?? { node: item.node, nodes: [], imageRef: item.imageRef };
+            group.nodes.push(item.node);
+            groups.set(key, group);
+        }
+
+        let imageFillUrlsPromise: Promise<Record<string, string | null>> | undefined;
+        const downloads = new Map<string, Promise<Buffer>>();
+        for (const group of groups.values()) {
+            if (activeController?.signal.aborted) throw new CancelledError();
+            let contents: Buffer | null = null;
+            let extension: RasterImageExtension | undefined;
+            let source: 'cache' | 'figma' = 'cache';
+            if (!importSettings.refreshAssets) {
+                for (const candidate of RASTER_IMAGE_EXTENSIONS) {
+                    contents = await cache.read({
+                        fileKey: session.fileKey,
+                        nodeId: `image-ref:${group.imageRef}`,
+                        format: candidate,
+                        scale: 1,
+                        variant: 'source-image-v1',
+                    });
+                    if (contents) {
+                        extension = candidate;
+                        break;
+                    }
+                }
+            }
+            if (!contents) {
+                if (!imageFillUrlsPromise) {
+                    imageFillUrlsPromise = getApi().then((api) => api.getImageFillUrls(session.fileKey));
+                }
+                const imageFillUrls = await imageFillUrlsPromise;
+                const remoteUrl = imageFillUrls[group.imageRef];
+                if (!remoteUrl) {
+                    throw new Error(`Figma 未能提供隐藏图片填充：${group.node.name}`);
+                }
+                let task = downloads.get(remoteUrl);
+                if (!task) {
+                    task = getApi().then((api) => api.download(remoteUrl));
+                    downloads.set(remoteUrl, task);
+                }
+                contents = await task;
+                source = 'figma';
+                extension = detectImageExtension(contents);
+                await cache.write({
+                    fileKey: session.fileKey,
+                    nodeId: `image-ref:${group.imageRef}`,
+                    format: extension,
+                    scale: 1,
+                    variant: 'source-image-v1',
+                }, contents);
+            }
+            extension ??= detectImageExtension(contents);
+            const url = writer.buildUrl(
+                group.node.name,
+                `${session.fileKey}:image-ref:${group.imageRef}`,
+                extension,
+                1,
             );
+            const asset = await writer.write(url, contents);
+            for (const node of group.nodes) completeAsset(node, asset, source);
         }
     };
 
     await processTiled(requests.tiled);
     await processRemote(requests.png);
+    // Run after whole-node renders so a correct visibility-independent source
+    // image wins if both paths share the same legacy asset filename.
+    await processRawImages(requests.rawImages);
 
     const gradientAssets = new Map<string, SpriteAssetSpec>();
     for (const node of requests.gradients) {
@@ -1048,6 +1178,7 @@ export function makeSpec(
     assets: Map<string, SpriteAssetSpec>,
     fonts: Map<string, string>,
     isRoot = false,
+    parentWorldRotation = 0,
 ): SceneNodeSpec | null {
     const decision = decisionForNode(node, decisions);
     if (decision.action === 'ignore') {
@@ -1070,6 +1201,7 @@ export function makeSpec(
     const spriteAsset = assets.get(spriteSourceId);
     const absorbedDirectIds = new Set(fold ? [fold.sourceNodeId] : []);
     const fullFold = fold?.kind === 'single-image' || fold?.kind === 'single-text';
+    const worldRotation = parentWorldRotation + node.rotation;
     return {
         figmaId: node.id,
         name: decision.name ?? node.name,
@@ -1081,6 +1213,7 @@ export function makeSpec(
         intrinsicSize: node.size,
         isRoot,
         rotation: node.rotation,
+        worldRotation,
         opacity: foldSource && fullFold
             ? node.opacity * foldSource.opacity
             : node.opacity,
@@ -1134,6 +1267,7 @@ export function makeSpec(
                     assets,
                     fonts,
                     false,
+                    worldRotation,
                 ))
                 .filter((child): child is SceneNodeSpec => child !== null),
     };
@@ -1959,12 +2093,19 @@ export const methods: Record<string, (...args: any[]) => any> = {
     },
 
     async getPreview(nodeId: string) {
-        if (!activeDocument?.nodeById.has(nodeId)) {
+        const node = activeDocument?.nodeById.get(nodeId);
+        if (!activeDocument || !node) {
             throw new Error('预览节点不存在。');
         }
         beginOperation();
         try {
-            const urls = await (await client()).getImageUrls(activeDocument.fileKey, [nodeId], 'png', 1);
+            const urls = await (await client()).getImageUrls(
+                activeDocument.fileKey,
+                [nodeId],
+                'png',
+                1,
+                !overflowingRenderFrame(node),
+            );
             if (!urls[nodeId]) {
                 throw new Error('无法生成节点预览。');
             }

@@ -8,6 +8,7 @@ const {
     inferCocosLayoutMode,
     inferKind,
     hasManualExport,
+    plainImageSourceRef,
     hasTiledImageFill,
     isNamedSliceGroup,
     isPatchCandidate,
@@ -17,6 +18,34 @@ const {
     shouldRenderMessySubtree,
     tiledPaintSource,
 } = require('../dist/figma/analyzer');
+
+test('uses original IMAGE paint for plain hidden image nodes and equal-size wrappers', () => {
+    const image = node({
+        id: 'hidden-image:leaf',
+        name: 'img_hidden',
+        type: 'RECTANGLE',
+        visible: true,
+        fills: [{ type: 'IMAGE', imageRef: 'raw-image-ref', scaleMode: 'FILL' }],
+        absoluteBoundingBox: { x: 10, y: 20, width: 54, height: 48 },
+    });
+    const wrapper = node({
+        id: 'hidden-image:wrapper',
+        name: 'img_hidden',
+        type: 'INSTANCE',
+        visible: false,
+        fills: [{ type: 'SOLID', visible: false }],
+        absoluteBoundingBox: { x: 10, y: 20, width: 54, height: 48 },
+        children: [image],
+    });
+
+    assert.equal(plainImageSourceRef(image), 'raw-image-ref');
+    assert.equal(plainImageSourceRef(wrapper), 'raw-image-ref');
+    assert.equal(plainImageSourceRef(node({
+        ...image,
+        id: 'hidden-image:effect',
+        effects: [{ type: 'DROP_SHADOW', visible: true }],
+    })), undefined);
+});
 const { parseNode } = require('../dist/figma/parser');
 const { analyzeSliceGrid } = require('../dist/figma/slicing');
 

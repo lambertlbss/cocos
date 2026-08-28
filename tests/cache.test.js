@@ -19,8 +19,10 @@ test('stores downloaded assets under hashed keys without leaking identifiers', a
             scale: 2,
         };
         const target = cache.pathFor(key);
+        const visualTarget = cache.pathFor({ ...key, variant: 'visual-overflow-v1' });
         assert.equal(target.includes(key.fileKey), false);
         assert.equal(target.includes(key.nodeId), false);
+        assert.notEqual(visualTarget, target);
         await cache.write(key, Buffer.from('asset-bytes'));
         assert.deepEqual(await cache.read(key), Buffer.from('asset-bytes'));
     } finally {

@@ -6,6 +6,7 @@ const {
     clampImageScale,
     imageFillPath,
     imageFillUrlsFromResponse,
+    renderedImagePath,
 } = require('../dist/figma/client');
 
 test('builds the Figma original image-fill endpoint instead of the node render endpoint', () => {
@@ -19,6 +20,25 @@ test('uses the same bounded raster scale for tile keys and Figma render requests
     assert.equal(clampImageScale(0.1), 0.25);
     assert.equal(clampImageScale(1.5), 1.5);
     assert.equal(clampImageScale(8), 4);
+});
+
+test('selects geometric or visual Figma image bounds explicitly', () => {
+    const geometric = new URL(`https://api.figma.com${renderedImagePath(
+        'file/key',
+        ['433:7481'],
+        'png',
+        1,
+    )}`);
+    const visual = new URL(`https://api.figma.com${renderedImagePath(
+        'file/key',
+        ['433:7481'],
+        'png',
+        1,
+        false,
+    )}`);
+
+    assert.equal(geometric.searchParams.get('use_absolute_bounds'), 'true');
+    assert.equal(visual.searchParams.get('use_absolute_bounds'), 'false');
 });
 
 test('accepts the documented image-fill response envelope and a direct compatibility shape', () => {

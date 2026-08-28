@@ -62,6 +62,24 @@ test('guards missing bounds and sorts gradient stops', () => {
     assert.deepEqual(node.fills[0].gradientStops.map((stop) => stop.position), [0, 1]);
 });
 
+test('preserves Figma visual render bounds separately from geometric bounds', () => {
+    const node = parseNode({
+        id: '433:7481',
+        name: 'Outlined rectangle',
+        type: 'RECTANGLE',
+        absoluteBoundingBox: { x: 100, y: 200, width: 145.7827, height: 129.503 },
+        absoluteRenderBounds: { x: 98.82885, y: 198.829, width: 148.125, height: 131.845 },
+    });
+
+    assert.ok(node);
+    assert.deepEqual(node.absoluteRenderBounds, {
+        x: 98.82885,
+        y: 198.829,
+        width: 148.125,
+        height: 131.845,
+    });
+});
+
 test('converts Figma REST radians and transform matrices to Cocos degrees', () => {
     const node = parseNode({
         id: '231:46119',

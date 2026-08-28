@@ -10,7 +10,7 @@ const {
     semanticRoleForNode,
 } = require('../dist/figma/import-planner');
 const { parseNode } = require('../dist/figma/parser');
-const { makeSpec, subtreeHasExplicitOverride } = require('../dist/main');
+const { makeSpec, overflowingRenderFrame, subtreeHasExplicitOverride } = require('../dist/main');
 
 function node(value) {
     const parsed = parseNode({
@@ -24,6 +24,21 @@ function node(value) {
     assert.ok(parsed);
     return parsed;
 }
+
+test('uses render bounds only when visible pixels escape the geometric frame', () => {
+    const overflow = node({
+        absoluteBoundingBox: { x: 100, y: 200, width: 120, height: 80 },
+        absoluteRenderBounds: { x: 97, y: 196, width: 126, height: 88 },
+    });
+    const contained = node({
+        id: '1:2',
+        absoluteBoundingBox: { x: 100, y: 200, width: 120, height: 80 },
+        absoluteRenderBounds: { x: 102, y: 202, width: 116, height: 76 },
+    });
+
+    assert.deepEqual(overflowingRenderFrame(overflow), overflow.absoluteRenderBounds);
+    assert.equal(overflowingRenderFrame(contained), undefined);
+});
 
 function decisionsFor(roots, explicit = {}) {
     const result = new Map();

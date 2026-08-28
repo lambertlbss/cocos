@@ -162,6 +162,94 @@ test('writes and verifies SpriteFrame borders before reporting a sliced asset', 
     }
 });
 
+test('converts a newly imported Texture into a SpriteFrame and preserves tiled settings', async () => {
+    const url = 'db://assets/figma-importer/new-texture.png';
+    const textureInfo = {
+        uuid: 'image-uuid',
+        url,
+        importer: 'image',
+        type: 'cc.ImageAsset',
+        imported: true,
+        invalid: false,
+        subAssets: {
+            texture: {
+                uuid: 'texture-uuid',
+                url: `${url}/texture`,
+                importer: 'texture',
+                type: 'cc.Texture2D',
+                imported: true,
+                invalid: false,
+            },
+        },
+    };
+    const spriteFrame = {
+        uuid: 'sprite-frame-uuid',
+        url: `${url}/spriteFrame`,
+        importer: 'sprite-frame',
+        type: 'cc.SpriteFrame',
+        imported: true,
+        invalid: false,
+    };
+    const meta = {
+        uuid: textureInfo.uuid,
+        userData: { type: 'texture' },
+        subMetas: {
+            texture: {
+                importer: 'texture',
+                uuid: 'texture-uuid',
+                userData: {},
+            },
+        },
+    };
+    let reimported = false;
+    const calls = [];
+    const previousEditor = global.Editor;
+    global.Editor = {
+        Message: {
+            async request(channel, method, ...args) {
+                calls.push([channel, method, ...args]);
+                if (method === 'query-asset-info') {
+                    return reimported
+                        ? { ...textureInfo, subAssets: { ...textureInfo.subAssets, spriteFrame } }
+                        : textureInfo;
+                }
+                if (method === 'query-asset-meta') return meta;
+                if (method === 'reimport-asset') {
+                    reimported = true;
+                    meta.subMetas.spriteFrame ??= {
+                        importer: 'sprite-frame',
+                        uuid: spriteFrame.uuid,
+                        userData: {},
+                    };
+                }
+                return undefined;
+            },
+        },
+    };
+    try {
+        const asset = await new AssetWriter('figma-importer').write(
+            url,
+            Buffer.from('png'),
+            undefined,
+            true,
+        );
+
+        assert.equal(meta.userData.type, 'sprite-frame');
+        assert.equal(asset.uuid, spriteFrame.uuid);
+        assert.equal(asset.tiled, true);
+        assert.equal(meta.subMetas.spriteFrame.userData.trimType, 'none');
+        assert.equal(meta.subMetas.spriteFrame.userData.packable, false);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderLeft, 0);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderRight, 0);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderTop, 0);
+        assert.equal(meta.subMetas.spriteFrame.userData.borderBottom, 0);
+        assert.ok(calls.some(([, method]) => method === 'save-asset-meta'));
+        assert.ok(calls.some(([, method]) => method === 'reimport-asset'));
+    } finally {
+        global.Editor = previousEditor;
+    }
+});
+
 test('disables trimming and atlas packing for an existing tiled SpriteFrame', async () => {
     const url = 'db://assets/figma-importer/Ellipse 1__tile_deadbeef00.png';
     const info = {

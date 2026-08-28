@@ -97,6 +97,68 @@ export function hasTiledImageFill(node: Pick<FigmaNode, 'fills'>): boolean {
     return Boolean(tiledPaintSource(node));
 }
 
+const RAW_IMAGE_CONTAINER_TYPES = new Set([
+    'FRAME',
+    'GROUP',
+    'COMPONENT',
+    'INSTANCE',
+]);
+
+function hasVisibleStrokeOrEffect(node: FigmaNode): boolean {
+    return (node.strokeWeight > 0 && node.strokes.some((stroke) =>
+        stroke.visible !== false && (stroke.opacity ?? 1) > 0))
+        || node.effects.some((effect) => effect.visible !== false);
+}
+
+function framesMatch(left: FigmaNode, right: FigmaNode): boolean {
+    const a = left.absoluteBoundingBox;
+    const b = right.absoluteBoundingBox;
+    if (!a || !b) return false;
+    const epsilon = 0.5;
+    return Math.abs(a.x - b.x) <= epsilon
+        && Math.abs(a.y - b.y) <= epsilon
+        && Math.abs(a.width - b.width) <= epsilon
+        && Math.abs(a.height - b.height) <= epsilon;
+}
+
+/**
+ * Returns the original IMAGE paint for a visually plain image node/subtree.
+ * This is used for effectively-hidden layers because Figma's rendered-image
+ * endpoint produces a transparent PNG when any ancestor is hidden. Downloading
+ * the source IMAGE paint is visibility-independent and preserves its pixels.
+ */
+export function plainImageSourceRef(node: FigmaNode): string | undefined {
+    const visibleFills = node.fills.filter((fill) =>
+        fill.visible !== false && (fill.opacity ?? 1) > 0);
+    const noOwnVisual = visibleFills.length === 0 && !hasVisibleStrokeOrEffect(node);
+
+    if (node.type === 'RECTANGLE' && node.children.length === 0) {
+        if (visibleFills.length !== 1 || hasVisibleStrokeOrEffect(node)) return undefined;
+        const fill = visibleFills[0];
+        const mode = fill.scaleMode?.toUpperCase() ?? 'FILL';
+        const radii = node.rectangleCornerRadii
+            ?? [node.cornerRadius ?? 0, node.cornerRadius ?? 0, node.cornerRadius ?? 0, node.cornerRadius ?? 0];
+        return fill.type === 'IMAGE'
+            && Boolean(fill.imageRef)
+            && ['FILL', 'FIT'].includes(mode)
+            && (fill.opacity ?? 1) >= 0.999
+            && Math.abs(fill.rotation ?? 0) <= 1e-6
+            && (!fill.blendMode || ['NORMAL', 'PASS_THROUGH'].includes(fill.blendMode))
+            && radii.every((radius) => radius <= 1e-6)
+            ? fill.imageRef
+            : undefined;
+    }
+
+    if (!RAW_IMAGE_CONTAINER_TYPES.has(node.type)
+        || node.children.length !== 1
+        || !noOwnVisual
+        || node.opacity < 0.999) {
+        return undefined;
+    }
+    const child = node.children[0];
+    return framesMatch(node, child) ? plainImageSourceRef(child) : undefined;
+}
+
 /**
  * A native tiled Sprite represents exactly one paint. Layers with additional
  * visuals or descendants must stay on the whole-node raster path.

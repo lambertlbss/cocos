@@ -43,6 +43,7 @@ interface SceneImportResult {
 const BACKGROUND_NODE_NAME = '__FigmaBackground';
 const TILED_MASK_NODE_NAME = '__FigmaTiledMask';
 const TILED_SPRITE_NODE_NAME = '__FigmaTiledSprite';
+const OVERFLOW_SPRITE_NODE_NAME = '__FigmaOverflowVisual';
 const RASTER_VECTOR_TYPES = new Set([
     'VECTOR',
     'BOOLEAN_OPERATION',
@@ -232,6 +233,7 @@ function isGeneratedHelperNode(child: any, parent: any, cc: any): boolean {
     if (child.name === BACKGROUND_NODE_NAME
         || child.name === TILED_MASK_NODE_NAME
         || child.name === TILED_SPRITE_NODE_NAME
+        || child.name === OVERFLOW_SPRITE_NODE_NAME
         || child.name === '__FigmaContent') {
         return true;
     }
@@ -481,7 +483,7 @@ function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
     const desired = new Set<any>();
     const clipsChildren = clipsGeneratedChildren(spec);
     if (spec.action === 'render' || spec.sprite) {
-        if (!usesTiledSpriteHelper(spec)) {
+        if (!usesTiledSpriteHelper(spec) && !usesOverflowSpriteHelper(spec)) {
             desired.add(cc.Sprite);
         }
     } else if (spec.kind === 'richText') {
@@ -612,6 +614,13 @@ function removeGeneratedTiledNodes(node: any, guard?: PrefabOwnershipGuard): voi
     const tiledSprite = node.getChildByName(TILED_SPRITE_NODE_NAME);
     if (tiledSprite) {
         destroyGeneratedTiledSprite(tiledSprite, node, guard);
+    }
+}
+
+function removeGeneratedOverflowVisual(node: any, guard?: PrefabOwnershipGuard): void {
+    const helper = node.getChildByName(OVERFLOW_SPRITE_NODE_NAME);
+    if (helper) {
+        destroyOwnedHelperSubtree(helper, node, guard);
     }
 }
 
@@ -921,15 +930,21 @@ function loadAsset(assetManager: any, uuid: string): Promise<any> {
     });
 }
 
-async function configureSprite(node: any, spec: SceneNodeSpec, scale: number, cc: any): Promise<void> {
+async function configureSprite(
+    node: any,
+    spec: SceneNodeSpec,
+    scale: number,
+    cc: any,
+    targetFrame: { width: number; height: number } = spec.frame,
+): Promise<void> {
     if (!spec.sprite) {
         return;
     }
     const { Sprite, UITransform, assetManager } = cc;
     const sprite = node.getComponent(Sprite) ?? node.addComponent(Sprite);
     const transform = node.getComponent(UITransform);
-    const targetWidth = Math.max(0, spec.frame.width * scale);
-    const targetHeight = Math.max(0, spec.frame.height * scale);
+    const targetWidth = Math.max(0, targetFrame.width * scale);
+    const targetHeight = Math.max(0, targetFrame.height * scale);
 
     // Keep assignment deterministic: a new Sprite may default to TRIMMED and
     // immediately rewrite UITransform when its SpriteFrame is assigned.
@@ -990,6 +1005,68 @@ function nativeTileScale(spec: SceneNodeSpec): number {
 function usesTiledSpriteHelper(spec: SceneNodeSpec): boolean {
     return Boolean(spec.sprite?.tiled)
         && (requiresTiledMask(spec) || Math.abs(nativeTileScale(spec) - 1) > 1e-6);
+}
+
+function usesOverflowSpriteHelper(spec: SceneNodeSpec): boolean {
+    return Boolean(spec.sprite?.renderFrame)
+        && !spec.sprite?.sliced
+        && !spec.sprite?.tiled;
+}
+
+async function configureOverflowSpriteHelper(
+    node: any,
+    spec: SceneNodeSpec,
+    scale: number,
+    cc: any,
+    guard?: PrefabOwnershipGuard,
+): Promise<void> {
+    const renderFrame = spec.sprite?.renderFrame;
+    if (!renderFrame) {
+        throw new Error(`超边界 PNG 节点“${spec.name}”缺少渲染边界。`);
+    }
+    let helper = node.getChildByName(OVERFLOW_SPRITE_NODE_NAME);
+    if (guard && helper) {
+        assertOwnedHelperSubtree(helper, guard);
+    }
+    if (!helper) {
+        helper = new cc.Node(OVERFLOW_SPRITE_NODE_NAME);
+        node.addChild(helper);
+    }
+    helper.name = OVERFLOW_SPRITE_NODE_NAME;
+    helper.layer = node.layer;
+    helper.active = true;
+
+    const transform = helper.getComponent(cc.UITransform)
+        ?? helper.addComponent(cc.UITransform);
+    transform.setAnchorPoint(0.5, 0.5);
+    transform.setContentSize(
+        Math.max(0, renderFrame.width * scale),
+        Math.max(0, renderFrame.height * scale),
+    );
+    await configureSprite(helper, spec, scale, cc, renderFrame);
+
+    const geometryCenterX = spec.frame.x + spec.frame.width / 2;
+    const geometryCenterY = spec.frame.y + spec.frame.height / 2;
+    const renderCenterX = renderFrame.x + renderFrame.width / 2;
+    const renderCenterY = renderFrame.y + renderFrame.height / 2;
+    // Figma page Y points downward while Cocos UI Y points upward.
+    const worldDeltaX = (renderCenterX - geometryCenterX) * scale;
+    const worldDeltaY = -(renderCenterY - geometryCenterY) * scale;
+    const worldRotation = Number.isFinite(spec.worldRotation)
+        ? Number(spec.worldRotation)
+        : spec.rotation;
+    const radians = worldRotation * Math.PI / 180;
+    const cosine = Math.cos(radians);
+    const sine = Math.sin(radians);
+    // The exported PNG is already rasterized in Figma page axes. Counteract
+    // the logical shell's accumulated rotation and express the visual-center
+    // offset back in that shell's local coordinate system.
+    const localX = cosine * worldDeltaX + sine * worldDeltaY;
+    const localY = -sine * worldDeltaX + cosine * worldDeltaY;
+    helper.setPosition(new cc.Vec3(localX, localY, 0));
+    helper.setRotationFromEuler(0, 0, -worldRotation);
+    helper.setScale(new cc.Vec3(1, 1, 1));
+    helper.setSiblingIndex(0);
 }
 
 async function configureTiledSpriteHelper(
@@ -1873,8 +1950,12 @@ export const methods = {
                 }
                 removeGeneratedBackground(node, prefabOwnershipGuard);
                 const tiledSpriteHelper = usesTiledSpriteHelper(spec);
+                const overflowSpriteHelper = usesOverflowSpriteHelper(spec);
                 if (!tiledSpriteHelper) {
                     removeGeneratedTiledNodes(node, prefabOwnershipGuard);
+                }
+                if (!overflowSpriteHelper) {
+                    removeGeneratedOverflowVisual(node, prefabOwnershipGuard);
                 }
                 configureGeometry(node, spec, payload.scale, cc);
                 const clipsChildren = clipsGeneratedChildren(spec);
@@ -1884,6 +1965,14 @@ export const methods = {
                     }
                     if (tiledSpriteHelper) {
                         await configureTiledSpriteHelper(
+                            node,
+                            spec,
+                            payload.scale,
+                            cc,
+                            prefabOwnershipGuard,
+                        );
+                    } else if (overflowSpriteHelper) {
+                        await configureOverflowSpriteHelper(
                             node,
                             spec,
                             payload.scale,

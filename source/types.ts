@@ -255,6 +255,12 @@ export interface SpriteAssetSpec {
     tiled?: boolean;
     /** Native tile size multiplier after the SpriteFrame's untrimmed pixel size. */
     tileScale?: number;
+    /**
+     * Figma page-space pixels rendered outside the node's geometric frame.
+     * The owning Cocos node keeps its original geometry; Scene creates an
+     * isolated visual helper for this expanded raster canvas.
+     */
+    renderFrame?: Rect;
 }
 
 export interface SceneNodeSpec {
@@ -270,6 +276,8 @@ export interface SceneNodeSpec {
     /** 导入根不使用相对页面变换，固定放在目标画布中心。 */
     isRoot?: boolean;
     rotation: number;
+    /** 当前节点叠加全部 Figma 祖先旋转后的页面旋转角。 */
+    worldRotation?: number;
     opacity: number;
     visible: boolean;
     clipsContent: boolean;

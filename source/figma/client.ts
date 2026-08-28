@@ -17,6 +17,24 @@ export function clampImageScale(scale: number): number {
     return Math.max(0.25, Math.min(4, scale));
 }
 
+export function renderedImagePath(
+    fileKey: string,
+    nodeIds: string[],
+    format: 'png' | 'svg',
+    scale: number,
+    useAbsoluteBounds = true,
+): string {
+    const query = new URLSearchParams({
+        ids: nodeIds.join(','),
+        format,
+        use_absolute_bounds: String(useAbsoluteBounds),
+    });
+    if (format === 'png') {
+        query.set('scale', String(clampImageScale(scale)));
+    }
+    return `/v1/images/${encodeURIComponent(fileKey)}?${query.toString()}`;
+}
+
 interface ImageFillResponse {
     images?: Record<string, string | null>;
     meta?: { images?: Record<string, string | null> };
@@ -199,20 +217,13 @@ export class FigmaClient {
         nodeIds: string[],
         format: 'png' | 'svg',
         scale: number,
+        useAbsoluteBounds = true,
     ): Promise<Record<string, string | null>> {
         const result: Record<string, string | null> = {};
         for (let index = 0; index < nodeIds.length; index += 100) {
             const batch = nodeIds.slice(index, index + 100);
-            const query = new URLSearchParams({
-                ids: batch.join(','),
-                format,
-                use_absolute_bounds: 'true',
-            });
-            if (format === 'png') {
-                query.set('scale', String(clampImageScale(scale)));
-            }
             const payload = await this.json<{ images?: Record<string, string | null>; err?: string }>(
-                `/v1/images/${encodeURIComponent(fileKey)}?${query.toString()}`,
+                renderedImagePath(fileKey, batch, format, scale, useAbsoluteBounds),
             );
             Object.assign(result, payload.images ?? {});
         }

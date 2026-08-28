@@ -23,6 +23,7 @@ interface AssetInfo {
 
 interface AssetMeta {
     uuid: string;
+    userData: Record<string, unknown>;
     subMetas: Record<string, {
         importer: string;
         uuid: string;
@@ -118,19 +119,50 @@ async function queryAsset(value: string): Promise<AssetInfo | null> {
     ) as AssetInfo | null;
 }
 
-async function waitForAsset(url: string): Promise<AssetInfo> {
+async function waitForAsset(url: string, requireSpriteFrame = true): Promise<AssetInfo> {
     const started = Date.now();
+    let lastInfo: AssetInfo | null = null;
     while (Date.now() - started < 30_000) {
         const info = await queryAsset(url);
+        lastInfo = info;
         if (info?.invalid) {
             throw new Error(`Cocos 资源导入失败：${url}`);
         }
-        if (info?.imported && findSpriteFrame(info)) {
+        if (info?.imported && (!requireSpriteFrame || findSpriteFrame(info))) {
             return info;
         }
         await new Promise((resolve) => setTimeout(resolve, 120));
     }
-    throw new Error(`等待 Cocos 资源导入超时：${url}`);
+    if (lastInfo?.imported && requireSpriteFrame) {
+        throw new Error(`Cocos 已导入图片但未能生成 SpriteFrame：${url}`);
+    }
+    throw new Error(`等待 Cocos 图片资源导入超时：${url}`);
+}
+
+async function ensureSpriteFrame(url: string, info: AssetInfo): Promise<AssetInfo> {
+    if (findSpriteFrame(info)) {
+        return info;
+    }
+    const meta = await Editor.Message.request(
+        'asset-db',
+        'query-asset-meta',
+        info.uuid,
+    ) as AssetMeta | null;
+    if (!meta) {
+        throw new Error(`无法读取 Cocos 图片资源 Meta：${url}`);
+    }
+    meta.userData = meta.userData ?? {};
+    if (meta.userData.type !== 'sprite-frame') {
+        meta.userData.type = 'sprite-frame';
+        await Editor.Message.request(
+            'asset-db',
+            'save-asset-meta',
+            info.uuid,
+            JSON.stringify(meta, null, 2),
+        );
+    }
+    await Editor.Message.request('asset-db', 'reimport-asset', info.uuid);
+    return waitForAsset(url);
 }
 
 async function ensureFolder(url: string): Promise<void> {
@@ -210,7 +242,8 @@ export class AssetWriter {
         } else {
             await Editor.Message.request('asset-db', 'create-asset', url, data, { overwrite: true });
         }
-        let info = await waitForAsset(url);
+        let info = await waitForAsset(url, false);
+        info = await ensureSpriteFrame(url, info);
         const sliced = !tiled && Boolean(borders && Object.values(borders).some((value) => value > 0));
         let meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
         if (meta && await this.applySpriteMeta(info, meta, sliced ? borders : undefined, tiled)) {

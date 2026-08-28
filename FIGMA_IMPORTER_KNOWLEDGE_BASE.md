@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.40`
+> 当前插件版本：`1.0.43`
 > 当前文档状态：持续维护  
 > 最近审计：2026-08-27
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -597,6 +597,12 @@ npm test
 
 `1.0.40` 代码级回归（2026-08-27）：普通 Label 的 Content Size 高度无论 Figma 原框是否小于字号，都会在基础高度上下各增加一个 Cocos 实际描边宽度；基础高度仍取 `max(FigmaHeight, fontSize)`。中心锚点和位置保持不变，描边框向四周对称扩张。TypeScript 构建、分发门禁及 Scene 定向测试 `64/64` 通过；完整 `npm test` 为 `185/186`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
 
+`1.0.41` 代码级回归（2026-08-28）：当 `absoluteRenderBounds` 确实超出 `absoluteBoundingBox` 时，节点 PNG 改用 Figma 视觉边界导出；Cocos 原节点继续保留原尺寸、位置、层级和旋转，仅在内部创建反向抵消累计旋转的 `__FigmaOverflowVisual` Sprite 承载扩展画布。普通图片、原图填充、本地资源、三/九宫和 Tiled 仍走原有几何边界路径；视觉边界使用独立缓存变体，不污染旧缓存。TypeScript 构建、分发门禁及定向测试 `92/92` 通过；完整测试 `190/191`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异，真实 Creator 3.8.7 视觉仍需实机验收。
+
+`1.0.42` 代码级回归（2026-08-28）：修复 Creator 3.8.7 将插件新写入的图片按 `Texture` 导入时，插件因一直等待不存在的 SpriteFrame 而误报 30 秒超时。资源写入器现在先确认基础图片导入完成，再自动把 Meta 类型切换为 `sprite-frame` 并重新导入；随后继续应用原三/九宫或 Tiled 元数据。Tiled 仍保持不裁剪、不进图集、边界清零和 `Sprite.Type.TILED`，不改变其尺寸与显示路径。构建、分发门禁及资源/Scene 定向测试 `74/74` 通过；完整测试 `191/192`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
+`1.0.43` 代码级回归（2026-08-28）：有效隐藏的纯 IMAGE 填充节点不再交给 Figma 节点渲染接口，因为隐藏祖先会让该接口返回透明 PNG；插件改为根据 `imageRef` 下载原图。仅无描边、无特效、无圆角、单个可见 IMAGE 填充的 Rectangle，以及与其等大的无视觉单层包装节点进入该路径，避免改变复杂裁剪、效果和布局语义。原图使用独立缓存键与版本，旧透明缓存不会继续命中。构建、分发门禁及定向测试 `123/123` 通过；完整测试 `192/193`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
 ## 14. 发布与版本策略
 
 1. 修改 `source`、`static`、脚本或测试；
@@ -635,8 +641,10 @@ npm test
 | 节点覆盖按设计文件持久化 | RichText、忽略占位和项目业务类型无法完全由 Figma 自动推断 | 只保存用户显式修改，并按 `fileKey + nodeId` 隔离和恢复；用户覆盖优先于自动规划 |
 | Figma 手动 Export 作为显式资源边界 | 设计者已明确声明节点应整体输出，继续拆分会违背设计语义 | 非 TEXT 节点默认 PNG 整层，隐藏节点同样准备资源但导入为 Inactive；根节点和显式 ScrollView 也生效，格式、后缀和尺寸约束不改变插件 PNG/倍率策略 |
 | 隐藏状态与导入策略分离 | Figma 隐藏只表达初始运行状态，不代表节点、资源或子树可以丢弃 | 隐藏层继续走文字、图片、矢量、Export、三/九宫和本地资源统一逻辑，生成节点写入 `active=false`；自动折叠和同名母资源提升不得吞掉独立隐藏边界 |
+| 隐藏纯 IMAGE 直接下载原图 | Figma 节点渲染接口在节点自身或祖先隐藏时会返回透明 PNG，即使内部 IMAGE 填充本身可见 | 仅对视觉等价的纯 IMAGE Rectangle/等大单层包装按 `imageRef` 下载原图；复杂效果、描边、圆角、裁剪与多子层继续走原渲染路径 |
 | 有效三/九宫识别即默认启用 | 只看 Rectangle 数量会把无效几何送入切片执行链；按距离聚类又会吞掉 1/2 px 薄中心带 | 按三段/九格拓扑验证连续边界；只有几何成功才令 `patchCandidate=true` 并自动写入 border、设置 `Sprite.Type.SLICED`，命名匹配但几何无效只做 PNG 整层 |
 | 普通 Sprite 原生尺寸优先使用 TRIMMED | 所有图片无条件写成 `CUSTOM` 会丢失 Cocos 对裁剪后原生尺寸的语义，但用裁剪矩形判断缩放又会把透明像素误判为尺寸变化 | 普通 SIMPLE Sprite 先应用 `TRIMMED`，以 SpriteFrame `originalSize` 判断是否缩放；未缩放保留 TRIMMED，等比缩放按裁剪尺寸同比例转 CUSTOM，非等比缩放使用目标尺寸；SLICED/TILED 固定 CUSTOM |
+| 超边界视觉使用隔离 Sprite | `use_absolute_bounds=true` 会按几何框裁掉外描边/阴影，直接扩大原节点又会破坏已有坐标、布局和运行时引用 | 仅当 `absoluteRenderBounds` 超出几何框超过 `0.5 px` 时使用视觉边界 PNG；原节点几何不变，内部 `__FigmaOverflowVisual` 负责扩展尺寸、中心偏移和累计旋转抵消；切片、平铺、本地资源保持旧路径 |
 | 仓库下载后可直接拖入 Cocos | 插件使用者不应安装 Node.js 或理解 TypeScript 构建流程；缺失 `dist` 会让主进程和 `openPanel` 连锁失败 | `dist` 纳入版本控制；构建前安全清空旧产物，分发门禁验证全部 Cocos 入口和运行时模块，`node_modules` 继续不分发 |
 | 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
@@ -648,6 +656,27 @@ npm test
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-28 · `1.0.43`
+
+- 修复隐藏 `huodong_img_gou_01` 等纯图片节点导入透明：Figma 对隐藏节点或隐藏祖先调用节点 PNG 渲染时会直接返回透明图，插件现在识别视觉等价的纯 IMAGE 填充并按 `imageRef` 下载原始图片。
+- 支持无视觉、与图片等大的单层 Frame/Group/Component/Instance 包装；有描边、特效、圆角、多子层或复杂缩放模式的节点仍走原渲染流程，避免改变既有坐标体系和复杂视觉语义。
+- 新路径使用 `source-image-v1` 独立缓存变体，并在普通整层渲染后写入资源，因此不会继续复用旧透明缓存，也能修正旧版同名透明文件。
+- 新增隐藏 Rectangle 与等大隐藏包装节点的分析回归；构建、分发门禁及定向测试 `123/123` 通过，完整测试 `192/193`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。现有项目重启插件后重新导入即可生效，无需在 Figma 中手动显示图层。
+
+### 2026-08-28 · `1.0.42`
+
+- 修复 `等待 Cocos 资源导入超时` 假超时：图片文件和 ImageAsset 已成功导入、但项目默认类型为 `Texture` 时，插件不再等待一个永远不会出现的 SpriteFrame。
+- 写入流程拆分为“等待基础图片”与“等待 SpriteFrame”两个阶段；缺少 SpriteFrame 时自动保存 `userData.type=sprite-frame`、触发 AssetDB 重新导入，再继续绑定资源。
+- 转换完成后仍执行既有 Tiled/切片 Meta：Tiled 保持 `trimType=none`、`packable=false`、四边 border 为 `0`，Scene 端仍使用 `Sprite.Type.TILED`。超时错误现在能区分图片本体未完成和 SpriteFrame 未生成。
+- 新增从 Texture 自动转换并保留 Tiled 设置的回归；构建、分发门禁及资源/Scene 定向测试 `74/74` 通过，完整测试 `191/192`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。现有 `img_yushi_panelbg2__tile_4427ae0708.png` 无需手工删除，下次重新导入会自动修复其 Meta。
+
+### 2026-08-28 · `1.0.41`
+
+- 修复 Figma 外描边、投影等视觉内容超出 Frame 时被裁切：只有 `absoluteRenderBounds` 真正越过 `absoluteBoundingBox` 的整层 PNG 才调用 `use_absolute_bounds=false`，其余资源仍维持原导出方式。
+- Cocos 逻辑节点的 Content Size、位置、层级、锚点和旋转不变；扩展 PNG 放入自动管理的 `__FigmaOverflowVisual` 子节点，并抵消节点及祖先累计旋转，避免已在 Figma 页面坐标中栅格化的图片再次旋转。
+- 三/九宫、Tiled、原始 IMAGE/PATTERN 资源和本地同名资源不启用扩展画布；视觉边界缓存增加独立变体且旧缓存键保持不变。预览会与最终导出选择同一种边界语义。
+- 新增视觉边界判定、Figma 请求参数、Parser 数据保留、Scene 几何不变/辅助节点生成与重复导入清理回归；构建、分发门禁及定向测试 `92/92` 通过，完整测试 `190/191`，唯一失败为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。真实 Cocos Creator 3.8.7 中需重新导入目标 Frame，并检查外描边/阴影像素、层级裁剪与不同嵌套旋转节点。
 
 ### 2026-08-27 · `1.0.40`
 
@@ -932,4 +961,4 @@ npm test
 - 仓库已包含清理后生成的完整 `dist`，下载后可直接放入 Cocos；分发门禁阻止入口缺失、陈旧 JS、未随包分发的外部模块和再次忽略 `dist`。
 - Round-trip 底层实现仍保留，但 `1.0.38` 已暂时关闭面板入口；当前用户界面只暴露稳定的 Figma → Cocos 导入流程。
 - 不自动生成 Widget；自定义 Cocos 脚本/运行时组件、设计占位忽略和 Label/RichText 业务选择仍需要显式配置。
-- `1.0.40` 的文字框四向描边补偿、`1.0.39` 的 1/2 px 薄中心带三/九宫拓扑识别、`1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.36` 的有效切片识别即启用与 border 回读门禁、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证 Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。
+- `1.0.41` 的超边界外描边/阴影视觉 Sprite、`1.0.40` 的文字框四向描边补偿、`1.0.39` 的 1/2 px 薄中心带三/九宫拓扑识别、`1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.36` 的有效切片识别即启用与 border 回读门禁、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证超边界描边/阴影、Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。

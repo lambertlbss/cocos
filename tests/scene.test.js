@@ -329,6 +329,7 @@ function makeSpec(overrides = {}) {
         isRoot: overrides.isRoot,
         relativeTransform: overrides.relativeTransform,
         rotation: overrides.rotation ?? 0,
+        worldRotation: overrides.worldRotation,
         opacity: overrides.opacity ?? 1,
         visible: overrides.visible ?? true,
         clipsContent: overrides.clipsContent ?? false,
@@ -413,6 +414,15 @@ function fakeCocos() {
                         return;
                     }
                     const trimmed = request.uuid === 'trimmed-sprite-frame';
+                    if (request.uuid === 'overflow-sprite-frame') {
+                        callback(null, {
+                            width: 149,
+                            height: 132,
+                            rect: { width: 149, height: 132 },
+                            originalSize: { width: 149, height: 132 },
+                        });
+                        return;
+                    }
                     callback(null, {
                         width: 24,
                         height: 16,
@@ -1115,6 +1125,101 @@ test('switches a resized simple Sprite to CUSTOM while preserving the Figma size
     assert.equal(sprite.type, Sprite.Type.SIMPLE);
     assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
     assert.deepEqual(transform.contentSize, { width: 48, height: 32 });
+});
+
+test('renders visual overflow in a counter-rotated helper without changing logical geometry', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        frame: { x: 100, y: 200, width: 145.7827, height: 129.503 },
+        intrinsicSize: { width: 123, height: 78.523 },
+        rotation: 30,
+        worldRotation: 30,
+        sprite: {
+            uuid: 'overflow-sprite-frame',
+            url: 'db://assets/outlined-rectangle.png',
+            sliced: false,
+            renderFrame: { x: 98.82885, y: 198.829, width: 148.125, height: 131.845 },
+        },
+    }));
+    const imported = environment.canvas.children[0];
+    const transform = imported.getComponent(UITransform);
+    const helper = imported.getChildByName('__FigmaOverflowVisual');
+    const helperTransform = helper?.getComponent(UITransform);
+
+    assert.deepEqual(transform.contentSize, { width: 123, height: 78.523 });
+    assert.equal(imported.euler.z, 30);
+    assert.equal(imported.getComponent(Sprite), null);
+    assert.ok(helper);
+    assert.ok(helper.getComponent(Sprite));
+    assert.deepEqual(helperTransform.contentSize, { width: 148.125, height: 131.845 });
+    assert.equal(helper.euler.z, -30);
+    assert.ok(Math.abs(helper.position.x) < 0.001);
+    assert.ok(Math.abs(helper.position.y) < 0.001);
+});
+
+test('removes the visual-overflow helper when a later import no longer needs it', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        if (request === 'cc') {
+            return environment.cc;
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        const firstSpec = makeSpec({
+            figmaId: '433:7481',
+            action: 'render',
+            kind: 'sprite',
+            sprite: {
+                uuid: 'overflow-sprite-frame',
+                url: 'db://assets/outlined-rectangle.png',
+                sliced: false,
+                renderFrame: { x: -2, y: -3, width: 104, height: 86 },
+            },
+        });
+        const first = await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: firstSpec.frame,
+            scale: 1,
+            updateExisting: false,
+            existingMap: {},
+            centerInCanvas: true,
+            roots: [firstSpec],
+        });
+        const imported = environment.canvas.children[0];
+        assert.ok(imported.getChildByName('__FigmaOverflowVisual'));
+
+        const secondSpec = makeSpec({
+            figmaId: '433:7481',
+            action: 'render',
+            kind: 'sprite',
+            sprite: {
+                uuid: 'sprite-frame',
+                url: 'db://assets/plain-rectangle.png',
+                sliced: false,
+            },
+        });
+        await methods.importDocument({
+            packageName: 'figma-importer-cocos',
+            fileKey: 'file-key',
+            rootName: 'Test',
+            rootFrame: secondSpec.frame,
+            scale: 1,
+            updateExisting: true,
+            existingMap: first.nodeMap,
+            centerInCanvas: true,
+            roots: [secondSpec],
+        });
+
+        assert.equal(imported.getChildByName('__FigmaOverflowVisual'), null);
+        assert.ok(imported.getComponent(Sprite));
+    } finally {
+        Module._load = originalLoad;
+    }
 });
 
 test('preserves a non-uniform Figma resize as CUSTOM content size', async () => {
