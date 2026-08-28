@@ -119,6 +119,12 @@ interface SceneImportResult {
     temporaryRoot?: boolean;
     prefabUrl?: string;
     prefabSync?: PrefabSceneSyncCapture;
+    warnings?: string[];
+}
+
+interface AssetBuildResult {
+    assets: Map<string, SpriteAssetSpec>;
+    warnings: string[];
 }
 
 interface PrefabAssetInfo {
@@ -630,7 +636,7 @@ async function buildAssets(
     session: DocumentSession,
     decisions: Map<string, Decision>,
     importSettings: ImportSettings,
-): Promise<Map<string, SpriteAssetSpec>> {
+): Promise<AssetBuildResult> {
     const writer = new AssetWriter(importSettings.assetFolder);
     await writer.initialize();
     const cache = new LocalAssetCache(defaultCacheFolder());
@@ -670,6 +676,7 @@ async function buildAssets(
     await Promise.all(session.roots.map(promoteLocalParents));
     const requests = collectAssetRequests(session.roots, decisions);
     const assets = new Map<string, SpriteAssetSpec>();
+    const warnings = new Set<string>();
     const total = requests.png.length + requests.tiled.length
         + requests.rawImages.length + requests.gradients.length;
     let completed = 0;
@@ -926,7 +933,7 @@ async function buildAssets(
                 ? analyzeSliceGrid(node, importSettings.scale)
                 : null;
             if (decision.nineSlice && !sliceAnalysis) {
-                throw new Error(`三/九宫节点“${node.name}”已启用切片，但无法计算有效的连续切片边界。`);
+                warnings.add(`三/九宫节点“${node.name}”无法计算连续切片边界，已临时作为 PNG 整层导入`);
             }
             const borders = sliceAnalysis?.borders;
             // Sliced assets retain their exact geometric canvas because their
@@ -1004,6 +1011,9 @@ async function buildAssets(
                 await cache.write(item.key, contents);
             }
             const asset = await writer.write(item.url, contents, item.borders);
+            if (asset.sliceFallback) {
+                warnings.add(`三/九宫节点“${item.node.name}”切片设置失败，已临时作为 PNG 整层导入：${asset.sliceFallback}`);
+            }
             for (const groupedNode of item.nodes) {
                 completeAsset(
                     groupedNode,
@@ -1128,7 +1138,7 @@ async function buildAssets(
             message: `生成渐变 ${completed}/${total} · ${node.name}`,
         });
     }
-    return assets;
+    return { assets, warnings: [...warnings] };
 }
 
 async function resolveFonts(settings: ImportSettings): Promise<Map<string, string>> {
@@ -1858,7 +1868,8 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
     try {
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
         const decisions = decisionMap(request.overrides, activeDocument.tree);
-        const assets = await buildAssets(activeDocument, decisions, importSettings);
+        const builtAssets = await buildAssets(activeDocument, decisions, importSettings);
+        const { assets, warnings } = builtAssets;
         // buildAssets may promote a container to a local same-name resource.
         // Compile after that promotion so assets and SceneNodeSpec share the
         // exact same final plan.
@@ -1934,12 +1945,13 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             // runtime node UUIDs are session-only and must never be reused here.
             delete nodeMaps[activeDocument.fileKey];
             await Editor.Profile.setProject(packageJSON.name, 'nodeMaps', nodeMaps, 'project');
+            const finalResult = warnings.length ? { ...result, warnings } : result;
             emitProgress({
                 phase: 'done',
                 value: 1,
-                message: `完成：新建 ${result.created}，更新 ${result.updated}，已打开预制体 ${prefabUrl}`,
+                message: `完成：新建 ${result.created}，更新 ${result.updated}，已打开预制体 ${prefabUrl}${warnings.length ? `；${warnings.length} 个三/九宫已降级为 PNG 整层` : ''}`,
             });
-            return result;
+            return finalResult;
         }
 
         const nodeMaps = await getNodeMaps();
@@ -1966,12 +1978,13 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         if (importSettings.autoSave) {
             await Editor.Message.request('scene', 'save-scene');
         }
+        const finalResult = warnings.length ? { ...result, warnings } : result;
         emitProgress({
             phase: 'done',
             value: 1,
-            message: `完成：新建 ${result.created}，更新 ${result.updated}`,
+            message: `完成：新建 ${result.created}，更新 ${result.updated}${warnings.length ? `；${warnings.length} 个三/九宫已降级为 PNG 整层` : ''}`,
         });
-        return result;
+        return finalResult;
     } catch (error) {
         if (error instanceof CancelledError || activeController?.signal.aborted) {
             emitProgress({ phase: 'cancelled', value: 0, message: '已取消。' });

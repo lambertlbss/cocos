@@ -162,6 +162,123 @@ test('writes and verifies SpriteFrame borders before reporting a sliced asset', 
     }
 });
 
+test('falls back to a normal SpriteFrame when Cocos cannot persist sliced borders', async () => {
+    const url = 'db://assets/figma-importer/invalid_slice.png';
+    const info = {
+        uuid: 'fallback-image-uuid',
+        url,
+        importer: 'image',
+        type: 'cc.ImageAsset',
+        imported: true,
+        invalid: false,
+        subAssets: {
+            spriteFrame: {
+                uuid: 'fallback-sprite-frame-uuid',
+                url: `${url}/spriteFrame`,
+                importer: 'sprite-frame',
+                type: 'cc.SpriteFrame',
+                imported: true,
+                invalid: false,
+            },
+        },
+    };
+    const freshMeta = () => ({
+        uuid: info.uuid,
+        subMetas: {
+            spriteFrame: {
+                importer: 'sprite-frame',
+                uuid: 'fallback-sprite-frame-uuid',
+                userData: {
+                    trimType: 'auto',
+                    borderLeft: 0,
+                    borderRight: 0,
+                    borderTop: 0,
+                    borderBottom: 0,
+                },
+            },
+        },
+    });
+    const previousEditor = global.Editor;
+    global.Editor = {
+        Message: {
+            async request(_channel, method) {
+                if (method === 'query-asset-info') return info;
+                if (method === 'query-asset-meta') return freshMeta();
+                return undefined;
+            },
+        },
+    };
+    try {
+        const asset = await new AssetWriter('figma-importer').write(
+            url,
+            Buffer.from('png'),
+            { left: 10, right: 10, top: 6, bottom: 6 },
+        );
+
+        assert.equal(asset.uuid, 'fallback-sprite-frame-uuid');
+        assert.equal(asset.sliced, false);
+        assert.match(asset.sliceFallback, /未能写入或回读/);
+    } finally {
+        global.Editor = previousEditor;
+    }
+});
+
+test('keeps the imported SpriteFrame when Cocos throws while saving sliced borders', async () => {
+    const url = 'db://assets/figma-importer/rejected_slice.png';
+    const info = {
+        uuid: 'rejected-image-uuid',
+        url,
+        importer: 'image',
+        type: 'cc.ImageAsset',
+        imported: true,
+        invalid: false,
+        subAssets: {
+            spriteFrame: {
+                uuid: 'rejected-sprite-frame-uuid',
+                url: `${url}/spriteFrame`,
+                importer: 'sprite-frame',
+                type: 'cc.SpriteFrame',
+                imported: true,
+                invalid: false,
+            },
+        },
+    };
+    const meta = {
+        uuid: info.uuid,
+        subMetas: {
+            spriteFrame: {
+                importer: 'sprite-frame',
+                uuid: 'rejected-sprite-frame-uuid',
+                userData: {},
+            },
+        },
+    };
+    const previousEditor = global.Editor;
+    global.Editor = {
+        Message: {
+            async request(_channel, method) {
+                if (method === 'query-asset-info') return info;
+                if (method === 'query-asset-meta') return meta;
+                if (method === 'save-asset-meta') throw new Error('SpriteFrame Meta 被占用');
+                return undefined;
+            },
+        },
+    };
+    try {
+        const asset = await new AssetWriter('figma-importer').write(
+            url,
+            Buffer.from('png'),
+            { left: 8, right: 8, top: 4, bottom: 4 },
+        );
+
+        assert.equal(asset.uuid, 'rejected-sprite-frame-uuid');
+        assert.equal(asset.sliced, false);
+        assert.match(asset.sliceFallback, /Meta 被占用/);
+    } finally {
+        global.Editor = previousEditor;
+    }
+});
+
 test('converts a newly imported Texture into a SpriteFrame and preserves tiled settings', async () => {
     const url = 'db://assets/figma-importer/new-texture.png';
     const textureInfo = {

@@ -2,9 +2,9 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.43`
+> 当前插件版本：`1.0.44`
 > 当前文档状态：持续维护  
-> 最近审计：2026-08-27
+> 最近审计：2026-08-28
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
 
 ## 1. 文档目的
@@ -239,7 +239,7 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 - 图片填充、复杂效果、不支持的渐变/描边等情况走 PNG；
 - 可安全表达的 Auto Layout 才映射为 Cocos Layout；
 - 智能模式只在 Figma `overflowDirection` 为已知横向、纵向或双向滚动枚举时映射 ScrollView；`NONE`、未知值、节点名称或 `clipsContent` 不会改变组件类型，普通裁剪容器映射 Mask；
-- 三宫/九宫候选按子节点名和几何覆盖关系识别；一旦 `patchCandidate=true`，智能模式与主进程默认将 `nineSlice` 设为 `true`，写入 SpriteFrame border 并把 Sprite 设置为 `SLICED`。用户仍可手动关闭；边界计算或 Cocos 元数据回读失败时必须报错，不允许静默降级为 SIMPLE。
+- 三宫/九宫候选按子节点名和几何覆盖关系识别；一旦 `patchCandidate=true`，智能模式与主进程默认将 `nineSlice` 设为 `true`，写入 SpriteFrame border 并把 Sprite 设置为 `SLICED`。用户仍可手动关闭；如果导入时无法计算连续边界，或 Cocos 无法保存/回读 border，当前节点降级为 PNG 整层和 `Sprite.Type.SIMPLE`，整次 Prefab 导入继续进行，并在完成进度与面板提示中报告降级数量。只有 PNG 下载失败或 SpriteFrame 本体未生成时才阻断。
 
 面板“智能”预设会对矢量节点强制使用 `render`。面板文案中：
 
@@ -263,7 +263,7 @@ FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 
 Figma Export 中的 format（JPG/PNG/SVG/PDF）、suffix 和 constraint（SCALE/WIDTH/HEIGHT）只用于表明设计者人工设置过资源边界。整层资源始终走插件统一的 PNG 路径，下载与缓存继续使用 `ImportSettings.scale`；默认值为 `1`，不会读取或叠加 Figma Export 自带倍率、目标宽度或目标高度。
 
-三/九宫几何识别不再用固定距离阈值合并相邻段起点。三宫直接验证三段是否沿同一轴首尾连续且覆盖父节点；九宫先按每列/每行应各含 3 个单元的拓扑分组，再验证 3×3 每个格子唯一、同行同高、同列同宽及全部接缝连续。`2 px` 容差只用于吸收 Figma 浮点坐标误差和轻微接缝误差，不用于判定相邻切片是否属于同一行/列，因此中心伸缩带为 `1 px` 或 `2 px` 都不会被误合并。Rectangle 命名只决定 PNG 整层资源边界；只有几何分析成功才设置 `patchCandidate=true` 并自动启用 Cocos `SLICED`，命名匹配但几何无效时不再自动进入必然报错的切片执行链。
+三/九宫几何识别不再用固定距离阈值合并相邻段起点。三宫直接验证三段是否沿同一轴首尾连续且覆盖父节点；九宫先按每列/每行应各含 3 个单元的拓扑分组，再验证 3×3 每个格子唯一、同行同高、同列同宽及全部接缝连续。`2 px` 容差只用于吸收 Figma 浮点坐标误差和轻微接缝误差，不用于判定相邻切片是否属于同一行/列，因此中心伸缩带为 `1 px` 或 `2 px` 都不会被误合并。Rectangle 命名只决定 PNG 整层资源边界；只有几何分析成功才设置 `patchCandidate=true` 并自动启用 Cocos `SLICED`。旧配置或手动状态仍可能让无效节点带着 `nineSlice=true` 进入执行端，此时统一降级为整体 PNG，不再抛错终止导入。
 
 ### 6.3.1 旋转、尺寸与中心锚点坐标
 
@@ -324,7 +324,7 @@ Frame 链接的 Prefab 流程是当前最重要的特殊路径：
 | Scroll | `ScrollView → view(Mask) → content(Layout)` | 标准 Cocos 结构 |
 | Constraints | 不自动添加组件 | 保留绝对几何，Widget 由用户手动配置 |
 | 透明度 | `UIOpacity` | 与 Figma opacity 对应 |
-| 三宫/九宫 | `Sprite.Type.SLICED` | SpriteFrame 写入边界元数据 |
+| 三宫/九宫 | `Sprite.Type.SLICED` | SpriteFrame 写入边界元数据；计算或回读失败时降级为 PNG 整层 `SIMPLE` |
 
 ## 8. 资源、缓存与目录配置
 
@@ -603,6 +603,8 @@ npm test
 
 `1.0.43` 代码级回归（2026-08-28）：有效隐藏的纯 IMAGE 填充节点不再交给 Figma 节点渲染接口，因为隐藏祖先会让该接口返回透明 PNG；插件改为根据 `imageRef` 下载原图。仅无描边、无特效、无圆角、单个可见 IMAGE 填充的 Rectangle，以及与其等大的无视觉单层包装节点进入该路径，避免改变复杂裁剪、效果和布局语义。原图使用独立缓存键与版本，旧透明缓存不会继续命中。构建、分发门禁及定向测试 `123/123` 通过；完整测试 `192/193`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
 
+`1.0.44` 代码级回归（2026-08-28）：三/九宫连续边界计算失败不再中断导入，节点改用相同整层 PNG 并以 `Sprite.Type.SIMPLE` 创建；SpriteFrame border 保存、重新导入或回读失败时同样返回已生成的普通 SpriteFrame。降级原因随导入结果返回，完成进度与面板 Toast 显示降级数量。图片下载失败或 SpriteFrame 本体缺失仍保持阻断。TypeScript 构建、分发门禁及定向测试 `108/108` 通过；完整 `npm test` 为 `194/195`，唯一失败仍是未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
+
 ## 14. 发布与版本策略
 
 1. 修改 `source`、`static`、脚本或测试；
@@ -642,7 +644,7 @@ npm test
 | Figma 手动 Export 作为显式资源边界 | 设计者已明确声明节点应整体输出，继续拆分会违背设计语义 | 非 TEXT 节点默认 PNG 整层，隐藏节点同样准备资源但导入为 Inactive；根节点和显式 ScrollView 也生效，格式、后缀和尺寸约束不改变插件 PNG/倍率策略 |
 | 隐藏状态与导入策略分离 | Figma 隐藏只表达初始运行状态，不代表节点、资源或子树可以丢弃 | 隐藏层继续走文字、图片、矢量、Export、三/九宫和本地资源统一逻辑，生成节点写入 `active=false`；自动折叠和同名母资源提升不得吞掉独立隐藏边界 |
 | 隐藏纯 IMAGE 直接下载原图 | Figma 节点渲染接口在节点自身或祖先隐藏时会返回透明 PNG，即使内部 IMAGE 填充本身可见 | 仅对视觉等价的纯 IMAGE Rectangle/等大单层包装按 `imageRef` 下载原图；复杂效果、描边、圆角、裁剪与多子层继续走原渲染路径 |
-| 有效三/九宫识别即默认启用 | 只看 Rectangle 数量会把无效几何送入切片执行链；按距离聚类又会吞掉 1/2 px 薄中心带 | 按三段/九格拓扑验证连续边界；只有几何成功才令 `patchCandidate=true` 并自动写入 border、设置 `Sprite.Type.SLICED`，命名匹配但几何无效只做 PNG 整层 |
+| 有效三/九宫识别即默认启用，失败可降级 | 只看 Rectangle 数量会把无效几何送入切片执行链；边界失败若阻断会让一个可用整图拖垮整个 Prefab | 按三段/九格拓扑验证连续边界；成功时写入 border 并使用 `SLICED`，计算或 Cocos 元数据回读失败时保留整体 PNG、使用 `SIMPLE` 并报告警告，图片本体失败才阻断 |
 | 普通 Sprite 原生尺寸优先使用 TRIMMED | 所有图片无条件写成 `CUSTOM` 会丢失 Cocos 对裁剪后原生尺寸的语义，但用裁剪矩形判断缩放又会把透明像素误判为尺寸变化 | 普通 SIMPLE Sprite 先应用 `TRIMMED`，以 SpriteFrame `originalSize` 判断是否缩放；未缩放保留 TRIMMED，等比缩放按裁剪尺寸同比例转 CUSTOM，非等比缩放使用目标尺寸；SLICED/TILED 固定 CUSTOM |
 | 超边界视觉使用隔离 Sprite | `use_absolute_bounds=true` 会按几何框裁掉外描边/阴影，直接扩大原节点又会破坏已有坐标、布局和运行时引用 | 仅当 `absoluteRenderBounds` 超出几何框超过 `0.5 px` 时使用视觉边界 PNG；原节点几何不变，内部 `__FigmaOverflowVisual` 负责扩展尺寸、中心偏移和累计旋转抵消；切片、平铺、本地资源保持旧路径 |
 | 仓库下载后可直接拖入 Cocos | 插件使用者不应安装 Node.js 或理解 TypeScript 构建流程；缺失 `dist` 会让主进程和 `openPanel` 连锁失败 | `dist` 纳入版本控制；构建前安全清空旧产物，分发门禁验证全部 Cocos 入口和运行时模块，`node_modules` 继续不分发 |
@@ -656,6 +658,13 @@ npm test
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-28 · `1.0.44`
+
+- 移除三/九宫几何计算失败的阻断异常：即使旧持久化策略或手动选择让无效节点保持 `nineSlice=true`，仍会下载当前节点的整体 PNG、抑制设计子树，并以普通 `Sprite.Type.SIMPLE` 完成导入。
+- SpriteFrame border 保存、AssetDB 重新导入或回读校验失败时不再丢弃已成功生成的 PNG/SpriteFrame；资源返回 `sliced=false` 和降级原因，Scene 自动走普通 Sprite 路径。PNG 下载失败、基础图片导入失败或 SpriteFrame 根本不存在仍然报错。
+- 资源阶段按节点去重收集降级原因，导入结果携带 `warnings`；Prefab 和普通场景完成进度、面板 Toast 均显示临时降级数量，不把降级伪装成正常九宫成功。
+- 新增 Cocos 拒绝持久化 border 时仍返回普通 SpriteFrame 的回归；TypeScript 构建、分发门禁及定向测试 `108/108` 通过，完整测试 `194/195`，唯一失败仍为未修改的 Round-trip 冻结文件 Windows CRLF 原始字节哈希差异。
 
 ### 2026-08-28 · `1.0.43`
 
@@ -961,4 +970,4 @@ npm test
 - 仓库已包含清理后生成的完整 `dist`，下载后可直接放入 Cocos；分发门禁阻止入口缺失、陈旧 JS、未随包分发的外部模块和再次忽略 `dist`。
 - Round-trip 底层实现仍保留，但 `1.0.38` 已暂时关闭面板入口；当前用户界面只暴露稳定的 Figma → Cocos 导入流程。
 - 不自动生成 Widget；自定义 Cocos 脚本/运行时组件、设计占位忽略和 Label/RichText 业务选择仍需要显式配置。
-- `1.0.41` 的超边界外描边/阴影视觉 Sprite、`1.0.40` 的文字框四向描边补偿、`1.0.39` 的 1/2 px 薄中心带三/九宫拓扑识别、`1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.36` 的有效切片识别即启用与 border 回读门禁、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证超边界描边/阴影、Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。
+- `1.0.44` 的三/九宫失败整体 PNG 降级、`1.0.41` 的超边界外描边/阴影视觉 Sprite、`1.0.40` 的文字框四向描边补偿、`1.0.39` 的 1/2 px 薄中心带三/九宫拓扑识别、`1.0.37` 的 Sprite `TRIMMED`/`CUSTOM` 尺寸模式切换、`1.0.34` 的下载即用分发及 `1.0.33` 的隐藏节点统一导入均已进入自动门禁；仍需在真实 Cocos Creator 3.8.7 中重新导入验证三/九宫降级提示、超边界描边/阴影、Sprite Size Mode、三/九宫实际资源、隐藏父子节点显隐切换、连续重新导入、描边文字视觉、旋转视觉、Frame 改名/目录移动、目标 Prefab dirty 阻断和旧版无来源标记 Prefab 迁移。

@@ -835,10 +835,16 @@ async function importToScene(): Promise<void> {
     setBusy(true);
     updateProgress({ phase: 'assets', value: 0, message: '正在准备导入…' });
     try {
-        const result = await request<{ prefabUrl?: string }>('import-selection', { overrides, settings });
+        const result = await request<{ prefabUrl?: string; warnings?: string[] }>(
+            'import-selection',
+            { overrides, settings },
+        );
+        const fallbackNote = result?.warnings?.length
+            ? `；${result.warnings.length} 个三/九宫已临时作为 PNG 整层导入`
+            : '';
         showToast(result?.prefabUrl
-            ? `导入完成，已创建预制体：${result.prefabUrl}`
-            : '导入完成，已在场景中选中根节点。');
+            ? `导入完成，已创建预制体：${result.prefabUrl}${fallbackNote}`
+            : `导入完成，已在场景中选中根节点${fallbackNote}。`);
     } catch (error) {
         const message = errorMessage(error, '导入失败。');
         updateProgress({ phase: 'error', value: 0, message });

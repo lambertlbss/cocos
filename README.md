@@ -36,7 +36,7 @@
 - PNG 整层：由 Figma 把当前节点及其子树渲染为一张 PNG，再导入 `SpriteFrame`；该节点的设计子层不会重复生成。
 - 矢量节点：面板显示为“PNG Sprite”，通过 Figma PNG 渲染后导入 `Sprite`，不会用 `cc.Graphics` 近似任意矢量路径；它只渲染当前矢量节点，不会压平父节点子树。
 - 更新：只更新已映射节点的几何与可见性。
-- 九宫格：把识别到的三宫/九宫节点导入为 `Sprite.Type.SLICED`，切片边界写入 SpriteFrame 元数据。
+- 九宫格：把识别到的三宫/九宫节点导入为 `Sprite.Type.SLICED`，切片边界写入 SpriteFrame 元数据；边界计算或 Cocos 元数据回读失败时会临时按 PNG 整层和普通 `Sprite.Type.SIMPLE` 导入，不中断整个 Prefab。
 - 忽略：不创建当前节点及其整棵子树。
 
 文字节点始终按 Cocos `Label` 导入，不会因为渐变、阴影或复杂填充而导出 PNG 切图。字体描边直接写入 `Label.enableOutline`、`Label.outlineColor` 和 `Label.outlineWidth`，不再添加额外的 `LabelOutline` 组件。所有文字使用 `Label.Overflow.NONE`：无显式换行符的单行文字按 Figma 参考框水平、竖直居中；包含显式换行符的多行文字按参考框左上对齐。插件先加载映射字体，再让 Cocos 完成最终字体度量和位置补偿。Cocos 3.8.7 在 `NONE` 下会强制关闭自动换行，因此 Figma 自动折行但没有手动换行符的文本会在面板显示警告。启用本地同名资源目录时，如果一个容器节点自身命中同名 PNG 资源，会把该资源作为整层 Sprite 使用，并跳过其内部子节点导入。

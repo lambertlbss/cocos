@@ -252,6 +252,8 @@ export interface SpriteAssetSpec {
     uuid: string;
     url: string;
     sliced: boolean;
+    /** Requested slicing could not be verified; import continues as SIMPLE. */
+    sliceFallback?: string;
     tiled?: boolean;
     /** Native tile size multiplier after the SpriteFrame's untrimmed pixel size. */
     tileScale?: number;

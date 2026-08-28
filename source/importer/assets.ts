@@ -244,20 +244,54 @@ export class AssetWriter {
         }
         let info = await waitForAsset(url, false);
         info = await ensureSpriteFrame(url, info);
-        const sliced = !tiled && Boolean(borders && Object.values(borders).some((value) => value > 0));
-        let meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
-        if (meta && await this.applySpriteMeta(info, meta, sliced ? borders : undefined, tiled)) {
-            info = await waitForAsset(url);
-            meta = await Editor.Message.request('asset-db', 'query-asset-meta', info.uuid) as AssetMeta | null;
+        const requestedSliced = !tiled
+            && Boolean(borders && Object.values(borders).some((value) => value > 0));
+        let meta: AssetMeta | null = null;
+        let sliceFallback: string | undefined;
+        try {
+            meta = await Editor.Message.request(
+                'asset-db',
+                'query-asset-meta',
+                info.uuid,
+            ) as AssetMeta | null;
+            if (meta && await this.applySpriteMeta(
+                info,
+                meta,
+                requestedSliced ? borders : undefined,
+                tiled,
+            )) {
+                info = await waitForAsset(url);
+                meta = await Editor.Message.request(
+                    'asset-db',
+                    'query-asset-meta',
+                    info.uuid,
+                ) as AssetMeta | null;
+            }
+        } catch (error) {
+            if (!requestedSliced) {
+                throw error;
+            }
+            // The PNG and its SpriteFrame already exist. A border metadata
+            // failure must not discard the entire Prefab import; fail closed
+            // to a normal SIMPLE Sprite and expose the reason to the panel.
+            meta = null;
+            sliceFallback = error instanceof Error ? error.message : String(error);
         }
-        if (sliced && !hasSlicedBorders(meta)) {
-            throw new Error(`Cocos 未能写入三/九宫 SpriteFrame 边界：${url}`);
+        const sliced = requestedSliced && hasSlicedBorders(meta);
+        if (requestedSliced && !sliced && !sliceFallback) {
+            sliceFallback = `Cocos 未能写入或回读三/九宫 SpriteFrame 边界：${url}`;
         }
         const spriteFrame = findSpriteFrame(info);
         if (!spriteFrame) {
             throw new Error(`资源没有生成 SpriteFrame：${url}`);
         }
-        return { uuid: spriteFrame.uuid, url, sliced, tiled: tiled || undefined };
+        return {
+            uuid: spriteFrame.uuid,
+            url,
+            sliced,
+            sliceFallback,
+            tiled: tiled || undefined,
+        };
     }
 
     private async applySpriteMeta(
