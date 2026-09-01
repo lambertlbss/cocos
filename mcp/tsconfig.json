@@ -1,0 +1,22 @@
+{
+  "extends": "../base.tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": [
+      "ES2022"
+    ],
+    "types": [
+      "node"
+    ],
+    "noEmit": true,
+    "inlineSourceMap": false,
+    "inlineSources": false
+  },
+  "include": [
+    "src/**/*.ts",
+    "../source/mcp-bridge/protocol.ts",
+    "../source/mcp-bridge/discovery.ts"
+  ]
+}

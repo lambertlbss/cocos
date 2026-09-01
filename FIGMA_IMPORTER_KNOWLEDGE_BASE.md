@@ -2,9 +2,9 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.44`
+> 当前插件版本：`1.0.45`
 > 当前文档状态：持续维护  
-> 最近审计：2026-08-28
+> 最近审计：2026-08-31
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
 
 ## 1. 文档目的
@@ -53,6 +53,7 @@
 | 主进程入口 | `dist/main.js` |
 | Scene script | `dist/scene.js` |
 | 面板入口 | `dist/panels/default` |
+| MCP 入口 | `mcp-dist/server.js`，Node.js 18+，stdio 单文件 bundle |
 | 语言 | TypeScript，构建目标由 `tsconfig.json` 控制 |
 | 测试 | Node.js built-in test runner，`node --test tests/*.test.js` |
 | 默认参考画布 | `640 × 1136`，Frame Prefab 居中时使用 |
@@ -62,6 +63,8 @@
 ```mermaid
 flowchart TD
     UI[默认面板 default] -->|Cocos Editor.Message| MAIN[主进程 main.ts]
+    AI[AI 客户端] -->|stdio| MCP[MCP Server]
+    MCP -->|Named Pipe / Unix Socket + 会话鉴权| MAIN
     MAIN --> URL[URL 解析]
     MAIN --> CLIENT[FigmaClient]
     CLIENT --> PARSER[parser.ts]
@@ -100,6 +103,14 @@ flowchart TD
 - 通过 AssetDB 创建或定位并打开目标 Prefab，再调用 Scene Script 原地增量建树；
 - 向面板发送阶段进度和错误。
 
+#### MCP 进程：`mcp/src/server.ts`
+
+- 通过 stdio 向 AI 客户端提供固定的语义工具，不暴露任意 Creator 消息；
+- 发现当前 Cocos 项目扩展在系统临时目录发布的会话描述符，并通过本机 Named Pipe/Unix Socket 通信；
+- 不持有、读取或回显 Figma Token；Figma 网络访问仍只发生在扩展主进程；
+- 只覆盖单向读取、查询、预览、受限设置、节点策略/改名、确认导入和取消，明确排除 Round-trip；
+- 插件面板无需常开，但 Cocos Creator 必须打开目标项目并启用扩展。
+
 #### 场景脚本：`source/scene.ts`
 
 - 在 Cocos scene process 中操作 `cc.Node` 和组件；
@@ -121,6 +132,11 @@ flowchart TD
 ```text
 source/
 ├─ main.ts                         主进程、导入编排、消息方法
+├─ mcp-api.ts                      MCP 语义 API、文档会话、节点查询与改名合并
+├─ mcp-bridge/
+│  ├─ protocol.ts                 IPC 白名单、请求/响应和稳定错误
+│  ├─ discovery.ts                本地会话描述符、项目哈希和 endpoint
+│  └─ server.ts                   Cocos 主进程 JSONL IPC Server
 ├─ scene.ts                        Cocos 场景脚本、节点/组件构建
 ├─ types.ts                        Figma、策略、场景规格、设置类型
 ├─ import-actions.ts               动作归一、终端动作与 Sprite 类型收口
@@ -148,6 +164,9 @@ static/
 └─ style/default/index.css         面板样式
 
 tests/                             单元测试
+mcp/src/                           stdio MCP Server 与本地 Bridge Client
+mcp-dist/server.js                 可直接分发的 Node 18+ 单文件 MCP 入口
+MCP.md                             MCP 连接、工具与安全边界
 README.md                          面向使用者的简要说明
 FIGMA_IMPORTER_KNOWLEDGE_BASE.md   本知识库（本文档）
 ```
@@ -396,7 +415,13 @@ Frame Prefab 不使用 runtime `nodeMaps`；其节点映射保存在 Prefab Meta
 | `cancel-import` | 取消当前导入 |
 | `progress` | 面板进度回调 |
 
-### 10.3 Scene Script 方法
+### 10.3 MCP Bridge 方法
+
+MCP 不直接调用 `methods[method]`，而是由 `FigmaImporterMcpApi` 显式分派以下 allowlist：`getStatus`、`fetchDocument`、`listNodes`、`getPreview`、`updateSettings`、`updateNodes`、`renameNodes`、`importDocument`、`cancelImport`。每次成功读取会生成随机 `documentSessionId`；另一次读取、插件重载或项目切换都会让旧 session/cursor 失效。导入需要 `confirm=true` 和客户端唯一 `operationId`；相同 ID 的已完成结果在当前插件会话内去重返回，取消也必须同时匹配文档 session 与 operationId，不能取消面板或其他客户端的操作。
+
+节点改名使用目标节点 scope 做 read-merge-write：保留既有 action/kind/nineSlice/explicit，只替换 `name`；没有显式策略的新改名记录保持 `explicit:false`，重置名称时允许 Profile 删除纯名称记录。根节点默认拒绝改名，明确允许后会提示链接 Frame 的 Prefab 文件名可能变化。Token、任意目录读取、动态 Editor/Scene 消息和全部 Round-trip 方法不在 allowlist。
+
+### 10.4 Scene Script 方法
 
 | 方法 | 作用 |
 |---|---|
@@ -609,9 +634,9 @@ npm test
 
 1. 修改 `source`、`static`、脚本或测试；
 2. 更新 `package.json` 与 `package-lock.json` 版本；
-3. 执行 `npm run build`，先清空旧 `dist` 再生成当前源码对应的完整构建产物；
+3. 执行 `npm run build`，先清空旧 `dist`/`mcp-dist`，再生成当前源码对应的 Cocos 产物与 MCP 单文件 bundle；
 4. 执行 `npm run verify:distribution` 与 `npm test`，确认所有入口存在、没有未分发的运行时模块，并确认 `dist` 不再被 Git 忽略；
-5. 提交时必须包含完整 `dist`，使仓库下载后无需 Node.js、`npm install` 或本地构建即可直接放入 Cocos `extensions`；
+5. 提交时必须包含完整 `dist` 与 `mcp-dist/server.js`；Cocos 扩展可直接安装，AI 客户端用 Node.js 18+ 直接运行 MCP bundle，无需分发 `node_modules`；
 6. 在实际 Cocos Creator 3.8.7 项目重启插件验证；
 7. 更新本文档的变更记录；
 8. 提交中文变更说明，并将同一个当前分支提交推送到两个指定 Git 远端；两个远端都成功才算发布完成。
@@ -629,6 +654,8 @@ npm test
 | 决策 | 原因 | 当前结论 |
 |---|---|---|
 | Token 不写明文 | 避免项目、日志和缓存泄露 | `TokenVault` + safeStorage/会话内存 |
+| MCP 使用 stdio + 本地鉴权 IPC | AI 客户端与 Cocos 主进程生命周期独立，且不能开放网络端口或任意 Creator RPC | 单文件 MCP Server 通过项目绑定描述符发现 Named Pipe/Unix Socket；随机 authToken、固定白名单和帧大小限制 |
+| MCP 节点改名合并现有策略 | name-only 写入若走默认校验会意外变成 `generate/auto/explicit:true` | 按目标 ID 原子式 read-merge-write，保留所有策略字段；根改名需显式确认 |
 | 文本不导出切图 | 保留 Label 可编辑性 | TEXT 始终 `generate` |
 | 矢量不使用 Graphics | 任意 Figma 路径无法被简单 Graphics 准确表达 | 矢量/基础形状 PNG + Sprite |
 | Frame 链接生成 Prefab | 用户希望复制链接即得到独立 Prefab | 最外层 Frame 为根，自动打开 |
@@ -647,7 +674,7 @@ npm test
 | 有效三/九宫识别即默认启用，失败可降级 | 只看 Rectangle 数量会把无效几何送入切片执行链；边界失败若阻断会让一个可用整图拖垮整个 Prefab | 按三段/九格拓扑验证连续边界；成功时写入 border 并使用 `SLICED`，计算或 Cocos 元数据回读失败时保留整体 PNG、使用 `SIMPLE` 并报告警告，图片本体失败才阻断 |
 | 普通 Sprite 原生尺寸优先使用 TRIMMED | 所有图片无条件写成 `CUSTOM` 会丢失 Cocos 对裁剪后原生尺寸的语义，但用裁剪矩形判断缩放又会把透明像素误判为尺寸变化 | 普通 SIMPLE Sprite 先应用 `TRIMMED`，以 SpriteFrame `originalSize` 判断是否缩放；未缩放保留 TRIMMED，等比缩放按裁剪尺寸同比例转 CUSTOM，非等比缩放使用目标尺寸；SLICED/TILED 固定 CUSTOM |
 | 超边界视觉使用隔离 Sprite | `use_absolute_bounds=true` 会按几何框裁掉外描边/阴影，直接扩大原节点又会破坏已有坐标、布局和运行时引用 | 仅当 `absoluteRenderBounds` 超出几何框超过 `0.5 px` 时使用视觉边界 PNG；原节点几何不变，内部 `__FigmaOverflowVisual` 负责扩展尺寸、中心偏移和累计旋转抵消；切片、平铺、本地资源保持旧路径 |
-| 仓库下载后可直接拖入 Cocos | 插件使用者不应安装 Node.js 或理解 TypeScript 构建流程；缺失 `dist` 会让主进程和 `openPanel` 连锁失败 | `dist` 纳入版本控制；构建前安全清空旧产物，分发门禁验证全部 Cocos 入口和运行时模块，`node_modules` 继续不分发 |
+| 仓库下载后可直接拖入 Cocos，并可直接连接 MCP | 插件使用者不应理解 TypeScript 构建流程；缺失产物会让主进程或 AI 连接失败 | `dist` 与 `mcp-dist/server.js` 纳入版本控制；分发门禁验证 Cocos 入口和 MCP 脱离 `node_modules` 加载，`node_modules` 继续不分发 |
 | 只保留一个 PNG 整层动作 | `merge` 与容器 `render` 的请求、缓存、资源和 Scene 结果完全相同 | 面板删除“合并子树”；旧 `merge/svg` 输入兼容归一为 `render` |
 | 不自动导入 Widget | 避免 Constraints 适配组件改变已还原的绝对位置 | 导入后由用户在 Cocos 中手动配置 |
 | 不安全 Auto Layout 降级绝对布局 | 防止 Layout 重排破坏视觉 | 保留 Node + 几何位置 |
@@ -658,6 +685,16 @@ npm test
 ## 16. 变更记录
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-08-31 · `1.0.45`
+
+- 新增单向 Figma → Cocos MCP：Node.js 18+ stdio 单文件 Server 通过本机 Named Pipe/Unix Socket 连接 Cocos 扩展主进程，固定开放状态、读取、分页查询、预览、受限设置、节点策略、节点改名、确认导入和按操作取消 9 个工具；不开放 Token、目录选择、任意 Creator RPC 或 Round-trip。
+- 新增 AI 节点改名：名称覆盖按 `fileKey + nodeId` 原子合并最新策略，保留 action/kind/nineSlice/explicit；支持清除覆盖，根节点改名必须显式确认。
+- MCP 会话绑定 Cocos 项目与文档快照；分页 cursor 绑定查询和节点覆盖，自动发现首次选定项目后不静默切换。IPC 使用随机 authToken、白名单、请求 ID、1 MiB 帧限制和版本化 JSONL 协议。
+- 导入要求 `confirm=true` 与客户端 operationId；幂等缓存同时绑定文档、有效设置和最终节点策略，取消只影响匹配的 MCP 导入。SDK 取消信号会关闭 Bridge 并安全请求取消对应 Cocos 操作。
+- 构建新增 `mcp-dist/server.js` 单文件产物与分发门禁，真实验证 initialize/tools/list、严格 9 工具 allowlist、脱离 `node_modules` 加载及 Round-trip/Token 能力符号不进入 MCP bundle。Round-trip 实现未纳入本次开发范围。
+- MCP 不使用浏览器或浏览器自动化：Figma 数据由 Cocos 主进程使用既有 Token 直连固定 REST API；9 个工具统一声明 `openWorldHint=false`，仅导入继续保留本地项目写入确认。协议测试验证发布 bundle 不再声明浏览器/open-world 权限。
+- Cocos/MCP TypeScript 构建、分发门禁和 `174/174` 项非 Round-trip 回归通过；完整测试 `209/210`，唯一失败仍是未修改的 Round-trip 冻结文件在 Windows CRLF 下的原始字节哈希差异。
 
 ### 2026-08-28 · `1.0.44`
 

@@ -4,10 +4,14 @@ const { rmSync } = require('fs');
 const { basename, dirname, join, resolve } = require('path');
 
 const projectRoot = resolve(__dirname, '..');
-const distRoot = resolve(projectRoot, 'dist');
+const outputRoots = [
+    resolve(projectRoot, 'dist'),
+    resolve(projectRoot, 'mcp-dist'),
+];
 
-if (dirname(distRoot) !== projectRoot || basename(distRoot) !== 'dist') {
-    throw new Error(`拒绝清理非项目 dist 目录：${distRoot}`);
+for (const outputRoot of outputRoots) {
+    if (dirname(outputRoot) !== projectRoot || !['dist', 'mcp-dist'].includes(basename(outputRoot))) {
+        throw new Error(`拒绝清理非项目构建目录：${outputRoot}`);
+    }
+    rmSync(outputRoot, { recursive: true, force: true });
 }
-
-rmSync(distRoot, { recursive: true, force: true });

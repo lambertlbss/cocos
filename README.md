@@ -13,6 +13,8 @@
 
 仓库已包含与当前源码和版本一致的 `dist` 构建产物，使用者不需要安装 Node.js、执行 `npm install` 或手动编译。只有参与插件开发时才需要安装依赖并运行构建命令。
 
+如果要让 AI 客户端直接读取 Figma 链接、调整节点策略/节点名并触发导入，还需把仓库内已构建的 `mcp-dist/server.js` 配置为本地 MCP Server。详细连接方法见 [MCP 使用与连接说明](./MCP.md)。
+
 ## 使用
 
 1. 在 Figma 创建 Personal Access Token。
@@ -25,6 +27,16 @@
 带 `node-id` 的 Figma Frame 链接会按独立预制体导入：最外层 Frame 作为 Prefab 根节点，并使用该 Frame 名称作为 `.prefab` 文件名；根节点挂载对应尺寸的 `UITransform`，并自动放置在 Canvas 参考边界中心。当前项目参考画布为 640×1136；预制体会保存到“自动创建的预制体目录”（可在面板中选择 `assets` 下的任意子目录）。这类导入不会并入当前选中的场景或预制体：插件只在当前场景中短暂创建序列化用临时根节点，生成 `.prefab` 后立即销毁并自动打开、选中新预制体；旧版本遗留的导入根节点也会按导入映射清理，避免切换预制体时出现无法选中的顶层残影。
 
 普通文件导入始终从当前场景的 Canvas 根节点开始，不会读取或修改当前选中的场景节点、预制体节点；Frame 链接则直接创建独立预制体。若要把导入结果作为子节点使用，请在预制体打开后从资源管理器拖入目标场景。
+
+## AI / MCP 导入
+
+MCP 服务提供单向 Figma → Cocos 自动化：读取文件或 Frame 链接、分页查询节点、获取预览、修改有限的导入设置、批量调整节点策略、批量修改 Cocos 节点名、确认后导入以及取消导入。它不会开放 Token、任意文件夹选择、动态 Creator 消息或 Round-trip 接口。
+
+MCP 不调用或控制浏览器。读取 Figma 时由 Cocos 插件使用已保存的 Token 直接请求固定 Figma REST API；新环境只需允许访问 `api.figma.com` 的 HTTPS 网络，不需要浏览器权限。
+
+Cocos Creator 必须已经打开目标项目并启用本扩展，但 Figma Importer 面板无需常开。首次配置 Figma Token 时仍需打开一次面板保存并验证；MCP 只使用插件主进程中已有的安全 Token，不读取其他 Figma MCP 的凭据。
+
+已有 Figma MCP 可以帮助 AI 定位或理解设计稿，但它与本导入 MCP 是两个独立连接。把对应 Frame 链接交给 AI 后，AI 仍会通过本导入 MCP 执行“读取 → 查询/改名 → 确认导入”。完整配置、安全规则以及每个工具的输入/输出和用途见 [MCP 工具列表与连接说明](./MCP.md#mcp-工具列表与用途)。
 
 资源输出目录用于存放最终导入 Cocos 的 PNG / SVG，可在面板中选择项目 `assets` 下的子目录，不再追加文件级子目录。资源直接使用 Figma 节点名，只替换文件系统不允许的字符；同名节点复用首次导入的资源，不再生成哈希或倍率后缀。
 
@@ -91,6 +103,6 @@ npm run verify:distribution
 npm test
 ```
 
-`npm run build` 会先清理旧 `dist` 再完整编译。发布修改时必须把新的 `dist` 与源码一起提交，保证仓库始终可直接安装。
+`npm run build` 会先清理旧 `dist` 和 `mcp-dist`，再编译 Cocos 扩展并生成 Node 18+ 可直接运行的单文件 MCP bundle。发布修改时必须把新的 `dist`、`mcp-dist` 与源码一起提交，保证仓库始终可直接安装和连接。
 
-测试覆盖 Figma URL、全页面解析、缺失边界保护、Cocos 节点类型分析、安全 Auto Layout 降级、真实尺寸三/九宫边界、本地同名资源、内部缓存、Token 安全和渐变 SVG。
+测试覆盖 Figma URL、全页面解析、缺失边界保护、Cocos 节点类型分析、安全 Auto Layout 降级、真实尺寸三/九宫边界、本地同名资源、内部缓存、Token 安全、渐变 SVG、MCP 会话/鉴权以及节点改名合并。

@@ -4,18 +4,39 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const projectProfile = new Map();
+let blockNextSettingsWrite = null;
 global.Editor = {
     Profile: {
         async getProject(packageName, key) {
             return projectProfile.get(`${packageName}:${key}`);
         },
         async setProject(packageName, key, value) {
+            if (key === 'settings' && blockNextSettingsWrite) {
+                const blocker = blockNextSettingsWrite;
+                blockNextSettingsWrite = null;
+                await blocker();
+            }
             projectProfile.set(`${packageName}:${key}`, value);
         },
     },
 };
 
-const { decisionMap, methods } = require('../dist/main');
+const { decisionMap, methods, patchNodeNames } = require('../dist/main');
+
+function settings(scale) {
+    return {
+        sourceUrl: 'https://www.figma.com/design/settings-test',
+        assetFolder: 'figma-importer',
+        prefabFolder: 'figma-prefabs',
+        localResourceFolders: [],
+        localResourceFolder: '',
+        scale,
+        updateExisting: true,
+        refreshAssets: false,
+        autoSave: false,
+        fontMap: {},
+    };
+}
 
 test('enables recognized slice decisions by default and preserves an explicit opt-out', () => {
     const tree = [{
@@ -40,6 +61,28 @@ test('enables recognized slice decisions by default and preserves an explicit op
         nineSlice: false,
         explicit: true,
     }], tree).get('slice:1').nineSlice, false);
+});
+
+test('serializes settings writes so a slower older write cannot overwrite a newer value', async () => {
+    let releaseFirstWrite;
+    let markFirstWriteStarted;
+    const firstWriteStarted = new Promise((resolve) => {
+        markFirstWriteStarted = resolve;
+    });
+    blockNextSettingsWrite = () => {
+        markFirstWriteStarted();
+        return new Promise((resolve) => {
+            releaseFirstWrite = resolve;
+        });
+    };
+
+    const first = methods.saveSettings(settings(1));
+    await firstWriteStarted;
+    const second = methods.saveSettings(settings(2));
+    releaseFirstWrite();
+    await Promise.all([first, second]);
+
+    assert.equal(projectProfile.get('figma-importer-cocos:settings').scale, 2);
 });
 
 test('persists only explicit, sanitized node strategy overrides by Figma file key', async () => {
@@ -142,6 +185,50 @@ test('persists a sanitized rename without turning it into a strategy override', 
         explicit: false,
     }], ['410:rename']), []);
     assert.equal(projectProfile.get('figma-importer-cocos:nodeOverrides')['rename-file'], undefined);
+});
+
+test('MCP name patches preserve the latest stored strategy instead of a stale fallback', async () => {
+    await methods.saveNodeOverrides('atomic-rename-file', [{
+        id: '410:atomic',
+        action: 'ignore',
+        kind: 'sprite',
+        nineSlice: true,
+        explicit: true,
+    }], ['410:atomic']);
+
+    const renamed = await patchNodeNames('atomic-rename-file', [{
+        id: '410:atomic',
+        name: '  btn/atomic  ',
+        fallback: {
+            id: '410:atomic',
+            action: 'generate',
+            kind: 'node',
+            nineSlice: false,
+            explicit: false,
+            name: 'btn atomic',
+        },
+    }]);
+    assert.deepEqual(renamed, [{
+        id: '410:atomic',
+        action: 'ignore',
+        kind: 'sprite',
+        nineSlice: true,
+        explicit: true,
+        name: 'btn atomic',
+    }]);
+
+    const reset = await patchNodeNames('atomic-rename-file', [{
+        id: '410:atomic',
+        name: null,
+        fallback: renamed[0],
+    }]);
+    assert.deepEqual(reset, [{
+        id: '410:atomic',
+        action: 'ignore',
+        kind: 'sprite',
+        nineSlice: true,
+        explicit: true,
+    }]);
 });
 
 test('rejects override persistence without a Figma file key', async () => {

@@ -2,7 +2,7 @@
   "package_version": 2,
   "name": "figma-importer-cocos",
   "title": "Figma Importer",
-  "version": "1.0.44",
+  "version": "1.0.45",
   "description": "Figma UI importer for Cocos Creator 3.8.7",
   "main": "./dist/main.js",
   "author": "Figma Importer contributors",
@@ -12,16 +12,23 @@
   },
   "scripts": {
     "clean": "node scripts/clean-dist.js",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "build:cocos": "tsc -p tsconfig.json",
+    "typecheck:mcp": "tsc -p mcp/tsconfig.json",
+    "build:mcp": "npm run typecheck:mcp && node scripts/build-mcp.js",
+    "build": "npm run clean && npm run build:cocos && npm run build:mcp",
     "watch": "tsc -p tsconfig.json --watch",
-    "verify:distribution": "node scripts/verify-distribution.js",
+    "verify:mcp": "node scripts/verify-mcp.js",
+    "verify:distribution": "node scripts/verify-distribution.js && npm run verify:mcp",
     "test": "npm run build && npm run verify:distribution && node --test tests/*.test.js",
     "check": "npm run test"
   },
   "devDependencies": {
     "@cocos/creator-types": "3.8.7",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@types/node": "^16.18.126",
-    "typescript": "^5.2.2"
+    "esbuild": "^0.28.2",
+    "typescript": "^5.2.2",
+    "zod": "^4.3.6"
   },
   "panels": {
     "default": {

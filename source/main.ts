@@ -53,6 +53,8 @@ import {
     type PrefabSyncRecord,
 } from './importer/prefab-sync';
 import { TokenVault } from './security/token-vault';
+import { FigmaImporterMcpApi, type McpNodeNamePatch } from './mcp-api';
+import { McpBridgeServer } from './mcp-bridge/server';
 import { RoundtripService } from './roundtrip/service';
 import { recoverInterruptedTransactions } from './roundtrip/recovery';
 import { editorReimporter } from './roundtrip/transaction';
@@ -81,9 +83,16 @@ import { sanitizeNodeName } from './node-name';
 const vault = new TokenVault(packageJSON.name);
 let activeDocument: DocumentSession | null = null;
 let activeController: AbortController | null = null;
+let activeOperationOwner: string | null = null;
 let roundtripController: AbortController | null = null;
 let settingsCache: ImportSettings | null = null;
 let roundtripRecoveryBlocker: string | null = null;
+let documentRevision = 0;
+let mcpBridge: McpBridgeServer | null = null;
+let mcpApi: FigmaImporterMcpApi | null = null;
+const pluginInstanceId = randomBytes(18).toString('base64url');
+let nodeOverrideWriteQueue: Promise<void> = Promise.resolve();
+let settingsWriteQueue: Promise<void> = Promise.resolve();
 
 type Decision = ImportDecision;
 
@@ -234,7 +243,7 @@ function safeSettings(value: unknown): ImportSettings {
     };
 }
 
-async function getSettings(): Promise<ImportSettings> {
+async function getSettingsUnlocked(): Promise<ImportSettings> {
     if (settingsCache) {
         return settingsCache;
     }
@@ -243,10 +252,35 @@ async function getSettings(): Promise<ImportSettings> {
     return settingsCache;
 }
 
-async function saveSettings(value: unknown): Promise<ImportSettings> {
-    settingsCache = safeSettings(value);
-    await Editor.Profile.setProject(packageJSON.name, 'settings', settingsCache, 'project');
-    return settingsCache;
+async function getSettings(): Promise<ImportSettings> {
+    await settingsWriteQueue;
+    return getSettingsUnlocked();
+}
+
+function withSettingsWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+    const result = settingsWriteQueue.then(operation);
+    settingsWriteQueue = result.then(() => undefined, () => undefined);
+    return result;
+}
+
+function persistSettingsUnlocked(value: unknown): Promise<ImportSettings> {
+    return (async () => {
+        const next = safeSettings(value);
+        await Editor.Profile.setProject(packageJSON.name, 'settings', next, 'project');
+        settingsCache = next;
+        return next;
+    })();
+}
+
+function saveSettings(value: unknown): Promise<ImportSettings> {
+    return withSettingsWriteLock(() => persistSettingsUnlocked(value));
+}
+
+function patchSettings(value: Partial<ImportSettings>): Promise<ImportSettings> {
+    return withSettingsWriteLock(async () => {
+        const current = await getSettingsUnlocked();
+        return persistSettingsUnlocked({ ...current, ...value });
+    });
 }
 
 async function client(signal: AbortSignal | undefined = activeController?.signal): Promise<FigmaClient> {
@@ -273,13 +307,21 @@ function finishRoundtripOperation(controller: AbortController): void {
     if (roundtripController === controller) roundtripController = null;
 }
 
-function beginOperation(): void {
-    activeController?.abort();
-    activeController = new AbortController();
+function beginOperation(owner: string | null = null): AbortController {
+    if (activeController) {
+        throw new Error('当前已有 Figma 操作正在执行，请等待完成或先取消。');
+    }
+    const controller = new AbortController();
+    activeController = controller;
+    activeOperationOwner = owner;
+    return controller;
 }
 
-function finishOperation(): void {
-    activeController = null;
+function finishOperation(controller: AbortController): void {
+    if (activeController === controller) {
+        activeController = null;
+        activeOperationOwner = null;
+    }
 }
 
 function relativeAssetFolder(selectedPath: string): string {
@@ -534,7 +576,13 @@ async function nodeOverridesFor(fileKey: string): Promise<ImportOverride[]> {
     return result;
 }
 
-async function saveNodeOverrides(
+function withNodeOverrideWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+    const result = nodeOverrideWriteQueue.then(operation);
+    nodeOverrideWriteQueue = result.then(() => undefined, () => undefined);
+    return result;
+}
+
+async function saveNodeOverridesUnlocked(
     fileKey: unknown,
     values: unknown,
     scopeValues: unknown,
@@ -569,6 +617,55 @@ async function saveNodeOverrides(
     }
     await Editor.Profile.setProject(packageJSON.name, 'nodeOverrides', stored, 'project');
     return scopedItems;
+}
+
+function saveNodeOverrides(
+    fileKey: unknown,
+    values: unknown,
+    scopeValues: unknown,
+): Promise<ImportOverride[]> {
+    return withNodeOverrideWriteLock(
+        () => saveNodeOverridesUnlocked(fileKey, values, scopeValues),
+    );
+}
+
+export function patchNodeNames(fileKey: string, patches: McpNodeNamePatch[]): Promise<ImportOverride[]> {
+    return withNodeOverrideWriteLock(async () => {
+        if (!fileKey.trim()) throw new Error('无法保存节点名称：缺少 Figma fileKey。');
+        const stored = await getStoredNodeOverrides();
+        const current = { ...(stored[fileKey] ?? {}) };
+        const persisted: ImportOverride[] = [];
+        for (const patch of patches) {
+            const id = typeof patch.id === 'string' ? patch.id.trim() : '';
+            if (!id) throw new Error('无法保存节点名称：缺少 nodeId。');
+            const existing = safeNodeOverride(current[id], id);
+            const fallback = safeNodeOverride(patch.fallback, id);
+            const next = existing ? { ...existing } : fallback ? { ...fallback } : null;
+            if (!next && patch.name === null) {
+                delete current[id];
+                continue;
+            }
+            if (!next) throw new Error(`无法保存节点名称：节点 ${id} 缺少有效默认策略。`);
+            if (patch.name === null) {
+                delete next.name;
+            } else {
+                const name = sanitizeNodeName(patch.name);
+                if (!name) throw new Error(`无法保存节点名称：节点 ${id} 的名称无效。`);
+                next.name = name;
+            }
+            const safe = safeNodeOverride(next, id);
+            if (safe) {
+                current[id] = safe;
+                persisted.push(safe);
+            } else {
+                delete current[id];
+            }
+        }
+        if (Object.keys(current).length) stored[fileKey] = current;
+        else delete stored[fileKey];
+        await Editor.Profile.setProject(packageJSON.name, 'nodeOverrides', stored, 'project');
+        return persisted;
+    });
 }
 
 function annotateDocumentPlan(session: DocumentSession): DocumentSession {
@@ -1858,25 +1955,26 @@ async function importLinkedFramePrefab(args: {
     }
 }
 
-async function performImport(request: ImportRequest): Promise<SceneImportResult> {
-    if (!activeDocument) {
+async function performImport(request: ImportRequest, operationOwner: string | null = null): Promise<SceneImportResult> {
+    const document = activeDocument;
+    if (!document) {
         throw new Error('请先读取 Figma 文件。');
     }
     const importSettings = safeSettings(request.settings);
-    await saveSettings(importSettings);
-    beginOperation();
+    const controller = beginOperation(operationOwner);
     try {
+        await saveSettings(importSettings);
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
-        const decisions = decisionMap(request.overrides, activeDocument.tree);
-        const builtAssets = await buildAssets(activeDocument, decisions, importSettings);
+        const decisions = decisionMap(request.overrides, document.tree);
+        const builtAssets = await buildAssets(document, decisions, importSettings);
         const { assets, warnings } = builtAssets;
         // buildAssets may promote a container to a local same-name resource.
         // Compile after that promotion so assets and SceneNodeSpec share the
         // exact same final plan.
-        const plans = compileImportPlan(activeDocument.roots, decisions);
+        const plans = compileImportPlan(document.roots, decisions);
         const fonts = await resolveFonts(importSettings);
-        const sourceRootFrames = activeDocument.roots.map(nodeFrame);
-        const multipleRoots = activeDocument.roots.length > 1;
+        const sourceRootFrames = document.roots.map(nodeFrame);
+        const multipleRoots = document.roots.length > 1;
         const arrangedWidth = multipleRoots
             ? sourceRootFrames.reduce((total, frame) => total + frame.width, 0)
                 + Math.max(0, sourceRootFrames.length - 1) * 160
@@ -1890,14 +1988,14 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             }
             : sourceRootFrames[0] ?? { x: 0, y: 0, width: 0, height: 0 };
         let rootCursor = 0;
-        const roots = activeDocument.roots
+        const roots = document.roots
             .map((node, index) => {
                 const spec = makeSpec(
                     node,
                     rootFrame,
                     decisions,
                     plans,
-                    activeDocument!.nodeById,
+                    document.nodeById,
                     assets,
                     fonts,
                     true,
@@ -1918,13 +2016,13 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             throw new Error('没有选中任何可导入节点。');
         }
 
-        const sourceNodeId = activeDocument.sourceNodeId;
+        const sourceNodeId = document.sourceNodeId;
         if (sourceNodeId && roots.length === 1) {
             const prefabWriter = new AssetWriter(importSettings.prefabFolder);
             await prefabWriter.initialize();
             const frameName = roots[0]?.name?.trim()
-                || activeDocument.roots[0]?.name?.trim()
-                || activeDocument.fileName;
+                || document.roots[0]?.name?.trim()
+                || document.fileName;
             const prefabUrl = `db://assets/${prefabWriter.folder}/${sanitizeAssetName(frameName)}.prefab`;
             emitProgress({
                 phase: 'scene',
@@ -1934,7 +2032,7 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             const result = await importLinkedFramePrefab({
                 prefabUrl,
                 prefabName: frameName,
-                fileKey: activeDocument.fileKey,
+                fileKey: document.fileKey,
                 sourceNodeId,
                 rootFrame,
                 scale: importSettings.scale,
@@ -1943,7 +2041,7 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             const nodeMaps = await getNodeMaps();
             // Prefab updates persist by PrefabInfo.fileId in the asset meta;
             // runtime node UUIDs are session-only and must never be reused here.
-            delete nodeMaps[activeDocument.fileKey];
+            delete nodeMaps[document.fileKey];
             await Editor.Profile.setProject(packageJSON.name, 'nodeMaps', nodeMaps, 'project');
             const finalResult = warnings.length ? { ...result, warnings } : result;
             emitProgress({
@@ -1957,12 +2055,12 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         const nodeMaps = await getNodeMaps();
         const payload: SceneImportPayload = {
             packageName: packageJSON.name,
-            fileKey: activeDocument.fileKey,
-            rootName: activeDocument.fileName,
+            fileKey: document.fileKey,
+            rootName: document.fileName,
             rootFrame,
             scale: importSettings.scale,
             updateExisting: importSettings.updateExisting,
-            existingMap: nodeMaps[activeDocument.fileKey] ?? {},
+            existingMap: nodeMaps[document.fileKey] ?? {},
             roots,
         };
         emitProgress({ phase: 'scene', value: 0.1, message: '正在构建 Cocos 节点树…' });
@@ -1972,7 +2070,7 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
             args: [payload],
         }) as SceneImportResult;
         await Editor.Message.request('scene', 'snapshot');
-        nodeMaps[activeDocument.fileKey] = result.nodeMap;
+        nodeMaps[document.fileKey] = result.nodeMap;
         await Editor.Profile.setProject(packageJSON.name, 'nodeMaps', nodeMaps, 'project');
         Editor.Selection.select('node', result.rootUuid);
         if (importSettings.autoSave) {
@@ -1986,7 +2084,7 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         });
         return finalResult;
     } catch (error) {
-        if (error instanceof CancelledError || activeController?.signal.aborted) {
+        if (error instanceof CancelledError || controller.signal.aborted) {
             emitProgress({ phase: 'cancelled', value: 0, message: '已取消。' });
             throw new Error('操作已取消。');
         }
@@ -1997,7 +2095,96 @@ async function performImport(request: ImportRequest): Promise<SceneImportResult>
         });
         throw error;
     } finally {
-        finishOperation();
+        finishOperation(controller);
+    }
+}
+
+async function getMcpPluginState() {
+    await vault.initialize();
+    const document = activeDocument;
+    return {
+        version: packageJSON.version,
+        vault: vault.status(),
+        settings: await getSettings(),
+        document: document ? {
+            fileKey: document.fileKey,
+            fileName: document.fileName,
+            sourceUrl: document.sourceUrl,
+            tree: document.tree,
+            fonts: document.fonts,
+            nodeOverrides: await nodeOverridesFor(document.fileKey),
+        } : null,
+    };
+}
+
+async function getPluginState() {
+    return {
+        ...await getMcpPluginState(),
+        fontAssets: await listFontAssets(),
+    };
+}
+
+async function fetchFigmaDocument(sourceUrl: string) {
+    const controller = beginOperation();
+    try {
+        emitProgress({ phase: 'fetch', value: 0.15, message: '正在读取 Figma 文件…' });
+        const parsed = parseFigmaSource(sourceUrl);
+        const api = await client(controller.signal);
+        const payload = parsed.nodeId
+            ? await api.getNode(parsed.fileKey, parsed.nodeId)
+            : await api.getFile(parsed.fileKey);
+        const document = annotateDocumentPlan(
+            parseDocument(payload, sourceUrl, parsed.fileKey, parsed.nodeId),
+        );
+        const current = await getSettings();
+        await saveSettings({ ...current, sourceUrl });
+        const fontAssets = await listFontAssets();
+        const nodeOverrides = await nodeOverridesFor(document.fileKey);
+        activeDocument = document;
+        documentRevision += 1;
+        emitProgress({ phase: 'idle', value: 1, message: `已读取 ${document.fileName}` });
+        return {
+            fileKey: document.fileKey,
+            fileName: document.fileName,
+            sourceUrl,
+            tree: document.tree,
+            fonts: document.fonts,
+            fontAssets,
+            nodeOverrides,
+        };
+    } catch (error) {
+        emitProgress({
+            phase: 'error',
+            value: 0,
+            message: error instanceof Error ? error.message : '读取失败。',
+        });
+        throw error;
+    } finally {
+        finishOperation(controller);
+    }
+}
+
+async function getNodePreview(nodeId: string): Promise<{ url: string }> {
+    const document = activeDocument;
+    const node = document?.nodeById.get(nodeId);
+    if (!document || !node) {
+        throw new Error('预览节点不存在。');
+    }
+    const controller = beginOperation();
+    try {
+        const urls = await (await client(controller.signal)).getImageUrls(
+            document.fileKey,
+            [nodeId],
+            'png',
+            1,
+            !overflowingRenderFrame(node),
+        );
+        if (!urls[nodeId]) {
+            throw new Error('无法生成节点预览。');
+        }
+        return { url: urls[nodeId] };
+    } finally {
+        finishOperation(controller);
     }
 }
 
@@ -2007,21 +2194,7 @@ export const methods: Record<string, (...args: any[]) => any> = {
     },
 
     async getState() {
-        await vault.initialize();
-        return {
-            version: packageJSON.version,
-            vault: vault.status(),
-            settings: await getSettings(),
-            fontAssets: await listFontAssets(),
-            document: activeDocument ? {
-                fileKey: activeDocument.fileKey,
-                fileName: activeDocument.fileName,
-                sourceUrl: activeDocument.sourceUrl,
-                tree: activeDocument.tree,
-                fonts: activeDocument.fonts,
-                nodeOverrides: await nodeOverridesFor(activeDocument.fileKey),
-            } : null,
-        };
+        return getPluginState();
     },
 
     async setToken(value: string) {
@@ -2033,15 +2206,15 @@ export const methods: Record<string, (...args: any[]) => any> = {
     },
 
     async verifyToken() {
-        beginOperation();
+        const controller = beginOperation();
         try {
-            const identity = await (await client()).verify();
+            const identity = await (await client(controller.signal)).verify();
             return {
                 ok: true,
                 handle: identity.handle || 'Figma User',
             };
         } finally {
-            finishOperation();
+            finishOperation(controller);
         }
     },
 
@@ -2070,62 +2243,11 @@ export const methods: Record<string, (...args: any[]) => any> = {
     },
 
     async fetchDocument(sourceUrl: string) {
-        beginOperation();
-        try {
-            emitProgress({ phase: 'fetch', value: 0.15, message: '正在读取 Figma 文件…' });
-            const parsed = parseFigmaSource(sourceUrl);
-            const api = await client();
-            const payload = parsed.nodeId
-                ? await api.getNode(parsed.fileKey, parsed.nodeId)
-                : await api.getFile(parsed.fileKey);
-            activeDocument = annotateDocumentPlan(
-                parseDocument(payload, sourceUrl, parsed.fileKey, parsed.nodeId),
-            );
-            const current = await getSettings();
-            await saveSettings({ ...current, sourceUrl });
-            emitProgress({ phase: 'idle', value: 1, message: `已读取 ${activeDocument.fileName}` });
-            return {
-                fileKey: activeDocument.fileKey,
-                fileName: activeDocument.fileName,
-                sourceUrl,
-                tree: activeDocument.tree,
-                fonts: activeDocument.fonts,
-                fontAssets: await listFontAssets(),
-                nodeOverrides: await nodeOverridesFor(activeDocument.fileKey),
-            };
-        } catch (error) {
-            emitProgress({
-                phase: 'error',
-                value: 0,
-                message: error instanceof Error ? error.message : '读取失败。',
-            });
-            throw error;
-        } finally {
-            finishOperation();
-        }
+        return fetchFigmaDocument(sourceUrl);
     },
 
     async getPreview(nodeId: string) {
-        const node = activeDocument?.nodeById.get(nodeId);
-        if (!activeDocument || !node) {
-            throw new Error('预览节点不存在。');
-        }
-        beginOperation();
-        try {
-            const urls = await (await client()).getImageUrls(
-                activeDocument.fileKey,
-                [nodeId],
-                'png',
-                1,
-                !overflowingRenderFrame(node),
-            );
-            if (!urls[nodeId]) {
-                throw new Error('无法生成节点预览。');
-            }
-            return { url: urls[nodeId] };
-        } finally {
-            finishOperation();
-        }
+        return getNodePreview(nodeId);
     },
 
     async roundtripDetect(sourceUrl: string, explicitRootId?: string) {
@@ -2179,6 +2301,48 @@ export const methods: Record<string, (...args: any[]) => any> = {
     },
 };
 
+async function startMcpBridge(): Promise<void> {
+    const previous = mcpBridge;
+    mcpBridge = null;
+    mcpApi = null;
+    if (previous) await previous.close();
+
+    const creatorVersion = (Editor.App as unknown as { version?: string }).version ?? 'unknown';
+    const api = new FigmaImporterMcpApi({
+        projectPath: Editor.Project.path,
+        creatorVersion,
+        getDocumentRevision: () => documentRevision,
+        isImportBusy: () => activeController !== null,
+        getState: getMcpPluginState,
+        fetchDocument: fetchFigmaDocument,
+        getPreview: getNodePreview,
+        saveSettings,
+        patchSettings,
+        saveNodeOverrides,
+        patchNodeNames,
+        importSelection: (request, operationId) => performImport(request, operationId),
+        cancelImport: (operationId) => {
+            if (!activeController || activeOperationOwner !== operationId) return false;
+            activeController.abort();
+            return true;
+        },
+    });
+    const bridge = new McpBridgeServer({
+        projectPath: Editor.Project.path,
+        pluginVersion: packageJSON.version,
+        pluginInstanceId,
+        invoke: (method, params, signal) => api.invoke(method, params, signal),
+    });
+    try {
+        await bridge.start();
+        mcpApi = api;
+        mcpBridge = bridge;
+    } catch (error) {
+        await bridge.close().catch(() => undefined);
+        console.error(`Figma Importer MCP Bridge 启动失败：${error instanceof Error ? error.message : '未知错误'}`);
+    }
+}
+
 export async function load(): Promise<void> {
     await vault.initialize();
     try {
@@ -2191,10 +2355,19 @@ export async function load(): Promise<void> {
         roundtripRecoveryBlocker = `Round-trip 启动恢复失败：${error instanceof Error ? error.message : '未知错误'}`;
         console.error(roundtripRecoveryBlocker);
     }
+    await startMcpBridge();
 }
 
 export function unload(): void {
     activeController?.abort();
     activeController = null;
+    activeOperationOwner = null;
     activeDocument = null;
+    documentRevision += 1;
+    const bridge = mcpBridge;
+    mcpBridge = null;
+    mcpApi = null;
+    void bridge?.close().catch((error) => {
+        console.error(`Figma Importer MCP Bridge 关闭失败：${error instanceof Error ? error.message : '未知错误'}`);
+    });
 }
