@@ -444,7 +444,7 @@ global.Editor = {
 
 const { methods } = require('../dist/scene');
 
-async function importWithFakeCocos(spec) {
+async function importWithFakeCocos(spec, scale = 1) {
     const environment = fakeCocos();
     const originalLoad = Module._load;
     Module._load = function load(request, parent, isMain) {
@@ -459,7 +459,7 @@ async function importWithFakeCocos(spec) {
             fileKey: 'file-key',
             rootName: 'Test',
             rootFrame: { x: 0, y: 0, width: 100, height: 80 },
-            scale: 1,
+            scale,
             updateExisting: false,
             existingMap: {},
             centerInCanvas: true,
@@ -862,6 +862,41 @@ test('expands a single-line Label on all four sides by its outline width', async
     assert.equal(title.position.x + transform.width / 2, 55);
     assert.equal(title.position.y - transform.height / 2, 10);
     assert.equal(title.position.y + transform.height / 2, 40);
+});
+
+test('matches Figma panel font-size precision independently of the import scale', async () => {
+    const root = makeSpec({
+        name: 'TextRoot',
+        frame: { x: 0, y: 0, width: 200, height: 100 },
+        children: [
+            makeSpec({
+                figmaId: '15:196:exact-label',
+                name: 'ExactLabel',
+                figmaType: 'TEXT',
+                kind: 'label',
+                frame: { x: 10, y: 10, width: 80, height: 30 },
+            }),
+            makeSpec({
+                figmaId: '15:196:exact-rich-text',
+                name: 'ExactRichText',
+                figmaType: 'TEXT',
+                kind: 'richText',
+                frame: { x: 100, y: 10, width: 80, height: 30 },
+            }),
+        ],
+    });
+    root.children[0].parentFrame = root.frame;
+    root.children[0].characters = '精确字号';
+    root.children[0].textStyle = { fontSize: 17.8873233795166, lineHeightPx: 30 };
+    root.children[1].parentFrame = root.frame;
+    root.children[1].characters = '精确字号';
+    root.children[1].textStyle = { fontSize: 24.5, lineHeightPx: 22 };
+
+    const environment = await importWithFakeCocos(root, 2);
+    const importedRoot = environment.canvas.children[0];
+
+    assert.equal(importedRoot.children[0].getComponent(Label).fontSize, 17.89);
+    assert.equal(importedRoot.children[1].getComponent(RichText).fontSize, 24.5);
 });
 
 test('expands an undersized Label vertically to font size plus both outline widths', async () => {
