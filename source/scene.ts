@@ -841,13 +841,20 @@ function isMultilineLabel(characters: string): boolean {
     return characters.includes('\n');
 }
 
+function figmaPanelFontSize(value: number | undefined): number {
+    const fontSize = typeof value === 'number' && Number.isFinite(value) ? value : 16;
+    return Math.round((fontSize + Number.EPSILON) * 100) / 100;
+}
+
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const { Label } = cc;
     const label = node.getComponent(Label) ?? node.addComponent(Label);
     const style = spec.textStyle ?? {};
     const characters = normalizeLabelText(spec.characters);
     const multiline = isMultilineLabel(characters);
-    label.fontSize = Math.max(1, (style.fontSize ?? 16) * scale);
+    // Figma stores more precision than its panel displays. Match the visible
+    // design value (up to two decimals) instead of leaking its internal float.
+    label.fontSize = figmaPanelFontSize(style.fontSize);
     label.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
     label.spacingX = (style.letterSpacing ?? 0) * scale;
     label.enableWrapText = false;
@@ -878,7 +885,7 @@ function configureRichText(node: any, spec: SceneNodeSpec, scale: number, cc: an
     const richText = node.getComponent(RichText) ?? node.addComponent(RichText);
     const style = spec.textStyle ?? {};
     richText.string = normalizeLabelText(spec.characters);
-    richText.fontSize = Math.max(1, (style.fontSize ?? 16) * scale);
+    richText.fontSize = figmaPanelFontSize(style.fontSize);
     richText.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
     richText.maxWidth = Math.max(0, spec.frame.width * scale);
     richText.handleTouchEvent = false;
