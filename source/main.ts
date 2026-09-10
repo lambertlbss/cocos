@@ -1,6 +1,7 @@
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path';
 import { existsSync } from 'fs';
 import { randomBytes } from 'crypto';
+import { diagnosticStart, diagnosticTask } from './diagnostics';
 import { readFile, readdir } from 'fs/promises';
 import packageJSON from '../package.json';
 import { FigmaClient, CancelledError, clampImageScale } from './figma/client';
@@ -780,7 +781,7 @@ async function buildAssets(
     let apiPromise: Promise<FigmaClient> | null = null;
 
     const getApi = () => {
-        apiPromise ??= client();
+        apiPromise ??= diagnosticTask('准备 Figma 客户端', undefined, () => client());
         return apiPromise;
     };
 
@@ -931,10 +932,10 @@ async function buildAssets(
             ? await (await getApi()).getImageFillUrls(session.fileKey)
             : {};
         const downloads = new Map<string, Promise<Buffer>>();
-        const download = (url: string) => {
+        const download = (url: string, nodeLabel: string) => {
             let task = downloads.get(url);
             if (!task) {
-                task = getApi().then((api) => api.download(url));
+                task = getApi().then((api) => api.download(url, nodeLabel));
                 downloads.set(url, task);
             }
             return task;
@@ -957,7 +958,7 @@ async function buildAssets(
                         : `IMAGE 填充 ${item.source.id}`;
                     throw new Error(`Figma 未能提供${label}：${item.node.name}`);
                 }
-                contents = await download(remoteUrl);
+                contents = await download(remoteUrl, `${item.node.name} (${item.node.id})`);
                 extension = item.source.kind === 'source-node'
                     ? 'png'
                     : detectImageExtension(contents);
@@ -1092,6 +1093,7 @@ async function buildAssets(
                 format,
                 importSettings.scale,
                 useAbsoluteBounds,
+                Object.fromEntries(batch.map((item) => [item.node.id, item.node.name])),
             ));
         }
         for (const item of pending) {
@@ -1104,7 +1106,7 @@ async function buildAssets(
                 if (!remoteUrl) {
                     throw new Error(`Figma 未能渲染节点：${item.node.name}`);
                 }
-                contents = await (await getApi()).download(remoteUrl);
+                contents = await (await getApi()).download(remoteUrl, `${item.node.name} (${item.node.id})`);
                 await cache.write(item.key, contents);
             }
             const asset = await writer.write(item.url, contents, item.borders);
@@ -1166,7 +1168,7 @@ async function buildAssets(
                 }
                 let task = downloads.get(remoteUrl);
                 if (!task) {
-                    task = getApi().then((api) => api.download(remoteUrl));
+                    task = getApi().then((api) => api.download(remoteUrl, `${group.node.name} (${group.node.id})`));
                     downloads.set(remoteUrl, task);
                 }
                 contents = await task;
@@ -1192,11 +1194,11 @@ async function buildAssets(
         }
     };
 
-    await processTiled(requests.tiled);
-    await processRemote(requests.png);
+    await diagnosticTask('准备平铺资源', { count: requests.tiled.length }, () => processTiled(requests.tiled));
+    await diagnosticTask('准备 PNG 资源', { count: requests.png.length }, () => processRemote(requests.png));
     // Run after whole-node renders so a correct visibility-independent source
     // image wins if both paths share the same legacy asset filename.
-    await processRawImages(requests.rawImages);
+    await diagnosticTask('准备隐藏图片资源', { count: requests.rawImages.length }, () => processRawImages(requests.rawImages));
 
     const gradientAssets = new Map<string, SpriteAssetSpec>();
     for (const node of requests.gradients) {
@@ -1962,11 +1964,12 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
     }
     const importSettings = safeSettings(request.settings);
     const controller = beginOperation(operationOwner);
+    const trace = diagnosticStart('导入任务', { roots: document.roots.map((node) => ({ id: node.id, name: node.name })) });
     try {
         await saveSettings(importSettings);
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
         const decisions = decisionMap(request.overrides, document.tree);
-        const builtAssets = await buildAssets(document, decisions, importSettings);
+        const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings));
         const { assets, warnings } = builtAssets;
         // buildAssets may promote a container to a local same-name resource.
         // Compile after that promotion so assets and SceneNodeSpec share the
@@ -2082,8 +2085,10 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
             value: 1,
             message: `完成：新建 ${result.created}，更新 ${result.updated}${warnings.length ? `；${warnings.length} 个三/九宫已降级为 PNG 整层` : ''}`,
         });
+        trace.done();
         return finalResult;
     } catch (error) {
+        trace.fail(error);
         if (error instanceof CancelledError || controller.signal.aborted) {
             emitProgress({ phase: 'cancelled', value: 0, message: '已取消。' });
             throw new Error('操作已取消。');
@@ -2096,6 +2101,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         throw error;
     } finally {
         finishOperation(controller);
+        trace.event('后台任务已释放');
     }
 }
 

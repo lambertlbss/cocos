@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { diagnosticTask } from '../diagnostics';
 import type { SpriteAssetSpec } from '../types';
 
 export type RasterImageExtension = 'png' | 'jpg' | 'webp' | 'gif' | 'bmp';
@@ -110,8 +111,14 @@ function findSpriteFrame(info: AssetInfo): AssetInfo | null {
     return null;
 }
 
+function assetRequest(channel: string, method: string, ...args: any[]): Promise<any> {
+    // Log only the target, never image contents or serialized metadata.
+    return diagnosticTask(`Cocos 资源 ${method}`, { target: args[0] },
+        () => Editor.Message.request(channel, method, ...args));
+}
+
 async function queryAsset(value: string): Promise<AssetInfo | null> {
-    return await Editor.Message.request(
+    return await assetRequest(
         'asset-db',
         'query-asset-info',
         value,
@@ -143,7 +150,7 @@ async function ensureSpriteFrame(url: string, info: AssetInfo): Promise<AssetInf
     if (findSpriteFrame(info)) {
         return info;
     }
-    const meta = await Editor.Message.request(
+    const meta = await assetRequest(
         'asset-db',
         'query-asset-meta',
         info.uuid,
@@ -154,14 +161,14 @@ async function ensureSpriteFrame(url: string, info: AssetInfo): Promise<AssetInf
     meta.userData = meta.userData ?? {};
     if (meta.userData.type !== 'sprite-frame') {
         meta.userData.type = 'sprite-frame';
-        await Editor.Message.request(
+        await assetRequest(
             'asset-db',
             'save-asset-meta',
             info.uuid,
             JSON.stringify(meta, null, 2),
         );
     }
-    await Editor.Message.request('asset-db', 'reimport-asset', info.uuid);
+    await assetRequest('asset-db', 'reimport-asset', info.uuid);
     return waitForAsset(url);
 }
 
@@ -170,7 +177,7 @@ async function ensureFolder(url: string): Promise<void> {
     if (existing) {
         return;
     }
-    await Editor.Message.request('asset-db', 'create-asset', url, null);
+    await assetRequest('asset-db', 'create-asset', url, null);
 }
 
 export class AssetWriter {
@@ -204,7 +211,7 @@ export class AssetWriter {
         if (!info?.imported || info.invalid || !spriteFrame) {
             return null;
         }
-        let meta = await Editor.Message.request(
+        let meta = await assetRequest(
             'asset-db',
             'query-asset-meta',
             info.uuid,
@@ -212,7 +219,7 @@ export class AssetWriter {
         if (tiled && meta && await this.applySpriteMeta(info, meta, undefined, true)) {
             info = await waitForAsset(url);
             spriteFrame = findSpriteFrame(info);
-            meta = await Editor.Message.request(
+            meta = await assetRequest(
                 'asset-db',
                 'query-asset-meta',
                 info.uuid,
@@ -238,9 +245,9 @@ export class AssetWriter {
         const existing = await queryAsset(url);
         const data = typeof contents === 'string' ? Buffer.from(contents, 'utf8') : contents;
         if (existing) {
-            await Editor.Message.request('asset-db', 'save-asset', url, data);
+            await assetRequest('asset-db', 'save-asset', url, data);
         } else {
-            await Editor.Message.request('asset-db', 'create-asset', url, data, { overwrite: true });
+            await assetRequest('asset-db', 'create-asset', url, data, { overwrite: true });
         }
         let info = await waitForAsset(url, false);
         info = await ensureSpriteFrame(url, info);
@@ -249,7 +256,7 @@ export class AssetWriter {
         let meta: AssetMeta | null = null;
         let sliceFallback: string | undefined;
         try {
-            meta = await Editor.Message.request(
+            meta = await assetRequest(
                 'asset-db',
                 'query-asset-meta',
                 info.uuid,
@@ -261,7 +268,7 @@ export class AssetWriter {
                 tiled,
             )) {
                 info = await waitForAsset(url);
-                meta = await Editor.Message.request(
+                meta = await assetRequest(
                     'asset-db',
                     'query-asset-meta',
                     info.uuid,
@@ -335,8 +342,8 @@ export class AssetWriter {
             return false;
         }
         Object.assign(spriteMeta.userData, changes);
-        await Editor.Message.request('asset-db', 'save-asset-meta', info.uuid, JSON.stringify(meta, null, 2));
-        await Editor.Message.request('asset-db', 'reimport-asset', info.uuid);
+        await assetRequest('asset-db', 'save-asset-meta', info.uuid, JSON.stringify(meta, null, 2));
+        await assetRequest('asset-db', 'reimport-asset', info.uuid);
         return true;
     }
 }
