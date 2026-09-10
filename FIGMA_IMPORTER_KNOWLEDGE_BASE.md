@@ -11,9 +11,13 @@
 
 ### 2026-09-10 当前修正规则
 
+- 导入框体精度：所有插件主动写入的 `UITransform` 宽、高在倍率及布局计算后统一四舍五入保留两位小数，覆盖普通/根节点、Sprite、三/九宫、平铺/超边界辅助节点、ScrollView 的 view/content 和布局拉伸尺寸。仅在尺寸写入端取整，不提前舍入 Figma 原始数据，也不主动舍入节点坐标/旋转/缩放。NONE/RESIZE_HEIGHT 文本及其他运行时组件后续自动计算的尺寸不锁定，可能再次产生多位小数。
+
+- 水平对齐始终读取 Figma 的 `textAlignHorizontal`（LEFT/CENTER/RIGHT，缺失及不支持的 JUSTIFIED 暂退回 LEFT）。普通 Label 的 Cocos `Overflow.NONE` 模式竖直统一 CENTER；自动换行 `RESIZE_HEIGHT` 模式竖直按 Figma `textAlignVertical`（TOP/CENTER/BOTTOM，缺失为 TOP）。按溢出模式判断，不按字符串是否有换行判断，空文本同样适用。RichText 没有 Label 的 Overflow 枚举，保留既有自动排版和 Figma 竖直对齐。自动尺寸仍由引擎计算，本规则不裁剪、不修改框高或移动节点。
+
 - 三/九宫 Sprite 使用 `SLICED`：重写已有带切片边界的资源时，即使未传入新边界也保留 `sliced` 标记；Scene 加载 SpriteFrame 后用实际 inset 边界兜底识别。`TILED` 优先，明确 `sliceFallback` 的失败资源仍按 SIMPLE 导入并提示，不能伪装切片成功。
 - 自动按钮遵循祖先互斥：任意祖先已有 `cc.Button` 时，后代不再自动添加 Button；增量导入通过原有组件清理/所有权保护流程移除旧的受管嵌套 Button。祖先取消按钮后，后代可恢复自动按钮。兄弟按钮不互相抑制。
-- Label、RichText 行高统一 `max(1, ceil(Figma行高 × 导入倍率))`；字号仍保留两位小数、不乘倍率。描边不再用于手动扩框。
+- Label、RichText 行高直接取 Figma API 的 `style.lineHeightPx`，四舍五入保留一位小数；不乘导入倍率、不向上取整、不根据框高/基线/描边反算。不额外修正有效行高；API 缺失字段时保留解析器原有 `fontSize × 1.2` 备用逻辑。字号仍保留两位小数、不乘倍率。描边不再用于手动扩框。
 - 已知限制：真实切片边界写入失败仍会降级；上述修改已补自动化回归，实际九宫拉伸、按钮点击传播和字体视觉需在 Creator 3.8.7 验收。
 
 本文档是本插件的长期知识库，不是普通使用说明。它记录：
@@ -528,8 +532,8 @@ Frame 链接会先切换到其来源绑定的目标 Prefab，再开始任何节�
 - `Label.fontSize` 与 `RichText.fontSize` 不乘导入倍率，并按 Figma 属性面板的显示精度最多保留两位小数；内部 `17.8873233795166` 在面板显示为 `17.89` 时写入 Cocos `17.89`，Figma `18` 与 `24.5` 仍分别写入 `18` 与 `24.5`；
 - `textAutoResize = WIDTH_AND_HEIGHT` 使用 `Overflow.NONE`、关闭自动换行；`HEIGHT` 和 `NONE` 均使用 `Overflow.RESIZE_HEIGHT`、开启自动换行；不使用 `CLAMP`、不缩小字号、不添加省略号。旧 Scene 数据缺少该字段时退回自动宽度；Figma 解析器缺省值仍为固定尺寸 `NONE`；
 - CRLF、CR、U+2028、U+2029 统一转换为 `\n`，只有实际包含 `\n` 才判定为多行；
-- 无显式换行使用 `CENTER / CENTER`，有显式换行使用 `LEFT / TOP`，保留现有对齐约定；不额外按最终字形尺寸做位置补偿；
-- `lineHeight` 保留 Figma 的 `lineHeightPx`，不强制提升到 `fontSize`；
+- 水平对齐按 Figma；普通 Label 的 `NONE` 模式竖直居中，`RESIZE_HEIGHT` 模式竖直按 Figma，不依据显式换行改变。RichText 仍按 Figma 对齐；不额外按最终字形尺寸做位置补偿；
+- `lineHeight` 采用 Figma 的 `lineHeightPx` 并四舍五入保留一位小数，不乘倍率、不强制提升到 `fontSize`，不为匹配文本框高而改写；
 - TTF Label 的 UITransform 高度约为 `(显式行数 + 0.26) × lineHeight`（再叠加描边扩展），是 Cocos 的 `BASELINE_RATIO` 度量结果，不代表节点位置发生偏移；BitmapFont 使用另一套度量路径。
 
 固定宽度文本由 Cocos 按导入宽度自动折行，不再根据框高猜测换行，也不提示用户强制插入换行符。字体度量差异仍可能导致与 Figma 的实际折行位置不同。描边外观继续保留，仅移除插件自行扩框的处理；RichText 保留原有 `maxWidth` 排版，不再做导入后的尺寸回写。

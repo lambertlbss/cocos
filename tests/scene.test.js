@@ -530,6 +530,41 @@ async function importWithPrefabContext(environment, spec, prefabContext) {
     }
 }
 
+test('rounds imported frame sizes after scaling without rounding node positions or text metrics', async () => {
+    for (const kind of ['node', 'label', 'richText']) {
+        const root = makeSpec({
+            frame: { x: 0, y: 0, width: 200, height: 100 },
+            children: [makeSpec({
+                figmaId: `rounded-${kind}`,
+                name: 'FractionalFrame',
+                kind,
+                figmaType: kind === 'node' ? 'FRAME' : 'TEXT',
+                frame: { x: 10.1234, y: 5.6789, width: 20.1234, height: 10.5678 },
+                characters: 'AB',
+                textStyle: { fontSize: 17.89, lineHeightPx: 23.4, textAutoResize: 'WIDTH_AND_HEIGHT' },
+            })],
+        });
+        root.children[0].parentFrame = root.frame;
+        const environment = await importWithFakeCocos(root, 1.25);
+        const child = environment.canvas.children[0].children[0];
+        const transform = child.getComponent(UITransform);
+        assert.deepEqual(transform.contentSize, { width: 25.15, height: 13.21 }, kind);
+        assert.ok(Math.abs(child.position.x - (-99.768625)) < 1e-9, kind);
+        assert.ok(Math.abs(child.position.y - 48.7965) < 1e-9, kind);
+        const text = child.getComponent(Label) ?? child.getComponent(RichText);
+        if (text) {
+            assert.equal(text.fontSize, 17.89, kind);
+            assert.equal(text.lineHeight, 23.4, kind);
+        }
+        if (kind === 'label') {
+            text.updateRenderData();
+            assert.equal(text.overflow, Label.Overflow.NONE);
+            assert.ok(Math.abs(transform.height - 29.484) < 1e-9);
+            assert.notEqual(transform.height, 29.48, 'runtime Label auto-size must not be locked or rounded');
+        }
+    }
+});
+
 test('does not add a clipping Mask to a terminal Sprite layer', async () => {
     const environment = await importWithFakeCocos(makeSpec({
         action: 'render',
@@ -865,15 +900,129 @@ test('keeps the initial Figma box without outline compensation', async () => {
     assert.equal(title.position.y + transform.height / 2, 35);
 });
 
-test('rounds scaled Label and RichText line heights up to integers', async () => {
+test('maps text alignment by Label overflow while preserving Figma alignment for RichText', async () => {
     for (const kind of ['label', 'richText']) {
-        const environment = await importWithFakeCocos(makeSpec({
-            figmaType: 'TEXT', kind, characters: '行高',
-            textStyle: { fontSize: 17.89, lineHeightPx: 20.125 },
-        }), 1.5);
-        const component = environment.canvas.children[0].getComponent(kind === 'label' ? Label : RichText);
-        assert.equal(component.lineHeight, 31);
-        assert.equal(component.fontSize, 17.89);
+        for (const mode of ['WIDTH_AND_HEIGHT', 'HEIGHT', 'NONE', undefined]) {
+            for (const horizontal of ['LEFT', 'CENTER', 'RIGHT']) {
+                for (const vertical of ['TOP', 'CENTER', 'BOTTOM']) {
+                    for (const characters of ['', '单行', '第一行\n第二行']) {
+                        const environment = await importWithFakeCocos(makeSpec({
+                            figmaType: 'TEXT', kind, characters,
+                            textStyle: {
+                                textAutoResize: mode,
+                                textAlignHorizontal: horizontal,
+                                textAlignVertical: vertical,
+                            },
+                        }));
+                        const renderer = kind === 'label' ? Label : RichText;
+                        const component = environment.canvas.children[0].getComponent(renderer);
+                        const isAutoWidthLabel = kind === 'label'
+                            && (mode === 'WIDTH_AND_HEIGHT' || mode === undefined);
+                        const expectedVertical = isAutoWidthLabel ? 'CENTER' : vertical;
+                        const context = `${kind}, mode=${mode}, horizontal=${horizontal}, vertical=${vertical}, text=${JSON.stringify(characters)}`;
+                        assert.equal(component.horizontalAlign, renderer.HorizontalAlign[horizontal], context);
+                        assert.equal(component.verticalAlign, renderer.VerticalAlign[expectedVertical], context);
+                    }
+                }
+            }
+        }
+    }
+});
+
+test('defaults missing text alignment to left and chooses vertical default by renderer and overflow', async () => {
+    for (const kind of ['label', 'richText']) {
+        for (const mode of ['WIDTH_AND_HEIGHT', 'HEIGHT', 'NONE', undefined]) {
+            const environment = await importWithFakeCocos(makeSpec({
+                figmaType: 'TEXT', kind, characters: '',
+                textStyle: { textAutoResize: mode },
+            }));
+            const renderer = kind === 'label' ? Label : RichText;
+            const component = environment.canvas.children[0].getComponent(renderer);
+            const isAutoWidthLabel = kind === 'label'
+                && (mode === 'WIDTH_AND_HEIGHT' || mode === undefined);
+            const context = `${kind}, mode=${mode}`;
+            assert.equal(component.horizontalAlign, renderer.HorizontalAlign.LEFT, context);
+            assert.equal(
+                component.verticalAlign,
+                renderer.VerticalAlign[isAutoWidthLabel ? 'CENTER' : 'TOP'],
+                context,
+            );
+        }
+    }
+});
+
+test('reapplies vertical alignment on the same Label when incremental imports switch overflow modes', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        return request === 'cc' ? environment.cc : originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        let nodeMap = {};
+        let firstNode;
+        let firstLabel;
+        for (const [mode, horizontal, vertical, expectedVertical] of [
+            ['WIDTH_AND_HEIGHT', 'RIGHT', 'BOTTOM', 'CENTER'],
+            ['HEIGHT', 'LEFT', 'TOP', 'TOP'],
+            ['WIDTH_AND_HEIGHT', 'CENTER', 'TOP', 'CENTER'],
+            ['NONE', 'RIGHT', 'BOTTOM', 'BOTTOM'],
+            [undefined, 'LEFT', 'BOTTOM', 'CENTER'],
+        ]) {
+            const root = makeSpec({
+                figmaId: 'changing-text-alignment', figmaType: 'TEXT', kind: 'label',
+                characters: '第一行\n第二行',
+                textStyle: {
+                    textAutoResize: mode,
+                    textAlignHorizontal: horizontal,
+                    textAlignVertical: vertical,
+                },
+            });
+            const result = await methods.importDocument({
+                packageName: 'figma-importer-cocos', fileKey: 'file-key', rootName: 'Test',
+                rootFrame: root.frame, scale: 1, updateExisting: Boolean(firstNode), existingMap: nodeMap,
+                centerInCanvas: true, roots: [root],
+            });
+            nodeMap = result.nodeMap;
+            const imported = environment.canvas.children[0];
+            const label = imported.getComponent(Label);
+            firstNode ??= imported;
+            firstLabel ??= label;
+            const context = `mode=${mode}`;
+            const wraps = mode === 'HEIGHT' || mode === 'NONE';
+            assert.equal(environment.canvas.children.length, 1, context);
+            assert.equal(imported, firstNode, context);
+            assert.equal(label, firstLabel, context);
+            assert.equal(label.overflow, wraps ? Label.Overflow.RESIZE_HEIGHT : Label.Overflow.NONE, context);
+            assert.equal(label.enableWrapText, wraps, context);
+            assert.equal(label.horizontalAlign, Label.HorizontalAlign[horizontal], context);
+            assert.equal(label.verticalAlign, Label.VerticalAlign[expectedVertical], context);
+        }
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('rounds Figma Label and RichText line heights to one decimal without import scaling', async () => {
+    for (const kind of ['label', 'richText']) {
+        for (const scale of [0.5, 1, 1.5, 2]) {
+            for (const [lineHeightPx, expected] of [
+                [20.125, 20.1],
+                [20.149, 20.1],
+                [20.15, 20.2],
+                [20.25, 20.3],
+                [23.999, 24],
+                [24, 24],
+            ]) {
+                const environment = await importWithFakeCocos(makeSpec({
+                    figmaType: 'TEXT', kind, characters: '行高',
+                    textStyle: { fontSize: 17.89, lineHeightPx },
+                }), scale);
+                const component = environment.canvas.children[0].getComponent(kind === 'label' ? Label : RichText);
+                const context = `${kind}: lineHeightPx=${lineHeightPx}, scale=${scale}`;
+                assert.equal(component.lineHeight, expected, context);
+                assert.equal(component.fontSize, 17.89, context);
+            }
+        }
     }
 });
 
@@ -1069,7 +1218,7 @@ test('keeps a multiline Label at the Figma frame size', async () => {
     assert.ok(Math.abs(description.position.y + transform.height / 2 - 35) < 1e-9);
 });
 
-test('does not misclassify a single line from maxLines or a tall Figma frame', async () => {
+test('defaults missing wrapped Label alignment to left/top regardless of maxLines or a tall frame', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 100, height: 80 },
@@ -1093,8 +1242,8 @@ test('does not misclassify a single line from maxLines or a tall Figma frame', a
     const title = environment.canvas.children[0].children[0];
     const label = title.getComponent(Label);
 
-    assert.equal(label.horizontalAlign, Label.HorizontalAlign.CENTER);
-    assert.equal(label.verticalAlign, Label.VerticalAlign.CENTER);
+    assert.equal(label.horizontalAlign, Label.HorizontalAlign.LEFT);
+    assert.equal(label.verticalAlign, Label.VerticalAlign.TOP);
     assert.deepEqual(
         { x: title.position.x, y: title.position.y },
         { x: -10, y: 15 },
@@ -1191,6 +1340,26 @@ test('keeps the Figma node size when an existing sliced SpriteFrame is assigned'
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
 });
 
+test('rounds fractional sliced and trimmed Sprite sizes after all scaling', async () => {
+    const cases = [
+        { uuid: 'sprite-frame', sliced: true, width: 180.1234, height: 72.5678, expected: { width: 225.15, height: 90.71 } },
+        { uuid: 'trimmed-sprite-frame', sliced: false, width: 60.1234, height: 40.0822666667, expected: { width: 60.12, height: 40.08 } },
+    ];
+    for (const entry of cases) {
+        const environment = await importWithFakeCocos(makeSpec({
+            action: 'render',
+            kind: 'sprite',
+            frame: { x: 0, y: 0, width: entry.width, height: entry.height },
+            sprite: { uuid: entry.uuid, url: 'db://assets/fractional.png', sliced: entry.sliced },
+        }), 1.25);
+        const imported = environment.canvas.children[0];
+        const sprite = imported.getComponent(Sprite);
+        assert.equal(sprite.type, entry.sliced ? Sprite.Type.SLICED : Sprite.Type.SIMPLE);
+        assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
+        assert.deepEqual(imported.getComponent(UITransform).contentSize, entry.expected, entry.uuid);
+    }
+});
+
 test('keeps an unscaled simple Sprite in TRIMMED size mode', async () => {
     const environment = await importWithFakeCocos(makeSpec({
         action: 'render',
@@ -1273,12 +1442,12 @@ test('renders visual overflow in a counter-rotated helper without changing logic
     const helper = imported.getChildByName('__FigmaOverflowVisual');
     const helperTransform = helper?.getComponent(UITransform);
 
-    assert.deepEqual(transform.contentSize, { width: 123, height: 78.523 });
+    assert.deepEqual(transform.contentSize, { width: 123, height: 78.52 });
     assert.equal(imported.euler.z, 30);
     assert.equal(imported.getComponent(Sprite), null);
     assert.ok(helper);
     assert.ok(helper.getComponent(Sprite));
-    assert.deepEqual(helperTransform.contentSize, { width: 148.125, height: 131.845 });
+    assert.deepEqual(helperTransform.contentSize, { width: 148.13, height: 131.85 });
     assert.equal(helper.euler.z, -30);
     assert.ok(Math.abs(helper.position.x) < 0.001);
     assert.ok(Math.abs(helper.position.y) < 0.001);
@@ -1431,6 +1600,29 @@ test('scales an IMAGE tile with an isolated helper without masking manual childr
     assert.equal(tiledNode.getComponent(Sprite).type, Sprite.Type.TILED);
     assert.deepEqual(tiledNode.getComponent(UITransform).contentSize, { width: 90, height: 36 });
     assert.deepEqual(tiledNode.scale, { x: 2, y: 2, z: 1 });
+});
+
+test('rounds the logical frame, tile mask and rescaled tile helper independently', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        action: 'render',
+        kind: 'sprite',
+        figmaType: 'ELLIPSE',
+        frame: { x: 0, y: 0, width: 163.1234, height: 154.5678 },
+        sprite: {
+            uuid: 'source-node-sprite-frame',
+            url: 'db://assets/fractional-tile.png',
+            sliced: false,
+            tiled: true,
+            tileScale: 1.6,
+        },
+    }), 1.25);
+    const imported = environment.canvas.children[0];
+    const mask = imported.getChildByName('__FigmaTiledMask');
+    const tile = mask.getChildByName('__FigmaTiledSprite');
+    assert.deepEqual(imported.getComponent(UITransform).contentSize, { width: 203.9, height: 193.21 });
+    assert.deepEqual(mask.getComponent(UITransform).contentSize, { width: 203.9, height: 193.21 });
+    assert.deepEqual(tile.getComponent(UITransform).contentSize, { width: 127.44, height: 120.76 });
+    assert.deepEqual(tile.scale, { x: 1.6, y: 1.6, z: 1 });
 });
 
 test('keeps manual children outside the tile Mask and synchronizes helper layers on reimport', async () => {
@@ -1685,6 +1877,35 @@ test('keeps an oversized centered ScrollView content aligned to the viewport top
         },
         { x: 55, y: -45 },
     );
+});
+
+test('rounds fractional ScrollView viewport and expanded content sizes without quantizing helper positions', async () => {
+    const root = makeSpec({
+        name: 'FractionalScroll',
+        kind: 'scrollView',
+        overflowDirection: 'HORIZONTAL_AND_VERTICAL_SCROLLING',
+        frame: { x: 0, y: 0, width: 100.1234, height: 80.5678 },
+        children: [makeSpec({
+            figmaId: 'fractional-scroll-child',
+            frame: { x: 90.1234, y: 70.5678, width: 30.9816, height: 30.4321 },
+        })],
+    });
+    root.children[0].parentFrame = root.frame;
+    const environment = await importWithFakeCocos(root, 1.25);
+    const imported = environment.canvas.children[0];
+    const view = imported.getChildByName('view');
+    const content = view.getChildByName('content');
+    const child = content.children[0];
+    assert.deepEqual(imported.getComponent(UITransform).contentSize, { width: 125.15, height: 100.71 });
+    assert.deepEqual(view.getComponent(UITransform).contentSize, { width: 125.15, height: 100.71 });
+    assert.deepEqual(content.getComponent(UITransform).contentSize, { width: 151.38, height: 126.25 });
+    assert.deepEqual(child.getComponent(UITransform).contentSize, { width: 38.73, height: 38.04 });
+    assert.ok(Math.abs(content.position.x - 13.115) < 1e-9);
+    assert.ok(Math.abs(content.position.y - (-12.77)) < 1e-9);
+    assert.ok(Math.abs(content.position.x - content.getComponent(UITransform).width / 2
+        + view.getComponent(UITransform).width / 2) < 1e-9, 'viewport and content left edges remain aligned');
+    assert.ok(Math.abs(content.position.y + content.getComponent(UITransform).height / 2
+        - view.getComponent(UITransform).height / 2) < 1e-9, 'viewport and content top edges remain aligned');
 });
 
 test('does not expand the cross axis of a single-axis ScrollView', async () => {

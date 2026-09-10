@@ -748,12 +748,22 @@ function relativeTransformPosition(
     };
 }
 
+function setImportedContentSize(transform: any, width: number, height: number): void {
+    // Round only at the UITransform write boundary, after scale/layout math.
+    // Do not lock sizes recalculated later by Label or other runtime components.
+    transform?.setContentSize(
+        Math.round((width + Number.EPSILON) * 100) / 100,
+        Math.round((height + Number.EPSILON) * 100) / 100,
+    );
+}
+
 function configureGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): any {
     const { UITransform, Vec3 } = cc;
     const transform = node.getComponent(UITransform) ?? node.addComponent(UITransform);
     transform.setAnchorPoint(0.5, 0.5);
     const size = spec.intrinsicSize ?? spec.frame;
-    transform.setContentSize(
+    setImportedContentSize(
+        transform,
         Math.max(0, size.width * scale),
         Math.max(0, size.height * scale),
     );
@@ -835,9 +845,18 @@ function normalizeLabelText(characters: string | undefined): string {
         .replace(/[\r\u2028\u2029]/g, '\n');
 }
 
-function isMultilineLabel(characters: string): boolean {
-    // Explicit line feeds still control the existing alignment convention.
-    return characters.includes('\n');
+function applyTextAlignment(component: any, style: SceneNodeSpec['textStyle'], renderer: any): void {
+    // Cocos has no JUSTIFIED alignment: unsupported/missing values use LEFT/TOP.
+    component.horizontalAlign = style?.textAlignHorizontal === 'CENTER'
+        ? renderer.HorizontalAlign.CENTER
+        : style?.textAlignHorizontal === 'RIGHT'
+            ? renderer.HorizontalAlign.RIGHT
+            : renderer.HorizontalAlign.LEFT;
+    component.verticalAlign = style?.textAlignVertical === 'CENTER'
+        ? renderer.VerticalAlign.CENTER
+        : style?.textAlignVertical === 'BOTTOM'
+            ? renderer.VerticalAlign.BOTTOM
+            : renderer.VerticalAlign.TOP;
 }
 
 function figmaPanelFontSize(value: number | undefined): number {
@@ -845,28 +864,34 @@ function figmaPanelFontSize(value: number | undefined): number {
     return Math.round((fontSize + Number.EPSILON) * 100) / 100;
 }
 
+function figmaPanelLineHeight(value: number | undefined): number {
+    const lineHeight = typeof value === 'number' && Number.isFinite(value) ? value : 16;
+    // Preserve Figma's pixel line height independently of import scale and
+    // engine-computed content size; only round to one decimal place.
+    return Math.round((lineHeight + Number.EPSILON) * 10) / 10;
+}
+
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const { Label } = cc;
     const label = node.getComponent(Label) ?? node.addComponent(Label);
     const style = spec.textStyle ?? {};
     const characters = normalizeLabelText(spec.characters);
-    const multiline = isMultilineLabel(characters);
     // Figma NONE means a fixed box, not Cocos Overflow.NONE. Both fixed-width
     // modes wrap and grow vertically; missing legacy metadata stays auto-width.
     const wrap = style.textAutoResize === 'HEIGHT' || style.textAutoResize === 'NONE';
     // Figma stores more precision than its panel displays. Match the visible
     // design value (up to two decimals) instead of leaking its internal float.
     label.fontSize = figmaPanelFontSize(style.fontSize);
-    label.lineHeight = Math.max(1, Math.ceil((style.lineHeightPx ?? style.fontSize ?? 16) * scale));
+    label.lineHeight = figmaPanelLineHeight(style.lineHeightPx ?? style.fontSize);
     label.spacingX = (style.letterSpacing ?? 0) * scale;
     label.overflow = wrap ? Label.Overflow.RESIZE_HEIGHT : Label.Overflow.NONE;
     label.enableWrapText = wrap;
-    label.horizontalAlign = multiline
-        ? Label.HorizontalAlign.LEFT
-        : Label.HorizontalAlign.CENTER;
-    label.verticalAlign = multiline
-        ? Label.VerticalAlign.TOP
-        : Label.VerticalAlign.CENTER;
+    applyTextAlignment(label, style, Label);
+    // Auto-width labels use a centered vertical baseline regardless of Figma's
+    // vertical alignment. Fixed-width wrapping labels retain the Figma setting.
+    if (label.overflow === Label.Overflow.NONE) {
+        label.verticalAlign = Label.VerticalAlign.CENTER;
+    }
     label.string = characters;
     label.enableOutline = false;
     label.color = toColor(cc.Color, { r: 1, g: 1, b: 1, a: 1 });
@@ -888,14 +913,10 @@ function configureRichText(node: any, spec: SceneNodeSpec, scale: number, cc: an
     const style = spec.textStyle ?? {};
     richText.string = normalizeLabelText(spec.characters);
     richText.fontSize = figmaPanelFontSize(style.fontSize);
-    richText.lineHeight = Math.max(1, Math.ceil((style.lineHeightPx ?? style.fontSize ?? 16) * scale));
+    richText.lineHeight = figmaPanelLineHeight(style.lineHeightPx ?? style.fontSize);
     richText.maxWidth = Math.max(0, spec.frame.width * scale);
     richText.handleTouchEvent = false;
-    // RichText is primarily used for runtime-injected multi-line content. An
-    // empty Figma placeholder must therefore keep the same top-left contract
-    // after the game assigns its real string.
-    richText.horizontalAlign = RichText.HorizontalAlign.LEFT;
-    richText.verticalAlign = RichText.VerticalAlign.TOP;
+    applyTextAlignment(richText, style, RichText);
     richText.fontFamily = style.fontFamily ?? '';
     richText.useSystemFont = !spec.fontUuid;
     const fill = visiblePaint(spec.fills);
@@ -968,7 +989,7 @@ async function configureSprite(
             const scaleY = targetHeight / rawHeight;
             if (Math.abs(scaleX - scaleY) <= 0.0001) {
                 sprite.sizeMode = Sprite.SizeMode.CUSTOM;
-                transform?.setContentSize(trimmedWidth * scaleX, trimmedHeight * scaleY);
+                setImportedContentSize(transform, trimmedWidth * scaleX, trimmedHeight * scaleY);
                 return;
             }
         }
@@ -977,7 +998,7 @@ async function configureSprite(
     // Sliced/tiled sprites and sprites resized in Figma must retain the design
     // size. Cocos represents that state as CUSTOM.
     sprite.sizeMode = Sprite.SizeMode.CUSTOM;
-    transform?.setContentSize(targetWidth, targetHeight);
+    setImportedContentSize(transform, targetWidth, targetHeight);
 }
 
 function requiresTiledMask(spec: SceneNodeSpec): boolean {
@@ -1028,7 +1049,8 @@ async function configureOverflowSpriteHelper(
     const transform = helper.getComponent(cc.UITransform)
         ?? helper.addComponent(cc.UITransform);
     transform.setAnchorPoint(0.5, 0.5);
-    transform.setContentSize(
+    setImportedContentSize(
+        transform,
         Math.max(0, renderFrame.width * scale),
         Math.max(0, renderFrame.height * scale),
     );
@@ -1088,7 +1110,8 @@ async function configureTiledSpriteHelper(
         const maskTransform = tiledMask.getComponent(cc.UITransform)
             ?? tiledMask.addComponent(cc.UITransform);
         maskTransform.setAnchorPoint(0.5, 0.5);
-        maskTransform.setContentSize(
+        setImportedContentSize(
+            maskTransform,
             Math.max(0, spec.frame.width * scale),
             Math.max(0, spec.frame.height * scale),
         );
@@ -1120,7 +1143,8 @@ async function configureTiledSpriteHelper(
     const transform = tiledSprite.getComponent(cc.UITransform)
         ?? tiledSprite.addComponent(cc.UITransform);
     transform.setAnchorPoint(0.5, 0.5);
-    transform.setContentSize(
+    setImportedContentSize(
+        transform,
         Math.max(0, spec.frame.width * scale / tileScale),
         Math.max(0, spec.frame.height * scale / tileScale),
     );
@@ -1243,7 +1267,7 @@ function applyCounterAlignment(
                 topOffset = layoutHeight - bottom - transform.height;
             } else {
                 if (alignment === 'STRETCH') {
-                    transform.setContentSize(transform.width, available);
+                    setImportedContentSize(transform, transform.width, available);
                 }
             }
             position.y = parentHeight * (1 - parentAnchor.y)
@@ -1258,7 +1282,7 @@ function applyCounterAlignment(
                 leftOffset = layoutWidth - right - transform.width;
             } else {
                 if (alignment === 'STRETCH') {
-                    transform.setContentSize(available, transform.height);
+                    setImportedContentSize(transform, available, transform.height);
                 }
             }
             position.x = leftOffset
@@ -1334,7 +1358,7 @@ function configureScroll(
     }
     const viewTransform = view.getComponent(UITransform) ?? view.addComponent(UITransform);
     viewTransform.setAnchorPoint(0.5, 0.5);
-    viewTransform.setContentSize(transform.contentSize.width, transform.contentSize.height);
+    setImportedContentSize(viewTransform, transform.contentSize.width, transform.contentSize.height);
     view.setPosition(0, 0, 0);
     const mask = view.getComponent(Mask) ?? view.addComponent(Mask);
     mask.type = Mask.Type.GRAPHICS_RECT ?? Mask.Type.RECT;
@@ -1412,12 +1436,12 @@ function sizeAndPositionScrollContent(
     const contentHeight = axes.vertical
         ? Math.max(viewportHeight, 0, ...childBottom)
         : viewportHeight;
-    contentTransform.setContentSize(contentWidth, contentHeight);
+    setImportedContentSize(contentTransform, contentWidth, contentHeight);
     // Both helpers use Cocos' default center anchor. Move an oversized content
     // node so its top-left still coincides with the viewport's top-left.
     content.setPosition(
-        (contentWidth - viewportWidth) / 2,
-        (viewportHeight - contentHeight) / 2,
+        (contentTransform.contentSize.width - viewportWidth) / 2,
+        (viewportHeight - contentTransform.contentSize.height) / 2,
         0,
     );
 }
@@ -1831,7 +1855,8 @@ export const methods = {
             }
             const rootTransform = importRoot.getComponent(UITransform) ?? importRoot.addComponent(UITransform);
             rootTransform.setAnchorPoint(0.5, 0.5);
-            rootTransform.setContentSize(
+            setImportedContentSize(
+                rootTransform,
                 payload.rootFrame.width * payload.scale,
                 payload.rootFrame.height * payload.scale,
             );
