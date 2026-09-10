@@ -431,13 +431,6 @@ function warningFor(
     if (renderMessySubtree) {
         return withInactive('所有有效可见直接子层均为非结构化纯视觉内容，且未检测到文字或运行时结构，智能模式将按 PNG 整层导入');
     }
-    if (node.type === 'TEXT' && node.characters && !/[\r\n\u2028\u2029]/.test(node.characters)) {
-        const lineHeight = node.style?.lineHeightPx ?? node.style?.fontSize ?? 0;
-        const frameHeight = node.absoluteBoundingBox?.height ?? 0;
-        if (lineHeight > 0 && frameHeight > lineHeight * 1.25) {
-            return withInactive('文本疑似由 Figma 自动换行；NONE 模式只识别手动换行，请在 Figma 中插入换行符');
-        }
-    }
     if (CONTAINER_TYPES.has(node.type) && node.children.length
         && (hasVisibleImage(node) || hasComplexEffects(node) || hasComplexPaint(node))) {
         return withInactive('复杂容器将优先保留可编辑子节点，背景会近似处理');

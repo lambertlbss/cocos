@@ -515,18 +515,17 @@ Frame 链接会先切换到其来源绑定的目标 Prefab，再开始任何节�
 
 `Label.Overflow.NONE` 会按实际字体度量重算 UITransform，不能同时把同一 Label 的宽高锁死为 Figma 文本框。Cocos 3.8.7 的 TTF 排版器还会在 `NONE` 下强制设置 `wrapping = false`，因此 `enableWrapText` 不能恢复自动折行。
 
-当前导入标准：
+当前导入标准（2026-09-10 更新，覆盖下文历史版本的固定框/描边补偿策略）：
 
-- 先设置文字内容、字号、行高、颜色、描边和映射字体，再调用 `updateRenderData(true)`，只使用最终字体度量做一次位置补偿；
+- 按 Figma 框初始化尺寸，再设置文本样式和映射字体，由 Cocos 排版器决定最终尺寸；不再强制恢复框尺寸，不再添加描边边距或字号最低高度补偿；
 - `Label.fontSize` 与 `RichText.fontSize` 不乘导入倍率，并按 Figma 属性面板的显示精度最多保留两位小数；内部 `17.8873233795166` 在面板显示为 `17.89` 时写入 Cocos `17.89`，Figma `18` 与 `24.5` 仍分别写入 `18` 与 `24.5`；
-- 所有 Label 最终保持 `Overflow.NONE` 和 `enableWrapText = false`；
+- `textAutoResize = WIDTH_AND_HEIGHT` 使用 `Overflow.NONE`、关闭自动换行；`HEIGHT` 和 `NONE` 均使用 `Overflow.RESIZE_HEIGHT`、开启自动换行；不使用 `CLAMP`、不缩小字号、不添加省略号。旧 Scene 数据缺少该字段时退回自动宽度；Figma 解析器缺省值仍为固定尺寸 `NONE`；
 - CRLF、CR、U+2028、U+2029 统一转换为 `\n`，只有实际包含 `\n` 才判定为多行；
-- 单行使用 `CENTER / CENTER`，实测内容中心锁定 Figma `absoluteBoundingBox` 中心；
-- 多行使用 `LEFT / TOP`，实测内容左上角锁定 Figma `absoluteBoundingBox` 左上角；
+- 无显式换行使用 `CENTER / CENTER`，有显式换行使用 `LEFT / TOP`，保留现有对齐约定；不额外按最终字形尺寸做位置补偿；
 - `lineHeight` 保留 Figma 的 `lineHeightPx`，不强制提升到 `fontSize`；
 - TTF Label 的 UITransform 高度约为 `(显式行数 + 0.26) × lineHeight`（再叠加描边扩展），是 Cocos 的 `BASELINE_RATIO` 度量结果，不代表节点位置发生偏移；BitmapFont 使用另一套度量路径。
 
-Figma 自动折行不会稳定提供每个视觉换行索引。若 `characters` 没有换行符，`NONE` 下无法无风险重现折行；分析面板会提示“请在 Figma 中插入换行符”。为了保证确定性，插件不猜测断行位置，也不伪装开启一个引擎实际忽略的自动换行开关。
+固定宽度文本由 Cocos 按导入宽度自动折行，不再根据框高猜测换行，也不提示用户强制插入换行符。字体度量差异仍可能导致与 Figma 的实际折行位置不同。描边外观继续保留，仅移除插件自行扩框的处理；RichText 保留原有 `maxWidth` 排版，不再做导入后的尺寸回写。
 
 ### 12.9 字体资源正确但字形仍有差异
 

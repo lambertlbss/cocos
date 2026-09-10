@@ -836,8 +836,7 @@ function normalizeLabelText(characters: string | undefined): string {
 }
 
 function isMultilineLabel(characters: string): boolean {
-    // Cocos Creator 3.8.7 disables automatic wrapping whenever overflow is
-    // NONE. Only explicit line feeds can therefore produce real line breaks.
+    // Explicit line feeds still control the existing alignment convention.
     return characters.includes('\n');
 }
 
@@ -852,13 +851,16 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
     const style = spec.textStyle ?? {};
     const characters = normalizeLabelText(spec.characters);
     const multiline = isMultilineLabel(characters);
+    // Figma NONE means a fixed box, not Cocos Overflow.NONE. Both fixed-width
+    // modes wrap and grow vertically; missing legacy metadata stays auto-width.
+    const wrap = style.textAutoResize === 'HEIGHT' || style.textAutoResize === 'NONE';
     // Figma stores more precision than its panel displays. Match the visible
     // design value (up to two decimals) instead of leaking its internal float.
     label.fontSize = figmaPanelFontSize(style.fontSize);
     label.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
     label.spacingX = (style.letterSpacing ?? 0) * scale;
-    label.enableWrapText = false;
-    label.overflow = Label.Overflow.CLAMP;
+    label.overflow = wrap ? Label.Overflow.RESIZE_HEIGHT : Label.Overflow.NONE;
+    label.enableWrapText = wrap;
     label.horizontalAlign = multiline
         ? Label.HorizontalAlign.LEFT
         : Label.HorizontalAlign.CENTER;
@@ -900,29 +902,6 @@ function configureRichText(node: any, spec: SceneNodeSpec, scale: number, cc: an
     if (fill?.color) {
         richText.fontColor = toColor(cc.Color, fill.color, fill.opacity ?? 1);
     }
-}
-
-function finalizeLabelGeometry(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
-    const transform = node.getComponent(cc.UITransform);
-    if (!transform) {
-        return;
-    }
-    const label = node.getComponent(cc.Label);
-    const outlineWidth = label?.enableOutline
-        ? Math.max(0, Number(label.outlineWidth) || 0)
-        : 0;
-    const figmaHeight = Math.max(0, spec.frame.height * scale);
-    const fontSize = Math.max(0, Number(label?.fontSize) || 0);
-    const finalHeight = Math.max(figmaHeight, fontSize) + outlineWidth * 2;
-    // Keep the imported Figma box unless a deterministic outline/font lower
-    // bound requires expansion. Expand symmetrically around the center anchor
-    // so the node's imported center position remains unchanged.
-    // The base box must at least contain the final Cocos font size. When an
-    // outline is enabled, reserve one actual Cocos outline width on every side.
-    transform.setContentSize(
-        Math.max(0, spec.frame.width * scale + outlineWidth * 2),
-        finalHeight,
-    );
 }
 
 function loadAsset(assetManager: any, uuid: string): Promise<any> {
@@ -2003,7 +1982,6 @@ export const methods = {
                     } else {
                         richText.font = null;
                     }
-                    finalizeLabelGeometry(node, spec, payload.scale, cc);
                 } else if (spec.kind === 'label' || spec.figmaType === 'TEXT') {
                     configureLabel(node, spec, payload.scale, cc);
                     if (spec.fontUuid) {
@@ -2012,7 +1990,6 @@ export const methods = {
                     } else {
                         node.getComponent(Label).font = null;
                     }
-                    finalizeLabelGeometry(node, spec, payload.scale, cc);
                 } else if (RASTER_VECTOR_TYPES.has(spec.figmaType)) {
                     throw new Error(`矢量节点“${spec.name}”没有绑定 SpriteFrame，PNG 资源可能未成功导入。`);
                 } else if (clipsChildren) {

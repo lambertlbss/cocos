@@ -811,7 +811,7 @@ test('imports hidden Figma layers with their full subtree and keeps only hidden 
     assert.ok(importedText.getComponent(Label));
 });
 
-test('expands a single-line Label on all four sides by its outline width', async () => {
+test('keeps the initial Figma box without outline compensation', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 200, height: 80 },
@@ -848,20 +848,43 @@ test('expands a single-line Label on all four sides by its outline width', async
     assert.equal(title.getComponent(LabelOutline), null);
     assert.equal(label.enableOutline, true);
     assert.equal(label.outlineWidth, 5);
-    assert.equal(label.overflow, Label.Overflow.CLAMP);
-    assert.equal(label.enableWrapText, false);
+    assert.equal(label.overflow, Label.Overflow.RESIZE_HEIGHT);
+    assert.equal(label.enableWrapText, true);
     assert.equal(label.horizontalAlign, Label.HorizontalAlign.CENTER);
     assert.equal(label.verticalAlign, Label.VerticalAlign.CENTER);
     assert.equal(label.lineHeight, 18);
-    assert.deepEqual(transform.contentSize, { width: 110, height: 30 });
+    assert.deepEqual(transform.contentSize, { width: 100, height: 20 });
     assert.deepEqual(
         { x: title.position.x, y: title.position.y },
         { x: 0, y: 25 },
     );
-    assert.equal(title.position.x - transform.width / 2, -55);
-    assert.equal(title.position.x + transform.width / 2, 55);
-    assert.equal(title.position.y - transform.height / 2, 10);
-    assert.equal(title.position.y + transform.height / 2, 40);
+    assert.equal(title.position.x - transform.width / 2, -50);
+    assert.equal(title.position.x + transform.width / 2, 50);
+    assert.equal(title.position.y - transform.height / 2, 15);
+    assert.equal(title.position.y + transform.height / 2, 35);
+});
+
+test('maps Figma sizing modes without clipping regardless of explicit line feeds', async () => {
+    for (const [mode, overflow, wrap] of [
+        ['WIDTH_AND_HEIGHT', Label.Overflow.NONE, false],
+        ['HEIGHT', Label.Overflow.RESIZE_HEIGHT, true],
+        ['NONE', Label.Overflow.RESIZE_HEIGHT, true],
+        [undefined, Label.Overflow.NONE, false],
+    ]) {
+        for (const characters of ['自动换行文本', '第一行\n第二行', '']) {
+            const spec = makeSpec({
+                figmaType: 'TEXT', kind: 'label', characters,
+                frame: { x: 0, y: 0, width: 80, height: 10 },
+                textStyle: { fontSize: 20, lineHeightPx: 24, textAutoResize: mode },
+            });
+            const environment = await importWithFakeCocos(spec, 2);
+            const imported = environment.canvas.children[0];
+            const label = imported.getComponent(Label);
+            assert.equal(label.overflow, overflow, `${mode}: ${characters}`);
+            assert.equal(label.enableWrapText, wrap);
+            assert.deepEqual(imported.getComponent(UITransform).contentSize, { width: 160, height: 20 });
+        }
+    }
 });
 
 test('matches Figma panel font-size precision independently of the import scale', async () => {
@@ -899,7 +922,7 @@ test('matches Figma panel font-size precision independently of the import scale'
     assert.equal(importedRoot.children[1].getComponent(RichText).fontSize, 24.5);
 });
 
-test('expands an undersized Label vertically to font size plus both outline widths', async () => {
+test('does not pad an undersized Label to font size or outline bounds', async () => {
     const root = makeSpec({
         name: 'TextRoot',
         frame: { x: 0, y: 0, width: 200, height: 80 },
@@ -933,13 +956,13 @@ test('expands an undersized Label vertically to font size plus both outline widt
 
     assert.equal(label.fontSize, 16);
     assert.equal(label.outlineWidth, 5);
-    assert.deepEqual(transform.contentSize, { width: 110, height: 26 });
+    assert.deepEqual(transform.contentSize, { width: 100, height: 12 });
     assert.deepEqual(
         { x: title.position.x, y: title.position.y },
         { x: 0, y: 24 },
     );
-    assert.equal(title.position.y - transform.height / 2, 11);
-    assert.equal(title.position.y + transform.height / 2, 37);
+    assert.equal(title.position.y - transform.height / 2, 18);
+    assert.equal(title.position.y + transform.height / 2, 30);
 });
 
 test('keeps a multiline Label at the Figma frame size', async () => {
@@ -967,8 +990,8 @@ test('keeps a multiline Label at the Figma frame size', async () => {
     const label = description.getComponent(Label);
     const transform = description.getComponent(UITransform);
 
-    assert.equal(label.overflow, Label.Overflow.CLAMP);
-    assert.equal(label.enableWrapText, false);
+    assert.equal(label.overflow, Label.Overflow.RESIZE_HEIGHT);
+    assert.equal(label.enableWrapText, true);
     assert.equal(label.horizontalAlign, Label.HorizontalAlign.LEFT);
     assert.equal(label.verticalAlign, Label.VerticalAlign.TOP);
     assert.equal(label.string, '第一行\n第二行');
@@ -2240,7 +2263,7 @@ test('resets reused Label state and keeps the updated Figma text frame', async (
 
         assert.equal(imported.getComponent(Label), label);
         assert.equal(label.font, null);
-        assert.equal(label.overflow, Label.Overflow.CLAMP);
+        assert.equal(label.overflow, Label.Overflow.NONE);
         assert.deepEqual(
             imported.getComponent(UITransform).contentSize,
             { width: 72, height: 36 },

@@ -542,7 +542,7 @@ test('does not flatten structured, hidden-noise, root, or explicit ScrollView co
     assert.equal(analyzeTree([rootMess])[0].action, 'generate');
 });
 
-test('warns when Figma auto-wrapping cannot be reproduced by Label NONE', () => {
+test('does not warn about supported Figma automatic wrapping', () => {
     const [automatic] = analyzeTree([node({
         type: 'TEXT',
         characters: '这段文字没有手动换行',
@@ -556,7 +556,7 @@ test('warns when Figma auto-wrapping cannot be reproduced by Label NONE', () => 
         style: { fontSize: 16, lineHeightPx: 18, textAutoResize: 'HEIGHT' },
     })]);
 
-    assert.match(automatic.warning, /NONE.*手动换行/);
+    assert.equal(automatic.warning, undefined);
     assert.equal(explicit.warning, undefined);
 });
 
