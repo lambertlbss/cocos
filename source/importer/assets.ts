@@ -277,7 +277,9 @@ export class AssetWriter {
             meta = null;
             sliceFallback = error instanceof Error ? error.message : String(error);
         }
-        const sliced = requestedSliced && hasSlicedBorders(meta);
+        // Existing SpriteFrames can already carry valid borders even when this
+        // write does not request new ones. Preserve that sliced classification.
+        const sliced = !tiled && hasSlicedBorders(meta);
         if (requestedSliced && !sliced && !sliceFallback) {
             sliceFallback = `Cocos 未能写入或回读三/九宫 SpriteFrame 边界：${url}`;
         }

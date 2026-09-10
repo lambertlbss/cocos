@@ -424,6 +424,7 @@ function fakeCocos() {
                         return;
                     }
                     callback(null, {
+                        insetLeft: request.uuid === 'existing-sliced-frame' ? 4 : 0,
                         width: 24,
                         height: 16,
                         rect: { width: 24, height: 16 },
@@ -862,6 +863,73 @@ test('keeps the initial Figma box without outline compensation', async () => {
     assert.equal(title.position.x + transform.width / 2, 50);
     assert.equal(title.position.y - transform.height / 2, 15);
     assert.equal(title.position.y + transform.height / 2, 35);
+});
+
+test('rounds scaled Label and RichText line heights up to integers', async () => {
+    for (const kind of ['label', 'richText']) {
+        const environment = await importWithFakeCocos(makeSpec({
+            figmaType: 'TEXT', kind, characters: '行高',
+            textStyle: { fontSize: 17.89, lineHeightPx: 20.125 },
+        }), 1.5);
+        const component = environment.canvas.children[0].getComponent(kind === 'label' ? Label : RichText);
+        assert.equal(component.lineHeight, 31);
+        assert.equal(component.fontSize, 17.89);
+    }
+});
+
+test('suppresses descendant buttons through intermediate nodes but keeps sibling buttons', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        children: [makeSpec({
+            figmaId: 'button-parent', kind: 'button', name: 'btn_parent',
+            children: [makeSpec({
+                figmaId: 'middle', name: 'middle',
+                children: [makeSpec({ figmaId: 'nested-button', kind: 'button', name: 'btn_child' })],
+            })],
+        }), makeSpec({ figmaId: 'sibling-button', kind: 'button', name: 'button_sibling' })],
+    }));
+    const root = environment.canvas.children[0];
+    assert.ok(root.children[0].getComponent(Button));
+    assert.equal(root.children[0].children[0].children[0].getComponent(Button), null);
+    assert.ok(root.children[1].getComponent(Button));
+});
+
+test('removes an old nested Button on reimport and restores it when the ancestor stops being a button', async () => {
+    const environment = fakeCocos();
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        return request === 'cc' ? environment.cc : originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        let map = {};
+        for (const parentKind of ['node', 'button', 'node']) {
+            const root = makeSpec({
+                figmaId: 'outer', kind: parentKind,
+                children: [makeSpec({ figmaId: 'inner', kind: 'button', name: 'btn_inner' })],
+            });
+            const result = await methods.importDocument({
+                packageName: 'figma-importer-cocos', fileKey: 'file-key', rootName: 'Test',
+                rootFrame: root.frame, scale: 1, updateExisting: true, existingMap: map,
+                centerInCanvas: true, roots: [root],
+            });
+            map = result.nodeMap;
+            const imported = environment.canvas.children[0];
+            assert.equal(Boolean(imported.getComponent(Button)), parentKind === 'button');
+            assert.equal(Boolean(imported.children[0].getComponent(Button)), parentKind !== 'button');
+        }
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('uses loaded SpriteFrame borders when the sliced flag is missing, except explicit fallback', async () => {
+    for (const fallback of [undefined, 'border write failed']) {
+        const environment = await importWithFakeCocos(makeSpec({
+            kind: 'sprite',
+            sprite: { uuid: 'existing-sliced-frame', url: 'db://assets/sliced.png', sliced: false, sliceFallback: fallback },
+        }));
+        const sprite = environment.canvas.children[0].getComponent(Sprite);
+        assert.equal(sprite.type, fallback ? Sprite.Type.SIMPLE : Sprite.Type.SLICED);
+    }
 });
 
 test('maps Figma sizing modes without clipping regardless of explicit line feeds', async () => {

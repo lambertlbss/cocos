@@ -479,7 +479,7 @@ async function removeObsoleteLabelOutline(node: any, cc: any): Promise<void> {
     await waitForDeferredComponentRemoval();
 }
 
-function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
+function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any, node: any): Set<any> {
     const desired = new Set<any>();
     const clipsChildren = clipsGeneratedChildren(spec);
     if (spec.action === 'render' || spec.sprite) {
@@ -508,7 +508,7 @@ function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any): Set<any> {
     if (spec.action === 'generate' && spec.kind === 'scrollView') {
         desired.add(cc.ScrollView);
     }
-    if (spec.kind === 'button') {
+    if (spec.kind === 'button' && !hasButtonAncestor(node, cc)) {
         desired.add(cc.Button);
     }
     if (spec.opacity < 0.999) {
@@ -857,7 +857,7 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
     // Figma stores more precision than its panel displays. Match the visible
     // design value (up to two decimals) instead of leaking its internal float.
     label.fontSize = figmaPanelFontSize(style.fontSize);
-    label.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
+    label.lineHeight = Math.max(1, Math.ceil((style.lineHeightPx ?? style.fontSize ?? 16) * scale));
     label.spacingX = (style.letterSpacing ?? 0) * scale;
     label.overflow = wrap ? Label.Overflow.RESIZE_HEIGHT : Label.Overflow.NONE;
     label.enableWrapText = wrap;
@@ -888,7 +888,7 @@ function configureRichText(node: any, spec: SceneNodeSpec, scale: number, cc: an
     const style = spec.textStyle ?? {};
     richText.string = normalizeLabelText(spec.characters);
     richText.fontSize = figmaPanelFontSize(style.fontSize);
-    richText.lineHeight = Math.max(1, (style.lineHeightPx ?? style.fontSize ?? 16) * scale);
+    richText.lineHeight = Math.max(1, Math.ceil((style.lineHeightPx ?? style.fontSize ?? 16) * scale));
     richText.maxWidth = Math.max(0, spec.frame.width * scale);
     richText.handleTouchEvent = false;
     // RichText is primarily used for runtime-injected multi-line content. An
@@ -937,13 +937,16 @@ async function configureSprite(
     sprite.sizeMode = Sprite.SizeMode.CUSTOM;
     const spriteFrame = await loadAsset(assetManager, spec.sprite.uuid);
     sprite.spriteFrame = spriteFrame;
+    const sliced = spec.sprite.sliced || (!spec.sprite.sliceFallback
+        && [spriteFrame.insetLeft, spriteFrame.insetRight, spriteFrame.insetTop, spriteFrame.insetBottom]
+            .some((value) => Number.isFinite(value) && value > 0));
     sprite.type = spec.sprite.tiled
         ? Sprite.Type.TILED
-        : spec.sprite.sliced
+        : sliced
             ? Sprite.Type.SLICED
             : Sprite.Type.SIMPLE;
 
-    if (!spec.sprite.sliced && !spec.sprite.tiled) {
+    if (!sliced && !spec.sprite.tiled) {
         sprite.sizeMode = Sprite.SizeMode.TRIMMED;
         const trimmedWidth = Number(transform?.contentSize?.width);
         const trimmedHeight = Number(transform?.contentSize?.height);
@@ -1286,8 +1289,15 @@ function clipsGeneratedChildren(spec: SceneNodeSpec): boolean {
         && spec.action === 'generate';
 }
 
+function hasButtonAncestor(node: any, cc: any): boolean {
+    for (let parent = node.parent; parent; parent = parent.parent) {
+        if (parent.getComponent(cc.Button)) return true;
+    }
+    return false;
+}
+
 function configureButton(node: any, spec: SceneNodeSpec, cc: any): void {
-    if (spec.kind === 'button') {
+    if (spec.kind === 'button' && !hasButtonAncestor(node, cc)) {
         const button = node.getComponent(cc.Button) ?? node.addComponent(cc.Button);
         button.target = node;
         button.transition = cc.Button.Transition.SCALE;
@@ -1914,7 +1924,7 @@ export const methods = {
             if (spec.action !== 'transform') {
                 removeObsoleteScrollHelpers(node, spec, cc, prefabOwnershipGuard);
                 await removeObsoleteLabelOutline(node, cc);
-                const preserved = desiredGeneratedComponents(spec, cc);
+                const preserved = desiredGeneratedComponents(spec, cc, node);
                 // Mask owns and disables its shared Graphics during the
                 // deferred onDisable phase. If clipping was removed but a
                 // normal Graphics renderer is still desired, recreate that

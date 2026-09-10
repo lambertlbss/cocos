@@ -157,6 +157,8 @@ test('writes and verifies SpriteFrame borders before reporting a sliced asset', 
         assert.ok(calls.some(([, method]) => method === 'save-asset-meta'));
         assert.ok(calls.some(([, method]) => method === 'reimport-asset'));
         assert.ok(calls.filter(([, method]) => method === 'query-asset-meta').length >= 2);
+        const rewritten = await new AssetWriter('figma-importer').write(url, Buffer.from('new png'));
+        assert.equal(rewritten.sliced, true, 'rewriting without new borders must preserve slicing');
     } finally {
         global.Editor = previousEditor;
     }
