@@ -39,6 +39,7 @@ import {
 import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
 import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
+import { LocalPrefabLibrary, matchLocalPrefabs } from './importer/local-prefabs';
 import { gradientPng } from './importer/svg';
 import {
     collectSceneSpecFigmaIds,
@@ -678,7 +679,7 @@ function annotateDocumentPlan(session: DocumentSession): DocumentSession {
     return session;
 }
 
-function collectAssetRequests(
+export function collectAssetRequests(
     roots: FigmaNode[],
     decisions: Map<string, Decision>,
 ): { png: FigmaNode[]; tiled: TiledAssetRequest[]; rawImages: RawImageAssetRequest[]; gradients: FigmaNode[] } {
@@ -688,7 +689,7 @@ function collectAssetRequests(
     const gradients: FigmaNode[] = [];
     const visit = (node: FigmaNode, ancestorsVisible: boolean) => {
         const decision = decisionForNode(node, decisions);
-        if (decision.action === 'ignore') {
+        if (decision.action === 'ignore' || decision.prefab) {
             return;
         }
         const effectivelyVisible = ancestorsVisible && node.visible !== false && node.opacity > 0;
@@ -744,7 +745,7 @@ async function buildAssets(
     await Promise.all(localResources.map((library) => library.initialize()));
     const promoteLocalParents = async (node: FigmaNode): Promise<void> => {
         const decision = decisionForNode(node, decisions);
-        if (decision.action === 'ignore') {
+        if (decision.action === 'ignore' || decision.prefab) {
             return;
         }
         if (node.children.length
@@ -1295,14 +1296,14 @@ export function makeSpec(
     }
     const frame = nodeFrame(node);
     const plan = plans.get(node.id);
-    const fold = plan?.fold;
+    const fold = decision.prefab ? undefined : plan?.fold;
     const foldSource = fold ? nodeById.get(fold.sourceNodeId) : undefined;
     const textSource = fold?.kind === 'single-text' && foldSource ? foldSource : node;
     const visualSource = fold && fold.kind !== 'single-text' && foldSource ? foldSource : node;
     const resolvedKind = decision.kind === 'auto' ? inferKind(node) : decision.kind;
     const plannedKind = plan?.kind ?? resolvedKind;
     const bitmapTerminal = decision.nineSlice || decision.action === 'render';
-    const terminal = bitmapTerminal || isTerminalAction(decision.action);
+    const terminal = Boolean(decision.prefab) || bitmapTerminal || isTerminalAction(decision.action);
     const effectiveKind = kindForImportAction(plannedKind, decision.action, decision.nineSlice);
     const spriteSourceId = fold && fold.kind !== 'single-text'
         ? fold.sourceNodeId
@@ -1313,10 +1314,11 @@ export function makeSpec(
     const worldRotation = parentWorldRotation + node.rotation;
     return {
         figmaId: node.id,
+        prefab: decision.prefab,
         name: decision.name ?? node.name,
         figmaType: visualSource.type,
         action: decision.action,
-        kind: effectiveKind,
+        kind: decision.prefab ? 'node' : effectiveKind,
         frame,
         parentFrame,
         intrinsicSize: node.size,
@@ -1327,7 +1329,7 @@ export function makeSpec(
             ? node.opacity * foldSource.opacity
             : node.opacity,
         visible: node.visible,
-        clipsContent: node.clipsContent,
+        clipsContent: decision.prefab ? false : node.clipsContent,
         cornerRadii: cornerRadii(visualSource),
         fills: textSource.fills,
         strokes: textSource.strokes,
@@ -1357,7 +1359,7 @@ export function makeSpec(
         sprite: spriteAsset,
         fontUuid: textSource.style?.fontFamily ? fonts.get(textSource.style.fontFamily) : undefined,
         aliasFigmaIds: fold?.absorbedNodeIds,
-        flattenBoundary: bitmapTerminal || fullFold
+        flattenBoundary: decision.prefab || bitmapTerminal || fullFold
             ? true
             : fold?.kind === 'background'
                 ? false
@@ -1969,6 +1971,23 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         await saveSettings(importSettings);
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
         const decisions = decisionMap(request.overrides, document.tree);
+        const prefabLibrary = new LocalPrefabLibrary(Editor.Project.path,
+            (uuid) => Editor.Utils.UUID.decompressUUID(uuid));
+        await prefabLibrary.initialize();
+        const excludedPrefabs = new Set<string>();
+        if (document.sourceNodeId && document.roots.length === 1) {
+            const root = document.roots[0];
+            const name = decisions.get(root.id)?.name ?? root.name;
+            const folder = new AssetWriter(importSettings.prefabFolder).folder;
+            const url = `db://assets/${folder}/${sanitizeAssetName(name)}.prefab`;
+            excludedPrefabs.add(url);
+            const existing = await queryPrefabAsset(url);
+            if (existing) excludedPrefabs.add(existing.uuid);
+            const bindings = await getPrefabBindings();
+            const bound = bindings[figmaFrameSourceHash(document.fileKey, document.sourceNodeId)];
+            if (bound) excludedPrefabs.add(bound);
+        }
+        await matchLocalPrefabs(document.roots, decisions, prefabLibrary, importSettings.scale, excludedPrefabs);
         const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings));
         const { assets, warnings } = builtAssets;
         // buildAssets may promote a container to a local same-name resource.

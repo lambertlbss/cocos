@@ -22,6 +22,7 @@ export function shouldGenerateMask(spec: SceneNodeSpec, target: MaskTarget = 'no
             : skip('no-tiled-ellipse');
     }
     if (spec.isRoot) return skip('import-root');
+    if (spec.prefab) return skip('prefab-reference');
     if (spec.action !== 'generate') return skip('not-generated-container');
     if (spec.sprite) return skip('rasterized-node');
     if (spec.kind === 'scrollView') return skip('delegated-to-scroll-view');

@@ -63,6 +63,16 @@ Figma 中手动配置了非空 Export 设置的非文字节点，会被视为设
 
 可安全表达的 Figma Auto Layout 会映射为 Cocos `Layout`；混合绝对定位、尺寸不一致的 Wrap/Grid 会保留为 `Node` 和绝对几何，避免 Cocos Layout 重排后破坏画面。裁剪只映射为 `Mask`；智能模式只有在 Figma 明确设置滚动溢出方向时才映射为 `ScrollView`，`list_`、`scroll_` 等业务命名不会擅自改变节点层级。需要预留运行时滚动但设计稿没有设置溢出时，可在节点策略中手动选择 `ScrollView`。Figma Constraints 暂不自动映射为 `Widget`，导入后由用户在 Cocos 中手动配置。
 
+## 同名 Prefab 自动引用
+
+导入前会在当前 Cocos 项目的 `assets` 下匹配已注册的 `.prefab`：使用 **Figma 原始节点名** 对照 Prefab 文件名（不含扩展名），插件内修改的节点名不参与匹配；导入倍率换算后的宽、高均四舍五入保留两位小数，再与 Prefab 根节点的 UITransform 尺寸比较。
+
+- 唯一匹配后创建真正关联资源 UUID 的嵌套 Prefab 实例，停止导入原 Figma 节点的内部子树及其图片资源。外层节点保留 Figma 的布局位置、显隐等信息，内层使用被引用 Prefab 自身的内容、组件和资源。
+- 无匹配则继续原导入逻辑；同名同尺寸存在多个候选时提示具体路径并停止，不随机选择。显式忽略的节点不参与匹配，显式整层图片策略不会搜索其内部节点。
+- 排除输出 Prefab 自身及循环依赖；根节点带非单位缩放或旋转的候选暂不自动匹配。
+- 重复导入复用原实例。需要替换或移除引用时，若实例含手工内容覆盖则停止并提示，不覆盖手工修改。匹配过程只读本地资源，不批量修改既有 Prefab。
+- 控制台的 `[Figma Importer Prefab 复用]` 日志包含原节点名、节点 ID、资源 URL、UUID 和尺寸。
+
 ## Round-trip 回写原 Prefab（开发分支）
 
 Round-trip 是与“导入到场景/创建新 Prefab”完全隔离的安全路径。它只读取由配套 Cocos → Figma 插件写入的 `cocosfigmabridge` Shared Plugin Data，并对导出时 Baseline、Figma 当前状态和 Cocos 当前 Prefab 做逐字段三方合并。

@@ -349,6 +349,7 @@ FakeNode.onAddComponent = null;
 
 function makeSpec(overrides = {}) {
     return {
+        prefab: overrides.prefab,
         figmaId: overrides.figmaId ?? '15:193',
         name: overrides.name ?? 'Layer',
         figmaType: overrides.figmaType ?? 'FRAME',
@@ -504,6 +505,102 @@ function maskPrefabFixture() {
         },
     };
 }
+
+function referencedPrefabFixture() {
+    const fixture = maskPrefabFixture();
+    const { environment } = fixture;
+    class Prefab {}
+    Prefab._utils = { PropertyOverrideInfo: class {}, TargetInfo: class {} };
+    environment.cc.Prefab = Prefab;
+    const originalLoader = environment.cc.assetManager.loadAny;
+    environment.cc.assetManager.loadAny = (request, callback) => {
+        if (!request.uuid.startsWith('referenced-')) return originalLoader(request, callback);
+        const asset = new Prefab(); asset._uuid = request.uuid;
+        asset.data = new FakeNode('NativePrefabRoot');
+        asset.data.addComponent(UITransform).setContentSize(100, 80);
+        callback(null, asset);
+    };
+    let count = 0;
+    environment.createNodeFromPrefabAsset = (asset) => {
+        const node = new FakeNode('__FigmaBackground'); // do not adopt native reserved names
+        node.addComponent(UITransform).setContentSize(100, 80);
+        node.addComponent(Button);
+        node._prefab = { fileId: 'foreign-root', root: node, asset,
+            instance: { fileId: `nested-${++count}`, propertyOverrides: [], mountedChildren: [], mountedComponents: [], removedComponents: [] } };
+        const child = new FakeNode('AuthoredContent'); node.addChild(child);
+        child._prefab = { fileId: 'foreign-child', root: node, asset };
+        return node;
+    };
+    fixture.spec.children[0].prefab = { uuid: 'referenced-a', url: 'db://assets/Card.prefab', width: 100, height: 80 };
+    fixture.spec.children[0].flattenBoundary = true;
+    return fixture;
+}
+
+test('scene import keeps linked Prefab internals outside ownership and reuses the instance on reimport', async () => {
+    const fixture = referencedPrefabFixture();
+    const first = await fixture.import();
+    const wrapper = fixture.environment.canvas.getChildByName('Clip');
+    const native = wrapper.children[0];
+    assert.equal(wrapper.children.length, 1);
+    assert.equal(wrapper.getComponent(Mask), null);
+    assert.equal(wrapper.getComponent(Button), null);
+    assert.ok(native.getComponent(Button));
+    assert.equal(native._prefab.asset._uuid, 'referenced-a');
+    assert.equal(first.nodeMap.leaf, undefined);
+    assert.equal(first.prefabSync.managedNodeFileIds.includes('foreign-root'), false);
+    assert.equal(first.prefabSync.managedHelperFileIds.includes('foreign-root'), false);
+    // Mimic serialized editor-only ownership state and runtime UUID refresh.
+    wrapper.__editorExtras__ = JSON.parse(JSON.stringify(wrapper.__editorExtras__));
+    native.uuid = 'reopened-native';
+    await fixture.import();
+    assert.equal(wrapper.children[0], native);
+    assert.equal(native.children[0].name, 'AuthoredContent');
+    assert.equal(native._prefab.instance.propertyOverrides.length, 1);
+});
+
+test('removing a matched Figma node removes its nested instance without salvaging authored internals', async () => {
+    const fixture = referencedPrefabFixture();
+    await fixture.import();
+    const wrapper = fixture.environment.canvas.getChildByName('Clip');
+    const native = wrapper.children[0];
+    fixture.spec.children = [];
+    await fixture.import();
+    assert.equal(wrapper.parent, null);
+    assert.equal(native.parent, null);
+    assert.equal(fixture.environment.canvas.children.length, 0);
+});
+
+test('no longer matching restores normal import, with no leftover nested instance', async () => {
+    const fixture = referencedPrefabFixture();
+    await fixture.import();
+    const wrapper = fixture.environment.canvas.getChildByName('Clip');
+    const native = wrapper.children[0];
+    delete fixture.spec.children[0].prefab;
+    fixture.spec.children[0].flattenBoundary = false;
+    await fixture.import();
+    assert.equal(native.parent, null);
+    assert.ok(wrapper.getComponent(Mask));
+    assert.equal(wrapper.children.length, 1);
+    assert.equal(wrapper.children[0].name, 'Leaf');
+});
+
+test('converting an existing generated subtree to a Prefab removes old Figma nodes but preserves manual content', async () => {
+    const fixture = referencedPrefabFixture();
+    const reference = fixture.spec.children[0].prefab;
+    delete fixture.spec.children[0].prefab;
+    fixture.spec.children[0].flattenBoundary = false;
+    await fixture.import();
+    const wrapper = fixture.environment.canvas.getChildByName('Clip');
+    const oldLeaf = wrapper.getChildByName('Leaf');
+    const manual = new FakeNode('ManualSibling'); wrapper.addChild(manual);
+    fixture.spec.children[0].prefab = reference;
+    fixture.spec.children[0].flattenBoundary = true;
+    await fixture.import();
+    assert.equal(oldLeaf.parent, null);
+    assert.equal(wrapper.getComponent(Mask), null);
+    assert.equal(manual.parent, wrapper);
+    assert.equal(wrapper.children.length, 2);
+});
 
 test('Prefab Mask ownership remains stable across repeat, cancel and re-enable clipping', async () => {
     const fixture = maskPrefabFixture();
@@ -692,6 +789,7 @@ async function importWithPrefabContext(environment, spec, prefabContext) {
         },
         Scene: { rootNode: prefabRoot },
         Prefab: {
+            createNodeFromPrefabAsset: environment.createNodeFromPrefabAsset,
             onAddNode(node) {
                 node._prefab ??= {
                     fileId: `managedNodeFile${nextFileId++}`,
