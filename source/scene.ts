@@ -14,6 +14,8 @@ import type {
     SceneNodeSpec,
 } from './types';
 import { sanitizeNodeName } from './node-name';
+import { shouldGenerateMask, setMaskShapeSafely } from './mask-policy';
+import type { MaskTarget } from './mask-policy';
 
 module.paths.push(join(Editor.App.path, 'node_modules'));
 
@@ -44,6 +46,9 @@ const BACKGROUND_NODE_NAME = '__FigmaBackground';
 const TILED_MASK_NODE_NAME = '__FigmaTiledMask';
 const TILED_SPRITE_NODE_NAME = '__FigmaTiledSprite';
 const OVERFLOW_SPRITE_NODE_NAME = '__FigmaOverflowVisual';
+// Scene-only updates have no persisted Prefab ownership snapshot. Keep exact
+// component identities for this session; unknown/legacy masks fail closed.
+const sessionMaskComponents = new WeakSet<object>();
 const RASTER_VECTOR_TYPES = new Set([
     'VECTOR',
     'BOOLEAN_OPERATION',
@@ -833,7 +838,9 @@ function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any
 }
 
 function configureGraphics(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
-    const graphics = node.getComponent(cc.Graphics) ?? node.addComponent(cc.Graphics);
+    const existing = node.getComponent(cc.Graphics);
+    const graphics = existing ?? node.addComponent(cc.Graphics);
+    if (!existing) sessionMaskComponents.add(graphics);
     graphics.enabled = true;
     graphics.clear();
     drawGraphics(graphics, spec, scale, cc);
@@ -1002,7 +1009,7 @@ async function configureSprite(
 }
 
 function requiresTiledMask(spec: SceneNodeSpec): boolean {
-    return Boolean(spec.sprite?.tiled && spec.figmaType === 'ELLIPSE');
+    return shouldGenerateMask(spec, 'tiled-helper').shouldMask;
 }
 
 function nativeTileScale(spec: SceneNodeSpec): number {
@@ -1118,7 +1125,7 @@ async function configureTiledSpriteHelper(
         tiledMask.setPosition(new cc.Vec3(0, 0, 0));
         tiledMask.setRotationFromEuler(0, 0, 0);
         tiledMask.setScale(new cc.Vec3(1, 1, 1));
-        configureClip(tiledMask, spec, cc);
+        configureClip(tiledMask, spec, cc, 'tiled-helper', guard);
         tiledMask.setSiblingIndex(0);
     } else if (tiledMask) {
         for (const child of [...tiledMask.children]) {
@@ -1293,26 +1300,51 @@ function applyCounterAlignment(
     }
 }
 
-function configureClip(node: any, spec: SceneNodeSpec, cc: any): void {
-    const graphics = node.getComponent(cc.Graphics);
-    if (graphics) {
-        graphics.enabled = true;
-        graphics.clear();
+function logMaskDecision(spec: SceneNodeSpec, target: MaskTarget = 'node'): void {
+    console.log('[Figma Importer Mask 决策]', JSON.stringify({
+        figmaId: spec.figmaId,
+        nodeName: spec.name,
+        target,
+        ...shouldGenerateMask(spec, target),
+    }));
+}
+
+function assertMaskComponentsOwned(node: any, cc: any, guard?: PrefabOwnershipGuard): void {
+    for (const type of [cc.Mask, cc.Graphics]) {
+        const component = node.getComponent(type);
+        if (!component) continue;
+        if (guard) {
+            assertOwnedGeneratedComponent(component, guard, node.name);
+        } else if (!sessionMaskComponents.has(component)) {
+            throw new Error(`节点“${node.name}”上的 ${type.name} 缺少导入器归属记录，已停止更新以保护手工组件；请使用带同步记录的 Prefab 或导入为新节点。`);
+        }
     }
+}
+
+function configureClip(
+    node: any, spec: SceneNodeSpec, cc: any, target: MaskTarget = 'node', guard?: PrefabOwnershipGuard,
+): void {
+    const decision = shouldGenerateMask(spec, target);
+    if (!decision.shouldMask) return;
+    if (target !== 'node') logMaskDecision(spec, target);
+    assertMaskComponentsOwned(node, cc, guard);
+    // Provision Graphics even for inactive nodes so ownership is captured now,
+    // not lost when Mask.onLoad creates its renderer on a later activation.
+    const graphics = node.getComponent(cc.Graphics) ?? node.addComponent(cc.Graphics);
+    sessionMaskComponents.add(graphics);
+    graphics.enabled = true;
+    // Mask owns the drawing: clearing here would erase a reused mask when the
+    // type stays unchanged (its public setter does not redraw identical types).
     const mask = node.getComponent(cc.Mask) ?? node.addComponent(cc.Mask);
-    mask.type = spec.figmaType === 'ELLIPSE'
+    sessionMaskComponents.add(mask);
+    const maskType = decision.maskType === 'ellipse'
         ? cc.Mask.Type.GRAPHICS_ELLIPSE ?? cc.Mask.Type.ELLIPSE
         : cc.Mask.Type.GRAPHICS_RECT ?? cc.Mask.Type.RECT;
-    mask.inverted = false;
+    setMaskShapeSafely(mask, maskType);
 }
 
 function clipsGeneratedChildren(spec: SceneNodeSpec): boolean {
-    // The imported root is a screen container, not a clipping viewport.
-    return !spec.isRoot
-        && spec.clipsContent
-        && spec.kind !== 'scrollView'
-        && spec.children.length > 0
-        && spec.action === 'generate';
+    return shouldGenerateMask(spec).shouldMask;
 }
 
 function hasButtonAncestor(node: any, cc: any): boolean {
@@ -1340,10 +1372,10 @@ function configureScroll(
     cc: any,
     guard?: PrefabOwnershipGuard,
 ): any {
-    if (spec.kind !== 'scrollView') {
+    if (!shouldGenerateMask(spec, 'scroll-view').shouldMask) {
         return node;
     }
-    const { Node, UITransform, Mask, ScrollView } = cc;
+    const { Node, UITransform, ScrollView } = cc;
     let view = node.getChildByName('view');
     let content = view?.getChildByName('content') ?? null;
     if (view && guard) {
@@ -1362,8 +1394,7 @@ function configureScroll(
     viewTransform.setAnchorPoint(0.5, 0.5);
     setImportedContentSize(viewTransform, transform.contentSize.width, transform.contentSize.height);
     view.setPosition(0, 0, 0);
-    const mask = view.getComponent(Mask) ?? view.addComponent(Mask);
-    mask.type = Mask.Type.GRAPHICS_RECT ?? Mask.Type.RECT;
+    configureClip(view, spec, cc, 'scroll-view', guard);
     if (!content) {
         content = new Node('content');
         content.layer = node.layer;
@@ -1879,6 +1910,7 @@ export const methods = {
             nodeParent: any,
             providedNode?: any,
         ): Promise<void> => {
+            logMaskDecision(spec);
             let node = providedNode ?? null;
             if (!node && payload.updateExisting) {
                 for (const figmaId of figmaIdsForSpec(spec)) {
@@ -1899,6 +1931,17 @@ export const methods = {
                 created += 1;
             } else {
                 updated += 1;
+            }
+            if (spec.action !== 'transform' && !prefabOwnershipGuard) {
+                if (node.getComponent(Mask) || clipsGeneratedChildren(spec)) {
+                    assertMaskComponentsOwned(node, cc);
+                }
+                // Include generated view/tiled helpers before any deletion or
+                // reconfiguration. Never infer ownership from their names alone.
+                for (const helper of node.children.filter((child: any) =>
+                    isGeneratedHelperNode(child, node, cc))) {
+                    if (helper.getComponent(Mask)) assertMaskComponentsOwned(helper, cc);
+                }
             }
             if (prefabOwnershipGuard && existed) {
                 const existingTransform = node.getComponent(UITransform);
@@ -2030,7 +2073,7 @@ export const methods = {
                 } else if (RASTER_VECTOR_TYPES.has(spec.figmaType)) {
                     throw new Error(`矢量节点“${spec.name}”没有绑定 SpriteFrame，PNG 资源可能未成功导入。`);
                 } else if (clipsChildren) {
-                    configureClip(node, spec, cc);
+                    configureClip(node, spec, cc, 'node', prefabOwnershipGuard);
                 } else if (hasGraphicsVisual(spec)) {
                     configureGraphics(node, spec, payload.scale, cc);
                 }

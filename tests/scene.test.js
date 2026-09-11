@@ -34,10 +34,10 @@ class UITransform extends Component {
 }
 
 class Graphics extends Component {
-    clear() {}
-    rect() {}
+    clear() { this.lastShape = null; }
+    rect() { this.lastShape = 'rectangle'; }
     roundRect() {}
-    ellipse() {}
+    ellipse() { this.lastShape = 'ellipse'; }
     fill() {}
     stroke() {}
 }
@@ -113,7 +113,33 @@ class TTFFont {
 }
 class BitmapFont {}
 
-class Mask extends Component {}
+class Mask extends Component {
+    constructor() {
+        super();
+        this._type = 0;
+        this._inverted = false;
+        this.subComp = null;
+    }
+    get type() { return this._type; }
+    set type(value) {
+        if (this._type === value) return;
+        this._type = value;
+        this.onLoad();
+    }
+    get inverted() { return this._inverted; }
+    set inverted(value) {
+        this._inverted = value;
+        // Reproduce Creator 3.8.7's unguarded setter, including identical writes.
+        this.subComp.stencilStage = value ? 2 : 1;
+    }
+    onLoad() {
+        this.subComp = this.node.getComponent(Graphics) ?? this.node.addComponent(Graphics);
+        this.subComp.stencilStage = this._inverted ? 2 : 1;
+        this.subComp.clear();
+        if (this._type === 1) this.subComp.ellipse();
+        else this.subComp.rect();
+    }
+}
 Mask.Type = { GRAPHICS_RECT: 0, GRAPHICS_ELLIPSE: 1, ELLIPSE: 1, RECT: 0 };
 
 class Canvas extends Component {}
@@ -262,8 +288,12 @@ class FakeNode {
         component.node = this;
         this.components.push(component);
         FakeNode.onAddComponent?.(component);
-        if (Type === Mask && !this.getComponent(Graphics)) {
-            this.addComponent(Graphics);
+        if (Type === Mask) {
+            let active = true;
+            for (let ancestor = this; ancestor; ancestor = ancestor.parent) {
+                active &&= ancestor.active;
+            }
+            if (active) component.onLoad();
         }
         return component;
     }
@@ -444,6 +474,184 @@ global.Editor = {
 };
 
 const { methods } = require('../dist/scene');
+
+function maskPrefabFixture() {
+    const environment = fakeCocos();
+    const context = {
+        prefabUuid: 'mask-prefab', rootFileId: 'mask-root',
+        existingNodeFileIds: { 'mask-root': 'mask-root' },
+        managedNodeFileIds: ['mask-root'], managedComponentFileIds: ['mask-root-transform'],
+        managedHelperFileIds: [],
+    };
+    environment.canvas._prefab = {
+        fileId: context.rootFileId, root: environment.canvas, asset: { uuid: context.prefabUuid },
+    };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: 'mask-root-transform' };
+    const spec = makeSpec({
+        figmaId: 'mask-root', name: 'MaskRoot', isRoot: true, clipsContent: true,
+        children: [makeSpec({
+            figmaId: 'clip', name: 'Clip', clipsContent: true,
+            children: [makeSpec({ figmaId: 'leaf', name: 'Leaf' })],
+        })],
+    });
+    let nextContext = context;
+    return {
+        environment, spec,
+        async import() {
+            const result = await importWithPrefabContext(environment, spec, nextContext);
+            nextContext = { ...context, ...result.prefabSync, existingNodeFileIds: result.prefabSync.nodeFileIds };
+            return result;
+        },
+    };
+}
+
+test('Prefab Mask ownership remains stable across repeat, cancel and re-enable clipping', async () => {
+    const fixture = maskPrefabFixture();
+    const first = await fixture.import();
+    const root = fixture.environment.canvas;
+    const clip = root.getChildByName('Clip');
+    const oldMask = clip.getComponent(Mask);
+    const oldGraphics = clip.getComponent(Graphics);
+    assert.equal(root.getComponent(Mask), null);
+    assert.equal(oldMask.type, Mask.Type.GRAPHICS_RECT);
+    assert.ok(first.prefabSync.managedComponentFileIds.includes(oldMask.__prefab.fileId));
+    class ManualScript extends Component {}
+    const manual = clip.addComponent(ManualScript);
+    manual.__prefab = { fileId: 'manual-script' };
+    await fixture.import();
+    assert.equal(clip.getComponent(Mask), oldMask);
+    assert.equal(clip.components.filter((item) => item instanceof Mask).length, 1);
+    assert.equal(clip.getComponent(Graphics), oldGraphics);
+    assert.equal(oldGraphics.lastShape, 'rectangle');
+    fixture.spec.children[0].clipsContent = false;
+    const removed = await fixture.import();
+    assert.equal(clip.getComponent(Mask), null);
+    assert.equal(clip.getComponent(Graphics), null);
+    assert.equal(removed.prefabSync.managedComponentFileIds.includes(oldMask.__prefab.fileId), false);
+    assert.equal(removed.prefabSync.managedComponentFileIds.includes(oldGraphics.__prefab.fileId), false);
+    await fixture.import();
+    fixture.spec.children[0].clipsContent = true;
+    await fixture.import();
+    assert.equal(clip.components.filter((item) => item instanceof Mask).length, 1);
+    assert.equal(clip.components.filter((item) => item instanceof Graphics).length, 1);
+    assert.equal(clip.getComponent(ManualScript), manual);
+});
+
+for (const replacedType of [Mask, Graphics]) {
+    test(`Prefab preserves manually replaced ${replacedType.name} and refuses ownership takeover`, async () => {
+        const fixture = maskPrefabFixture();
+        await fixture.import();
+        const clip = fixture.environment.canvas.getChildByName('Clip');
+        const previous = clip.getComponent(replacedType);
+        clip.removeComponent(previous);
+        const manual = clip.addComponent(replacedType);
+        manual.__prefab = { fileId: 'manual-component' };
+        fixture.spec.children[0].clipsContent = false;
+        await assert.rejects(fixture.import(), /不是 Figma Importer 创建的/);
+        assert.equal(clip.getComponent(replacedType), manual);
+    });
+}
+
+for (const figmaType of ['FRAME', 'ELLIPSE']) {
+    test(`hidden ${figmaType} Mask can activate later and reimport without orphan Graphics`, async () => {
+        const fixture = maskPrefabFixture();
+        fixture.spec.visible = false; // active child, inactive ancestor
+        fixture.spec.children[0].figmaType = figmaType;
+        const result = await fixture.import();
+        const clip = fixture.environment.canvas.getChildByName('Clip');
+        const mask = clip.getComponent(Mask);
+        const graphics = clip.getComponent(Graphics);
+        assert.equal(mask.subComp, null);
+        assert.equal(mask.type, figmaType === 'ELLIPSE' ? 1 : 0);
+        assert.equal(fixture.environment.canvas.active, false);
+        assert.ok(result.prefabSync.managedComponentFileIds.includes(graphics.__prefab.fileId));
+        fixture.environment.canvas.active = true;
+        mask.onLoad(); // model the engine's normal later activation
+        assert.equal(mask.subComp, graphics);
+        assert.equal(graphics.stencilStage, 1);
+        await fixture.import();
+        assert.equal(clip.getComponent(Graphics), graphics);
+    });
+}
+
+test('hidden root ScrollView keeps only its child viewport rectangular Mask', async () => {
+    const fixture = maskPrefabFixture();
+    fixture.spec.kind = 'scrollView';
+    fixture.spec.visible = false;
+    await fixture.import();
+    const root = fixture.environment.canvas;
+    const mask = root.getChildByName('view').getComponent(Mask);
+    assert.equal(root.getComponent(Mask), null);
+    assert.equal(mask.type, 0);
+    assert.equal(mask.inverted, false);
+    assert.equal(mask.subComp, null);
+    await fixture.import();
+    assert.equal(root.getChildByName('view').getComponent(Mask), mask);
+});
+
+test('hidden tiled ellipse uses only the helper Mask and retains owned Graphics', async () => {
+    const fixture = maskPrefabFixture();
+    fixture.spec.children[0] = makeSpec({
+        figmaId: 'clip', name: 'Clip', visible: false, action: 'render',
+        kind: 'sprite', figmaType: 'ELLIPSE',
+        sprite: { uuid: 'sprite-frame', url: 'db://assets/tile.png', tiled: true, sliced: false },
+    });
+    await fixture.import();
+    const clip = fixture.environment.canvas.getChildByName('Clip');
+    const helper = clip.getChildByName('__FigmaTiledMask');
+    const mask = helper.getComponent(Mask);
+    assert.equal(clip.active, false);
+    assert.equal(clip.getComponent(Mask), null);
+    assert.equal(mask.type, 1);
+    assert.equal(mask.subComp, null);
+    await fixture.import();
+    assert.equal(helper.getComponent(Mask), mask);
+    assert.equal(helper.components.filter((item) => item instanceof Graphics).length, 1);
+});
+
+test('scene-only updates refuse an unowned manual Mask before changing the node', async () => {
+    const spec = makeSpec({ figmaId: 'manual-mask-root', name: 'ManualMaskRoot', isRoot: true });
+    const environment = await importWithFakeCocos(spec);
+    const node = environment.canvas.getChildByName('ManualMaskRoot');
+    const manualMask = node.addComponent(Mask);
+    const manualGraphics = node.getComponent(Graphics);
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        return request === 'cc' ? environment.cc : originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        await assert.rejects(methods.importDocument({
+            packageName: 'figma-importer-cocos', fileKey: 'file-key', rootName: 'Test',
+            rootFrame: spec.frame, scale: 1, updateExisting: true,
+            existingMap: environment.result.nodeMap,
+            roots: [{ ...spec, name: 'ShouldNotRename' }],
+        }), /缺少导入器归属记录/);
+        assert.equal(node.name, 'ManualMaskRoot');
+        assert.equal(node.getComponent(Mask), manualMask);
+        assert.equal(node.getComponent(Graphics), manualGraphics);
+    } finally {
+        Module._load = originalLoad;
+    }
+});
+
+test('Mask decision logs distinguish root exclusion and helper viewport creation', async () => {
+    const fixture = maskPrefabFixture();
+    fixture.spec.kind = 'scrollView';
+    const events = [];
+    const originalLog = console.log;
+    console.log = (label, data) => {
+        if (label === '[Figma Importer Mask 决策]') events.push(JSON.parse(data));
+    };
+    try {
+        await fixture.import();
+    } finally {
+        console.log = originalLog;
+    }
+    assert.ok(events.some((event) => event.figmaId === 'mask-root' && event.target === 'node'
+        && !event.shouldMask && event.reason === 'import-root'));
+    assert.ok(events.some((event) => event.figmaId === 'mask-root' && event.target === 'scroll-view'
+        && event.shouldMask && event.maskType === 'rectangle'));
+});
 
 async function importWithFakeCocos(spec, scale = 1) {
     const environment = fakeCocos();
