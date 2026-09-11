@@ -797,6 +797,29 @@ test('keeps Graphics when a structural container needs Mask clipping', async () 
     assert.ok(imported.getComponent(Graphics));
 });
 
+test('does not clip the imported root but preserves nested container clipping', async () => {
+    const child = makeSpec({
+        figmaId: 'root-mask:child',
+        name: 'ClippedChild',
+        clipsContent: true,
+        children: [makeSpec({ figmaId: 'root-mask:grandchild' })],
+    });
+    const root = makeSpec({
+        figmaId: 'root-mask:root',
+        isRoot: true,
+        clipsContent: true,
+        children: [child],
+    });
+    child.parentFrame = root.frame;
+    child.children[0].parentFrame = child.frame;
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.children[0];
+    assert.equal(imported.getComponent(Mask), null);
+    assert.equal(imported.getComponent(Graphics), null);
+    assert.ok(imported.children[0].getComponent(Mask));
+    assert.ok(imported.children[0].getComponent(Graphics));
+});
+
 test('does not auto-create Widget for Figma constraints', async () => {
     const spec = makeSpec({
         frame: { x: 10, y: 12, width: 40, height: 24 },
@@ -2301,7 +2324,8 @@ test('removes obsolete ScrollView helpers when a reimported node becomes a norma
     }
 });
 
-test('recreates Graphics after removing a deferred Mask so the renderer stays enabled', async () => {
+for (const rootWithoutMask of [false, true]) {
+test(`recreates Graphics after removing a deferred Mask (${rootWithoutMask ? 'import root' : 'clipping disabled'})`, async () => {
     const environment = fakeCocos();
     const originalLoad = Module._load;
     Module._load = function load(request, parent, isMain) {
@@ -2338,6 +2362,8 @@ test('recreates Graphics after removing a deferred Mask so the renderer stays en
         const secondRoot = makeSpec({
             figmaId: '15:250',
             name: 'ClippedContainer',
+            isRoot: rootWithoutMask,
+            clipsContent: rootWithoutMask,
             fills: [{ type: 'SOLID', visible: true, color: { r: 1, g: 0, b: 0 } }],
             children: [makeSpec({ figmaId: '15:251', name: 'Child' })],
         });
@@ -2364,6 +2390,7 @@ test('recreates Graphics after removing a deferred Mask so the renderer stays en
         Module._load = originalLoad;
     }
 });
+}
 
 test('waits for obsolete LabelOutline before configuring built-in Label outline', async () => {
     const environment = fakeCocos();

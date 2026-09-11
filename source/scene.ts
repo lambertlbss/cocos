@@ -1307,7 +1307,9 @@ function configureClip(node: any, spec: SceneNodeSpec, cc: any): void {
 }
 
 function clipsGeneratedChildren(spec: SceneNodeSpec): boolean {
-    return spec.clipsContent
+    // The imported root is a screen container, not a clipping viewport.
+    return !spec.isRoot
+        && spec.clipsContent
         && spec.kind !== 'scrollView'
         && spec.children.length > 0
         && spec.action === 'generate';
