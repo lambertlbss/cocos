@@ -799,6 +799,13 @@ function visibleSolidFill(spec: SceneNodeSpec): FigmaPaint | undefined {
     return visibleSolidPaint(spec.fills);
 }
 
+function firstTextFill(paints: FigmaPaint[]): FigmaPaint | undefined {
+    // Figma's paint array is back-to-front: the panel's top fill is last.
+    // Native text keeps the first usable solid in panel order, without mixing
+    // stacked fills or changing the source order used by other renderers.
+    return visibleSolidPaint([...paints].reverse());
+}
+
 function validSolidStroke(spec: SceneNodeSpec): FigmaPaint | undefined {
     return spec.strokeWeight > 0 ? visibleSolidPaint(spec.strokes) : undefined;
 }
@@ -902,7 +909,7 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
     label.string = characters;
     label.enableOutline = false;
     label.color = toColor(cc.Color, { r: 1, g: 1, b: 1, a: 1 });
-    const fill = visiblePaint(spec.fills);
+    const fill = firstTextFill(spec.fills);
     if (fill?.color) {
         label.color = toColor(cc.Color, fill.color, fill.opacity ?? 1);
     }
@@ -926,7 +933,8 @@ function configureRichText(node: any, spec: SceneNodeSpec, scale: number, cc: an
     applyTextAlignment(richText, style, RichText);
     richText.fontFamily = style.fontFamily ?? '';
     richText.useSystemFont = !spec.fontUuid;
-    const fill = visiblePaint(spec.fills);
+    richText.fontColor = toColor(cc.Color, { r: 1, g: 1, b: 1, a: 1 });
+    const fill = firstTextFill(spec.fills);
     if (fill?.color) {
         richText.fontColor = toColor(cc.Color, fill.color, fill.opacity ?? 1);
     }

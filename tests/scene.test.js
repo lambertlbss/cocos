@@ -1078,6 +1078,38 @@ test('imports hidden Figma layers with their full subtree and keeps only hidden 
     assert.ok(importedText.getComponent(Label));
 });
 
+for (const kind of ['label', 'richText']) {
+    const bottom = { type: 'SOLID', visible: true, opacity: 1, color: { r: 1, g: 253 / 255, b: 218 / 255 } };
+    const top = { type: 'SOLID', visible: true, opacity: 1, color: { r: 138 / 255, g: 134 / 255, b: 114 / 255 } };
+    for (const [name, fills, expected] of [
+        ['txt_tab_selected3 stacked fills', [bottom, top], [138, 134, 114, 255]],
+        ['hidden top', [bottom, { ...top, visible: false }], [255, 253, 218, 255]],
+        ['transparent top', [bottom, { ...top, opacity: 0 }], [255, 253, 218, 255]],
+        ['transparent color', [bottom, { ...top, color: { ...top.color, a: 0 } }], [255, 253, 218, 255]],
+        ['non-solid top', [bottom, { type: 'GRADIENT_LINEAR' }], [255, 253, 218, 255]],
+        ['opacity is preserved, not blended', [bottom, { ...top, opacity: 0.5, color: { ...top.color, a: 0.5 } }], [138, 134, 114, 64]],
+        ['single fill unchanged', [bottom], [255, 253, 218, 255]],
+        ['no usable color', [], [255, 255, 255, 255]],
+    ]) {
+        test(`${kind} uses the first valid text color in Figma panel order: ${name}`, async () => {
+            const original = JSON.stringify(fills);
+            const environment = await importWithFakeCocos(makeSpec({
+                name: 'txt_tab_selected3', figmaType: 'TEXT', kind, characters: '选中', fills,
+                strokes: [{ type: 'SOLID', color: { r: 245 / 255, g: 241 / 255, b: 219 / 255 } }],
+                strokeWeight: 2,
+            }));
+            const component = environment.canvas.children[0].getComponent(kind === 'label' ? Label : RichText);
+            const color = kind === 'label' ? component.color : component.fontColor;
+            assert.deepEqual([color.r, color.g, color.b, color.a], expected);
+            assert.equal(JSON.stringify(fills), original);
+            if (kind === 'label') {
+                const outline = component.outlineColor;
+                assert.deepEqual([outline.r, outline.g, outline.b, outline.a], [245, 241, 219, 255]);
+            }
+        });
+    }
+}
+
 test('keeps the initial Figma box without outline compensation', async () => {
     const root = makeSpec({
         name: 'TextRoot',
