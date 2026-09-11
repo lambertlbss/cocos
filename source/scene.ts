@@ -16,7 +16,6 @@ import type {
 import { sanitizeNodeName } from './node-name';
 import { shouldGenerateMask, setMaskShapeSafely } from './mask-policy';
 import type { MaskTarget } from './mask-policy';
-import { configurePrefabReference, referencedPrefabChild, removePrefabReference, assertReferenceRemovable } from './prefab-reference';
 
 module.paths.push(join(Editor.App.path, 'node_modules'));
 
@@ -236,9 +235,6 @@ function setParentKeepingWorld(node: any, parent: any): void {
 }
 
 function isGeneratedHelperNode(child: any, parent: any, cc: any): boolean {
-    // A referenced asset owns its whole subtree, even if its node names happen
-    // to match one of our helper names.
-    if (child?._prefab?.instance) return false;
     if (child.name === BACKGROUND_NODE_NAME
         || child.name === TILED_MASK_NODE_NAME
         || child.name === TILED_SPRITE_NODE_NAME
@@ -260,7 +256,6 @@ function removeMappedNodeTree(
     staleUuids: Set<string>,
     cc: any,
 ): number {
-    removePrefabReference(node);
     let removed = 1;
     for (const child of [...node.children]) {
         if (staleUuids.has(child.uuid) || isGeneratedHelperNode(child, node, cc)) {
@@ -491,10 +486,6 @@ async function removeObsoleteLabelOutline(node: any, cc: any): Promise<void> {
 
 function desiredGeneratedComponents(spec: SceneNodeSpec, cc: any, node: any): Set<any> {
     const desired = new Set<any>();
-    if (spec.prefab) {
-        if (spec.opacity < 0.999) desired.add(cc.UIOpacity);
-        return desired;
-    }
     const clipsChildren = clipsGeneratedChildren(spec);
     if (spec.action === 'render' || spec.sprite) {
         if (!usesTiledSpriteHelper(spec) && !usesOverflowSpriteHelper(spec)) {
@@ -587,7 +578,6 @@ function destroyOwnedHelperSubtree(
     survivor: any,
     guard?: PrefabOwnershipGuard,
 ): void {
-    if (helper?._prefab?.instance) return;
     if (guard) {
         assertOwnedHelperSubtree(helper, guard);
     }
@@ -1575,7 +1565,6 @@ function removeStalePrefabNodes(
     }
     const staleIds = new Set(stale.keys());
     for (const node of stale.values()) {
-        assertReferenceRemovable(node);
         for (const component of nodeComponents(node)) {
             const componentFileId = componentPrefabFileId(component);
             if (!componentFileId || !previousComponentFileIds.has(componentFileId)) {
@@ -1586,7 +1575,6 @@ function removeStalePrefabNodes(
         }
     }
     const salvageManualDescendants = (container: any, survivorParent: any) => {
-        removePrefabReference(container);
         for (const child of [...container.children]) {
             const childFileId = nodePrefabFileId(child);
             if (childFileId
@@ -1952,9 +1940,6 @@ export const methods = {
             } else {
                 updated += 1;
             }
-            const previousReference = referencedPrefabChild(node);
-            if (previousReference && (!spec.prefab
-                || prefabAssetUuid(previousReference) !== spec.prefab.uuid)) assertReferenceRemovable(node);
             if (spec.action !== 'transform' && !prefabOwnershipGuard) {
                 if (node.getComponent(Mask) || clipsGeneratedChildren(spec)) {
                     assertMaskComponentsOwned(node, cc);
@@ -2015,7 +2000,6 @@ export const methods = {
             configureGeometry(node, spec, payload.scale, cc);
 
             if (spec.action !== 'transform') {
-                if (!spec.prefab) removePrefabReference(node);
                 removeObsoleteScrollHelpers(node, spec, cc, prefabOwnershipGuard);
                 await removeObsoleteLabelOutline(node, cc);
                 const preserved = desiredGeneratedComponents(spec, cc, node);
@@ -2049,10 +2033,7 @@ export const methods = {
                 }
                 configureGeometry(node, spec, payload.scale, cc);
                 const clipsChildren = clipsGeneratedChildren(spec);
-                if (spec.prefab) {
-                    if (prefabContext) ensureNodePrefabInfo(node, prefabRoot, cc);
-                    await configurePrefabReference(node, spec.prefab, cc);
-                } else if (spec.action === 'render' || spec.sprite) {
+                if (spec.action === 'render' || spec.sprite) {
                     if (!spec.sprite) {
                         throw new Error(`PNG 整层节点“${spec.name}”没有绑定 SpriteFrame，资源可能未成功导入。`);
                     }
@@ -2105,11 +2086,11 @@ export const methods = {
                     configureGraphics(node, spec, payload.scale, cc);
                 }
                 configureOpacity(node, spec, cc);
-                if (!spec.prefab) configureButton(node, spec, cc);
+                configureButton(node, spec, cc);
             }
 
             const transform = node.getComponent(UITransform);
-            const childParent = spec.prefab || spec.action === 'transform'
+            const childParent = spec.action === 'transform'
                 ? node
                 : configureScroll(
                     node,
@@ -2119,7 +2100,7 @@ export const methods = {
                     cc,
                     prefabOwnershipGuard,
                 );
-            if (!spec.prefab && spec.action === 'generate') {
+            if (spec.action === 'generate') {
                 configureLayout(childParent, spec, payload.scale, cc);
             }
             for (const child of spec.children) {

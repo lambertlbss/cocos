@@ -42,8 +42,6 @@ export type ImportPlanReason =
 export type VisualFoldKind = 'single-image' | 'single-text' | 'background';
 
 export interface ImportDecision {
-    /** Import-time local Prefab match; never sourced from a name override. */
-    prefab?: PrefabAssetSpec;
     action: ImportAction;
     kind: NodeKind;
     nineSlice: boolean;
@@ -267,15 +265,7 @@ export interface SpriteAssetSpec {
     renderFrame?: Rect;
 }
 
-export interface PrefabAssetSpec {
-    uuid: string;
-    url: string;
-    width: number;
-    height: number;
-}
-
 export interface SceneNodeSpec {
-    prefab?: PrefabAssetSpec;
     figmaId: string;
     name: string;
     figmaType: string;

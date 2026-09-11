@@ -10,29 +10,7 @@ const {
     semanticRoleForNode,
 } = require('../dist/figma/import-planner');
 const { parseNode } = require('../dist/figma/parser');
-const { makeSpec, overflowingRenderFrame, subtreeHasExplicitOverride, collectAssetRequests } = require('../dist/main');
-
-test('Prefab match cuts scene children and all descendant resource requests before download', () => {
-    const root = node({ id: 'prefab-root', children: [{ id: 'prefab-child', name: 'Widget', type: 'FRAME',
-        absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 80 },
-        fills: [{ type: 'GRADIENT_LINEAR' }], children: [
-            { id: 'unused-png', name: 'HugeImage', type: 'RECTANGLE',
-                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 80 } },
-        ],
-    }] });
-    const decisions = decisionsFor([root]);
-    const prefab = { uuid: 'widget', url: 'db://assets/Widget.prefab', width: 100, height: 80 };
-    decisions.set('prefab-root', { action: 'generate', kind: 'node', explicit: true });
-    decisions.set('prefab-child', { action: 'generate', kind: 'node', explicit: true, prefab });
-    decisions.set('unused-png', { action: 'render', kind: 'sprite' });
-    assert.deepEqual(collectAssetRequests([root], decisions), { png: [], tiled: [], rawImages: [], gradients: [] });
-    const index = new Map([[root.id, root], [root.children[0].id, root.children[0]]]);
-    const spec = makeSpec(root, root.absoluteBoundingBox, decisions, compileImportPlan([root], decisions), index,
-        new Map(), new Map(), true);
-    assert.equal(spec.children[0].prefab, prefab);
-    assert.equal(spec.children[0].children.length, 0);
-    assert.equal(spec.children[0].flattenBoundary, true);
-});
+const { makeSpec, overflowingRenderFrame, subtreeHasExplicitOverride } = require('../dist/main');
 
 function node(value) {
     const parsed = parseNode({
