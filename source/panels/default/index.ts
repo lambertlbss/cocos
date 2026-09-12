@@ -1,6 +1,8 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import packageJSON from '../../../package.json';
+import { ImportReviewPanel } from './import-review';
+import type { ImportReview } from '../../import-review-model';
 import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import { normalizeImportAction } from '../../import-actions';
 import { sanitizeNodeName } from '../../node-name';
@@ -82,6 +84,7 @@ interface PanelState {
 }
 
 let panelHost: any = null;
+let importReviewPanel: ImportReviewPanel | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let importButtonResetTimer: ReturnType<typeof setTimeout> | null = null;
 let nodeOverrideSaveTask: Promise<void> = Promise.resolve();
@@ -835,7 +838,7 @@ async function importToScene(): Promise<void> {
     setBusy(true);
     updateProgress({ phase: 'assets', value: 0, message: '正在准备导入…' });
     try {
-        const result = await request<{ prefabUrl?: string; warnings?: string[] }>(
+        const result = await request<{ prefabUrl?: string; warnings?: string[]; review?: ImportReview }>(
             'import-selection',
             { overrides, settings },
         );
@@ -845,6 +848,7 @@ async function importToScene(): Promise<void> {
         showToast(result?.prefabUrl
             ? `导入完成，已创建预制体：${result.prefabUrl}${fallbackNote}`
             : `导入完成，已在场景中选中根节点${fallbackNote}。`);
+        if (result.review) importReviewPanel?.open(result.review);
     } catch (error) {
         const message = errorMessage(error, '导入失败。');
         updateProgress({ phase: 'error', value: 0, message });
@@ -855,6 +859,14 @@ async function importToScene(): Promise<void> {
 }
 
 function bindEvents(): void {
+    element('#open-import-review').addEventListener('click', async () => {
+        if (state.busy) return;
+        try {
+            const review = await request<ImportReview | null>('get-import-review');
+            if (review) importReviewPanel?.open(review);
+            else showToast('本次插件会话尚无导入检查结果，请先完成一次导入。');
+        } catch (error) { showToast(errorMessage(error, '读取检查结果失败。'), true); }
+    });
     element('#save-token').addEventListener('click', async () => {
         const input = element<HTMLInputElement>('#token-input');
         if (!input.value.trim()) {
@@ -1235,12 +1247,16 @@ module.exports = Editor.Panel.define({
         app: '#app',
     },
     methods: {
+        onImportReviewReady(review: ImportReview) {
+            importReviewPanel?.open(review);
+        },
         onProgress(event: ProgressEvent) {
             updateProgress(event);
         },
     },
     async ready() {
         panelHost = this;
+        importReviewPanel = new ImportReviewPanel(root(), request, setBusy);
         bindEvents();
         try {
             const initial = await request<{
@@ -1271,6 +1287,8 @@ module.exports = Editor.Panel.define({
     },
     beforeClose() {},
     close() {
+        importReviewPanel?.dispose();
+        importReviewPanel = null;
         panelHost = null;
     },
 });

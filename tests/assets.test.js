@@ -281,6 +281,31 @@ test('keeps the imported SpriteFrame when Cocos throws while saving sliced borde
     }
 });
 
+test('stale nonzero borders or an unpersisted trim mode do not count as a verified slice', async () => {
+    const previousEditor = global.Editor;
+    const info = {
+        uuid: 'image', url: 'db://assets/stale.png', importer: 'image', type: 'cc.ImageAsset', imported: true,
+        subAssets: { frame: { uuid: 'frame', importer: 'sprite-frame', type: 'cc.SpriteFrame', imported: true } },
+    };
+    try {
+        for (const stored of [
+            { trimType: 'none', borderLeft: 1, borderRight: 1, borderTop: 1, borderBottom: 1 },
+            { trimType: 'auto', borderLeft: 3, borderRight: 4, borderTop: 2, borderBottom: 3 },
+        ]) {
+            global.Editor = { Message: { async request(_channel, method) {
+                if (method === 'query-asset-info') return info;
+                if (method === 'query-asset-meta') return { subMetas: { frame: {
+                    importer: 'sprite-frame', userData: { ...stored },
+                } } };
+            } } };
+            const asset = await new AssetWriter('figma-importer').write(info.url, Buffer.from('png'),
+                { left: 3, right: 4, top: 2, bottom: 3 });
+            assert.equal(asset.sliced, false);
+            assert.match(asset.sliceFallback, /未能写入或回读/);
+        }
+    } finally { global.Editor = previousEditor; }
+});
+
 test('converts a newly imported Texture into a SpriteFrame and preserves tiled settings', async () => {
     const url = 'db://assets/figma-importer/new-texture.png';
     const textureInfo = {

@@ -444,6 +444,14 @@ function fakeCocos() {
                         return;
                     }
                     const trimmed = request.uuid === 'trimmed-sprite-frame';
+                    if (['full-sliced-frame', 'compact-sliced-frame'].includes(request.uuid)) {
+                        const compact = request.uuid === 'compact-sliced-frame';
+                        const width = compact ? 26 : 488;
+                        const height = compact ? 26 : 472;
+                        callback(null, { width, height, rect: { width, height }, originalSize: { width, height },
+                            insetLeft: 12, insetRight: 12, insetTop: 12, insetBottom: 12 });
+                        return;
+                    }
                     if (request.uuid === 'overflow-sprite-frame') {
                         callback(null, {
                             width: 149,
@@ -653,7 +661,7 @@ test('Mask decision logs distinguish root exclusion and helper viewport creation
         && event.shouldMask && event.maskType === 'rectangle'));
 });
 
-async function importWithFakeCocos(spec, scale = 1) {
+async function importWithFakeCocos(spec, scale = 1, reviewId) {
     const environment = fakeCocos();
     const originalLoad = Module._load;
     Module._load = function load(request, parent, isMain) {
@@ -664,6 +672,7 @@ async function importWithFakeCocos(spec, scale = 1) {
     };
     try {
         const result = await methods.importDocument({
+            reviewId,
             packageName: 'figma-importer-cocos',
             fileKey: 'file-key',
             rootName: 'Test',
@@ -771,6 +780,21 @@ test('rounds imported frame sizes after scaling without rounding node positions 
             assert.notEqual(transform.height, 29.48, 'runtime Label auto-size must not be locked or rounded');
         }
     }
+});
+
+test('import completion captures the real before/after tree and generated component ownership', async () => {
+    const environment = await importWithFakeCocos(makeSpec({
+        name: 'Review Root', action: 'generate', kind: 'node',
+        children: [makeSpec({ figmaId: 'review-label', name: 'Label', figmaType: 'TEXT', kind: 'label',
+            characters: 'Hello', textStyle: { fontSize: 16, lineHeightPx: 20 } })],
+    }), 1, 'actual-import-review');
+    const { reviewBefore, reviewAfter } = environment.result;
+    assert.equal(reviewBefore.nodes.length, 0);
+    assert.equal(reviewAfter.nodes.length, 2);
+    assert.equal(reviewAfter.nodes[1].name, 'Label');
+    assert.ok(reviewAfter.nodes[1].components.some((component) => component.type === 'Label' && component.managed));
+    const refreshed = methods.refreshReviewAfter({ id: 'actual-import-review' });
+    assert.equal(refreshed.rootUuid, environment.result.rootUuid);
 });
 
 test('does not add a clipping Mask to a terminal Sprite layer', async () => {
@@ -1601,6 +1625,31 @@ test('keeps the Figma node size when an existing sliced SpriteFrame is assigned'
     assert.equal(sprite.type, Sprite.Type.SLICED);
     assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
+});
+
+test('replacing a full nine-slice image with a compact one leaves node geometry and hierarchy unchanged', async () => {
+    const snapshots = [];
+    for (const uuid of ['full-sliced-frame', 'compact-sliced-frame']) {
+        const child = makeSpec({
+            figmaId: 'compact-child', action: 'render', kind: 'sprite',
+            frame: { x: 19.5, y: 31.25, width: 488, height: 472 },
+            sprite: { uuid, url: 'db://assets/panel.png', sliced: true },
+        });
+        const root = makeSpec({ frame: { x: 0, y: 0, width: 640, height: 800 }, children: [child] });
+        child.parentFrame = root.frame;
+        const environment = await importWithFakeCocos(root, 1.5);
+        const imported = environment.canvas.children[0].children[0];
+        const transform = imported.getComponent(UITransform);
+        const sprite = imported.getComponent(Sprite);
+        snapshots.push({ position: [imported.position.x, imported.position.y, imported.position.z],
+            scale: [imported.scale.x, imported.scale.y, imported.scale.z],
+            size: transform.contentSize, anchor: transform.anchorPoint,
+            type: sprite.type, sizeMode: sprite.sizeMode, childCount: imported.children.length });
+        assert.equal(sprite.type, Sprite.Type.SLICED);
+        assert.equal(sprite.sizeMode, Sprite.SizeMode.CUSTOM);
+        assert.deepEqual(transform.contentSize, { width: 732, height: 708 });
+    }
+    assert.deepEqual(snapshots[0], snapshots[1]);
 });
 
 test('rounds fractional sliced and trimmed Sprite sizes after all scaling', async () => {

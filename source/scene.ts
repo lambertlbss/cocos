@@ -16,10 +16,14 @@ import type {
 import { sanitizeNodeName } from './node-name';
 import { shouldGenerateMask, setMaskShapeSafely } from './mask-policy';
 import type { MaskTarget } from './mask-policy';
+import { captureReviewScene, registerSceneReview, reviewManagedComponentIds,
+    prepareReviewRemoval, finishReviewRemoval, refreshReviewAfter } from './import-review-scene';
+import type { ReviewScene } from './import-review-model';
 
 module.paths.push(join(Editor.App.path, 'node_modules'));
 
 interface SceneImportPayload {
+    reviewId?: string;
     packageName: string;
     fileKey: string;
     rootName: string;
@@ -34,6 +38,8 @@ interface SceneImportPayload {
 }
 
 interface SceneImportResult {
+    reviewBefore?: ReviewScene;
+    reviewAfter?: ReviewScene;
     rootUuid: string;
     nodeMap: Record<string, string>;
     created: number;
@@ -1754,6 +1760,9 @@ export function load(): void {}
 export function unload(): void {}
 
 export const methods = {
+    refreshReviewAfter,
+    prepareReviewRemoval,
+    finishReviewRemoval,
     inspectPrefabContext(payload: {
         prefabUuid: string;
         rootFileId?: string;
@@ -1883,6 +1892,11 @@ export const methods = {
                 : null)
             : null;
         const reusedImportRoot = Boolean(importRoot);
+        const reviewBefore = payload.reviewId
+            ? captureReviewScene(importRoot ?? existingRootNode, cc, payload.existingMap,
+                prefabContext?.managedComponentFileIds ?? reviewManagedComponentIds(importRoot ?? existingRootNode,
+                    payload.existingMap, [UITransform, ...generatedClasses]))
+            : undefined;
         const parent = fallbackParent;
         if (!directRoot) {
             if (!importRoot) {
@@ -2224,6 +2238,10 @@ export const methods = {
             }
         }
         return {
+            reviewBefore,
+            reviewAfter: payload.reviewId ? registerSceneReview(payload.reviewId, importRoot, cc, nodeMap,
+                prefabSync?.managedComponentFileIds ?? reviewManagedComponentIds(importRoot, nodeMap,
+                    [UITransform, ...generatedClasses])) : undefined,
             rootUuid: importRoot.uuid,
             nodeMap,
             created,

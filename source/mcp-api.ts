@@ -272,6 +272,7 @@ function summarizeImportResult(value: unknown): Record<string, unknown> {
     }
     const result = value as Record<string, unknown>;
     const summary: Record<string, unknown> = { completed: true };
+    if (result.review && typeof result.review === 'object') summary.reviewAvailable = true;
     if (typeof result.created === 'number' && Number.isFinite(result.created)) summary.created = result.created;
     if (typeof result.updated === 'number' && Number.isFinite(result.updated)) summary.updated = result.updated;
     if (typeof result.prefabUrl === 'string') summary.prefabUrl = result.prefabUrl;

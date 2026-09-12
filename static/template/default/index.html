@@ -222,6 +222,7 @@
             <span id="action-note">导入到当前场景 Canvas 根节点下；Frame 链接将自动创建并打开预制体</span>
         </div>
         <button id="cancel-import" class="button ghost is-hidden" type="button">取消</button>
+        <button id="open-import-review" class="button ghost compact" type="button">导入检查</button>
         <button id="import-button" class="button import" type="button"
             title="导入到当前场景 Canvas 根节点或创建预制体" disabled>
             <span id="import-button-progress" class="import-button-progress" aria-hidden="true"></span>
@@ -232,5 +233,15 @@
         </button>
     </footer>
 
+    <dialog id="import-review-dialog" class="review-dialog" aria-labelledby="review-title">
+        <header class="review-heading">
+            <div><h2 id="review-title">导入结果检查</h2><p class="review-summary"></p></div>
+            <button class="review-close button ghost compact" type="button" aria-label="关闭导入检查">关闭</button>
+        </header>
+        <nav class="review-tabs" aria-label="检查内容"></nav>
+        <div class="review-errors" role="alert"></div>
+        <div class="review-content"></div>
+        <footer class="review-footer"></footer>
+    </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </main>

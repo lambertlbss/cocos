@@ -2,7 +2,7 @@
   "package_version": 2,
   "name": "figma-importer-cocos",
   "title": "Figma Importer",
-  "version": "1.0.45",
+  "version": "1.0.47",
   "description": "Figma UI importer for Cocos Creator 3.8.7",
   "main": "./dist/main.js",
   "author": "Figma Importer contributors",
@@ -12,7 +12,7 @@
   },
   "scripts": {
     "clean": "node scripts/clean-dist.js",
-    "build:cocos": "tsc -p tsconfig.json",
+    "build:cocos": "tsc -p tsconfig.json && node scripts/build-sliced-png.js",
     "typecheck:mcp": "tsc -p mcp/tsconfig.json",
     "build:mcp": "npm run typecheck:mcp && node scripts/build-mcp.js",
     "build": "npm run clean && npm run build:cocos && npm run build:mcp",
@@ -26,7 +26,9 @@
     "@cocos/creator-types": "3.8.7",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@types/node": "^16.18.126",
+    "@types/pngjs": "6.0.5",
     "esbuild": "^0.28.2",
+    "pngjs": "7.0.0",
     "typescript": "^5.2.2",
     "zod": "^4.3.6"
   },
@@ -55,6 +57,11 @@
       "script": "./dist/scene.js"
     },
     "messages": {
+      "get-import-review": { "methods": ["getImportReview"] },
+      "import-review-ready": { "methods": ["default.onImportReviewReady"] },
+      "get-import-review-preview": { "methods": ["getImportReviewPreview"] },
+      "get-import-review-source-preview": { "methods": ["getImportReviewSourcePreview"] },
+      "apply-import-review": { "methods": ["applyImportReview"] },
       "open-panel": {
         "methods": [
           "openPanel"

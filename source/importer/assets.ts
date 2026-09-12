@@ -183,7 +183,7 @@ async function ensureFolder(url: string): Promise<void> {
 export class AssetWriter {
     readonly folder: string;
 
-    constructor(folder: string) {
+    constructor(folder: string, private readonly beforeWrite?: (url: string, existed: boolean) => Promise<void>) {
         this.folder = normalizeFolder(folder);
     }
 
@@ -244,6 +244,7 @@ export class AssetWriter {
     ): Promise<SpriteAssetSpec> {
         const existing = await queryAsset(url);
         const data = typeof contents === 'string' ? Buffer.from(contents, 'utf8') : contents;
+        await this.beforeWrite?.(url, Boolean(existing));
         if (existing) {
             await assetRequest('asset-db', 'save-asset', url, data);
         } else {
@@ -286,7 +287,15 @@ export class AssetWriter {
         }
         // Existing SpriteFrames can already carry valid borders even when this
         // write does not request new ones. Preserve that sliced classification.
-        const sliced = !tiled && hasSlicedBorders(meta);
+        const stored = meta?.subMetas && Object.values(meta.subMetas)
+            .find((item) => item.importer === 'sprite-frame')?.userData;
+        const exactBorders = !requestedSliced || (stored?.trimType === 'none'
+            && ['left', 'right', 'top', 'bottom'].every((side) => {
+                const key = side as keyof NonNullable<typeof borders>;
+                return stored[`border${side[0].toUpperCase()}${side.substring(1)}`]
+                    === Math.max(0, Math.round(borders![key]));
+            }));
+        const sliced = !tiled && hasSlicedBorders(meta) && exactBorders;
         if (requestedSliced && !sliced && !sliceFallback) {
             sliceFallback = `Cocos 未能写入或回读三/九宫 SpriteFrame 边界：${url}`;
         }

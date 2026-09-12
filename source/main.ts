@@ -21,7 +21,7 @@ import {
     annotateTreeWithImportPlan,
     compileImportPlan,
 } from './figma/import-planner';
-import { analyzeSliceGrid } from './figma/slicing';
+import { analyzeSliceGrid, type SliceAnalysis } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
 import {
     isTerminalAction,
@@ -40,6 +40,7 @@ import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
 import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
+import { writeSlicedPng } from './importer/sliced-png';
 import {
     collectSceneSpecFigmaIds,
     createMinimalPrefabJson,
@@ -80,8 +81,12 @@ import {
     type TreeNodeDto,
 } from './types';
 import { sanitizeNodeName } from './node-name';
+import { ImportReviewRecorder, ImportReviewService } from './importer/import-review';
+import type { ImportReview, ReviewScene } from './import-review-model';
 
 const vault = new TokenVault(packageJSON.name);
+const importReviews = new ImportReviewService();
+let applyingImportReview = false;
 let activeDocument: DocumentSession | null = null;
 let activeController: AbortController | null = null;
 let activeOperationOwner: string | null = null;
@@ -108,6 +113,7 @@ interface RawImageAssetRequest {
 }
 
 interface SceneImportPayload {
+    reviewId?: string;
     packageName: string;
     fileKey: string;
     rootName: string;
@@ -122,6 +128,9 @@ interface SceneImportPayload {
 }
 
 interface SceneImportResult {
+    reviewBefore?: ReviewScene;
+    reviewAfter?: ReviewScene;
+    review?: ImportReview;
     rootUuid: string;
     nodeMap: Record<string, string>;
     created: number;
@@ -309,6 +318,7 @@ function finishRoundtripOperation(controller: AbortController): void {
 }
 
 function beginOperation(owner: string | null = null): AbortController {
+    if (applyingImportReview) throw new Error('正在确认导入后的资源调整，请稍候。');
     if (activeController) {
         throw new Error('当前已有 Figma 操作正在执行，请等待完成或先取消。');
     }
@@ -734,8 +744,9 @@ async function buildAssets(
     session: DocumentSession,
     decisions: Map<string, Decision>,
     importSettings: ImportSettings,
+    review: ImportReviewRecorder,
 ): Promise<AssetBuildResult> {
-    const writer = new AssetWriter(importSettings.assetFolder);
+    const writer = new AssetWriter(importSettings.assetFolder, (url, existed) => review.beforeWrite(url, existed));
     await writer.initialize();
     const cache = new LocalAssetCache(defaultCacheFolder());
     await cache.initialize();
@@ -791,6 +802,7 @@ async function buildAssets(
         source: 'existing' | 'local' | 'cache' | 'figma' | 'generated' = 'figma',
     ) => {
         assets.set(node.id, asset);
+        review.bind(node, asset, source);
         completed += 1;
         const verb = source === 'local'
             ? '复用本地资源'
@@ -1007,6 +1019,7 @@ async function buildAssets(
             nodes: FigmaNode[];
             url: string;
             borders?: { left: number; right: number; top: number; bottom: number };
+            sliceAnalysis?: SliceAnalysis;
             renderFrame?: Rect;
             key: CacheEntryKey;
             contents: Buffer | null;
@@ -1028,7 +1041,7 @@ async function buildAssets(
             const node = groupedNodes[0];
             const decision = decisions.get(node.id) ?? defaultDecision(node);
             const sliceAnalysis = decision.nineSlice && format === 'png'
-                ? analyzeSliceGrid(node, importSettings.scale)
+                ? analyzeSliceGrid(node)
                 : null;
             if (decision.nineSlice && !sliceAnalysis) {
                 warnings.add(`三/九宫节点“${node.name}”无法计算连续切片边界，已临时作为 PNG 整层导入`);
@@ -1072,6 +1085,7 @@ async function buildAssets(
                 nodes: groupedNodes,
                 url,
                 borders,
+                sliceAnalysis: sliceAnalysis ?? undefined,
                 renderFrame: localMatch ? undefined : renderFrame,
                 key,
                 contents: localMatch?.contents ?? cached,
@@ -1109,7 +1123,16 @@ async function buildAssets(
                 contents = await (await getApi()).download(remoteUrl, `${item.node.name} (${item.node.id})`);
                 await cache.write(item.key, contents);
             }
-            const asset = await writer.write(item.url, contents, item.borders);
+            let asset: SpriteAssetSpec;
+            if (item.sliceAnalysis) {
+                const trace = diagnosticStart('三/九宫资源最小化', { node: item.node.name });
+                const result = await writeSlicedPng(writer, item.url, contents, item.node,
+                    item.sliceAnalysis, importSettings.scale);
+                asset = result.asset;
+                trace.done(result.optimization);
+            } else {
+                asset = await writer.write(item.url, contents, item.borders);
+            }
             if (asset.sliceFallback) {
                 warnings.add(`三/九宫节点“${item.node.name}”切片设置失败，已临时作为 PNG 整层导入：${asset.sliceFallback}`);
             }
@@ -1848,6 +1871,7 @@ async function prepareLinkedFramePrefab(
 }
 
 async function importLinkedFramePrefab(args: {
+    reviewId: string;
     prefabUrl: string;
     prefabName: string;
     fileKey: string;
@@ -1879,6 +1903,7 @@ async function importLinkedFramePrefab(args: {
         collectSceneSpecFigmaIds(args.roots),
     );
     const payload: SceneImportPayload = {
+        reviewId: args.reviewId,
         packageName: packageJSON.name,
         fileKey: args.fileKey,
         rootName: args.prefabName,
@@ -1969,8 +1994,27 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         await saveSettings(importSettings);
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
         const decisions = decisionMap(request.overrides, document.tree);
-        const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings));
+        const reviewDocument = document;
+        importReviews.invalidate();
+        const reviewRecorder = new ImportReviewRecorder();
+        const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings, reviewRecorder));
         const { assets, warnings } = builtAssets;
+        const attachReview = async (result: SceneImportResult) => {
+            if (result.reviewBefore && result.reviewAfter) {
+                try {
+                    result.reviewAfter = await Editor.Message.request('scene', 'execute-scene-script', {
+                        name: packageJSON.name, method: 'refreshReviewAfter', args: [{ id: reviewRecorder.id }],
+                    }) as ReviewScene;
+                    result.review = await importReviews.complete(reviewRecorder, reviewDocument,
+                        result.reviewBefore, result.reviewAfter, result.prefabUrl, warnings);
+                    if (operationOwner) Editor.Message.send(packageJSON.name, 'import-review-ready', result.review);
+                } catch (error) {
+                    warnings.push(`导入已完成，但结果检查生成失败：${(error as Error).message}`);
+                }
+            }
+            delete result.reviewBefore;
+            delete result.reviewAfter;
+        };
         // buildAssets may promote a container to a local same-name resource.
         // Compile after that promotion so assets and SceneNodeSpec share the
         // exact same final plan.
@@ -2033,6 +2077,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
                 message: '正在创建或打开目标 Prefab…',
             });
             const result = await importLinkedFramePrefab({
+                reviewId: reviewRecorder.id,
                 prefabUrl,
                 prefabName: frameName,
                 fileKey: document.fileKey,
@@ -2046,6 +2091,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
             // runtime node UUIDs are session-only and must never be reused here.
             delete nodeMaps[document.fileKey];
             await Editor.Profile.setProject(packageJSON.name, 'nodeMaps', nodeMaps, 'project');
+            await attachReview(result);
             const finalResult = warnings.length ? { ...result, warnings } : result;
             emitProgress({
                 phase: 'done',
@@ -2057,6 +2103,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
 
         const nodeMaps = await getNodeMaps();
         const payload: SceneImportPayload = {
+            reviewId: reviewRecorder.id,
             packageName: packageJSON.name,
             fileKey: document.fileKey,
             rootName: document.fileName,
@@ -2079,6 +2126,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         if (importSettings.autoSave) {
             await Editor.Message.request('scene', 'save-scene');
         }
+        await attachReview(result);
         const finalResult = warnings.length ? { ...result, warnings } : result;
         emitProgress({
             phase: 'done',
@@ -2195,6 +2243,31 @@ async function getNodePreview(nodeId: string): Promise<{ url: string }> {
 }
 
 export const methods: Record<string, (...args: any[]) => any> = {
+    getImportReview() { return importReviews.get(); },
+    async getImportReviewPreview(id: string, assetId: string) { return importReviews.preview(id, assetId); },
+    async applyImportReview(id: string, removedIds: unknown) {
+        if (activeController) throw new Error('请等待当前导入或 Figma 预览完成。');
+        const controller = beginOperation();
+        applyingImportReview = true;
+        try { return await importReviews.apply(id, removedIds); }
+        finally { applyingImportReview = false; finishOperation(controller); }
+    },
+    async getImportReviewSourcePreview(id: string, assetId: string, nodeId: string) {
+        if (activeController) throw new Error('请等待当前操作完成后再加载来源预览。');
+        const { fileKey, node } = importReviews.source(id, assetId, nodeId);
+        const controller = beginOperation();
+        try {
+            const api = await client();
+            const imageRef = plainImageSourceRef(node);
+            if (imageRef) {
+                const fills = await api.getImageFillUrls(fileKey);
+                if (fills[imageRef]) return { url: fills[imageRef], note: 'Figma 原图（未合成节点效果）' };
+            }
+            const urls = await api.getImageUrls(fileKey, [node.id], 'png', 1, !overflowingRenderFrame(node));
+            if (!urls[node.id]) throw new Error('Figma 未返回预览，隐藏或复杂效果节点可能无法单独渲染。');
+            return { url: urls[node.id], note: 'Figma 当前节点渲染（隐藏祖先可能使预览透明）' };
+        } finally { finishOperation(controller); }
+    },
     openPanel() {
         Editor.Panel.open(packageJSON.name);
     },
