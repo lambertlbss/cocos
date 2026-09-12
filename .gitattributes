@@ -1,0 +1,14 @@
+# Frozen exporter bytes must survive Windows core.autocrlf=true checkouts.
+# Keep this list aligned with tests/fixtures/roundtrip/protocol-manifest.json.
+tests/fixtures/roundtrip/frozen/src/shared/canonical-json.ts text eol=lf
+tests/fixtures/roundtrip/frozen/src/shared/roundtrip-protocol.ts text eol=lf
+tests/fixtures/roundtrip/frozen/src/shared/geometry-roundtrip.ts text eol=lf
+tests/fixtures/roundtrip/frozen/src/shared/roundtrip-safety.ts text eol=lf
+tests/fixtures/roundtrip/schema/roundtrip-v1.schema.json text eol=lf
+tests/fixtures/roundtrip/schema/diagnostic-codes.json text eol=lf
+tests/fixtures/roundtrip/schema/protocol-cases.json text eol=lf
+tests/fixtures/roundtrip/canonical/hash-vectors.json text eol=lf
+tests/fixtures/roundtrip/geometry/geometry-v1.md text eol=lf
+tests/fixtures/roundtrip/geometry/vectors.json text eol=lf
+tests/fixtures/roundtrip/creator-3.8.7/roundtrip-fixture.prefab text eol=lf
+tests/fixtures/roundtrip/creator-3.8.7/roundtrip-fixture.prefab.meta text eol=lf

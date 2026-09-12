@@ -816,6 +816,11 @@ function validSolidStroke(spec: SceneNodeSpec): FigmaPaint | undefined {
     return spec.strokeWeight > 0 ? visibleSolidPaint(spec.strokes) : undefined;
 }
 
+function roundedStrokeWidth(weight: number, scale: number, minimum: number): number {
+    // Match imported size precision; round after scaling and preserve existing minimums.
+    return Math.round((Math.max(minimum, weight * scale) + Number.EPSILON) * 100) / 100;
+}
+
 function hasGraphicsVisual(spec: SceneNodeSpec): boolean {
     return Boolean(visibleSolidFill(spec) || validSolidStroke(spec));
 }
@@ -844,7 +849,7 @@ function drawGraphics(graphics: any, spec: SceneNodeSpec, scale: number, cc: any
         graphics.fill();
     }
     if (stroke?.color) {
-        graphics.lineWidth = Math.max(0.5, spec.strokeWeight * scale);
+        graphics.lineWidth = roundedStrokeWidth(spec.strokeWeight, scale, 0.5);
         graphics.strokeColor = toColor(cc.Color, stroke.color, stroke.opacity ?? 1);
         graphics.stroke();
     }
@@ -923,7 +928,7 @@ function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any):
     if (stroke?.color && spec.strokeWeight > 0) {
         label.enableOutline = true;
         label.outlineColor = toColor(cc.Color, stroke.color, stroke.opacity ?? 1);
-        label.outlineWidth = Math.max(1, spec.strokeWeight * scale);
+        label.outlineWidth = roundedStrokeWidth(spec.strokeWeight, scale, 1);
     }
 }
 
@@ -2241,7 +2246,8 @@ export const methods = {
             reviewBefore,
             reviewAfter: payload.reviewId ? registerSceneReview(payload.reviewId, importRoot, cc, nodeMap,
                 prefabSync?.managedComponentFileIds ?? reviewManagedComponentIds(importRoot, nodeMap,
-                    [UITransform, ...generatedClasses])) : undefined,
+                    [UITransform, ...generatedClasses]), prefabContext
+                    ? { targetUuid: prefabContext.prefabUuid, mode: 'prefab' } : undefined) : undefined,
             rootUuid: importRoot.uuid,
             nodeMap,
             created,

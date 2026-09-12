@@ -7,6 +7,7 @@ import {
 } from '../import-review-model';
 import type { DocumentSession, FigmaNode, SpriteAssetSpec } from '../types';
 import { normalizeCocosUuid } from '../roundtrip/uuid';
+import { analyzeSliceGrid } from '../figma/slicing';
 
 const digest = (data: Buffer) => createHash('sha256').update(data).digest('hex');
 type Request = (method: string, ...args: any[]) => Promise<any>;
@@ -68,6 +69,33 @@ export class ImportReviewRecorder {
     }
 }
 
+/** Explain only actual sliced imports, not every unmapped/ignored descendant. */
+export function buildReviewSourceTree(
+    roots: FigmaNode[], recorder: Pick<ImportReviewRecorder, 'bindings'>, after: ReviewScene,
+): ImportReview['sourceTree'] {
+    const targets = new Map(after.nodes.flatMap((node) => node.figmaIds.map((id) => [id, node] as const)));
+    const result: ImportReview['sourceTree'] = [];
+    type Merge = NonNullable<ImportReview['sourceTree'][number]['sliceMerge']>;
+    const visit = (node: FigmaNode, depth: number, inherited?: Merge) => {
+        const target = targets.get(node.id);
+        const merge = target ? undefined : inherited;
+        result.push({ id: node.id, name: node.name, depth, type: node.type, visible: node.visible !== false,
+            ...(merge ? { sliceMerge: merge } : {}) });
+        const asset = recorder.bindings.get(node.id)?.asset;
+        const renderedAsSlice = target && asset?.sliced && !asset.tiled && !asset.sliceFallback
+            && target.components.some((component) => component.type.replace(/^cc\./, '') === 'Sprite'
+                && component.properties.type === 1 && typeof component.properties.spriteFrame === 'string'
+                && normalizeCocosUuid(component.properties.spriteFrame) === normalizeCocosUuid(asset.uuid));
+        const analysis = renderedAsSlice ? analyzeSliceGrid(node) : null;
+        const childMerge = analysis && target
+            ? { mode: analysis.mode, sourceId: node.id, targetName: target.name } : merge;
+        // Direct invisible pieces do not participate in the analyzed grid/export.
+        node.children.forEach((child) => visit(child, depth + 1, child.visible !== false ? childMerge : undefined));
+    };
+    roots.forEach((node) => visit(node, 0));
+    return result;
+}
+
 export class ImportReviewService {
     private review?: ImportReview;
     private recorder?: ImportReviewRecorder;
@@ -83,7 +111,7 @@ export class ImportReviewService {
     invalidate(): void { this.review = undefined; this.recorder = undefined; this.document = undefined; this.previewCache.clear(); }
 
     async complete(recorder: ImportReviewRecorder, document: DocumentSession,
-        before: ReviewScene, after: ReviewScene, targetUrl?: string, warnings: string[] = []): Promise<ImportReview> {
+        before: ReviewScene, after: ReviewScene, targetUrl?: string, warnings: string[] = [], readOnlyReason?: string): Promise<ImportReview> {
         const assets = new Map<string, ReviewAsset>();
         for (const binding of recorder.bindings.values()) {
             const { asset, node, source } = binding;
@@ -94,7 +122,8 @@ export class ImportReviewService {
                     state: record ? (record.existed ? 'updated' : 'new') : 'reused',
                     sources: [], figmaIds: [], nodeNames: [], canRemove: false, hasBefore: Boolean(record?.before) };
                 assets.set(asset.url, entry);
-                if (entry.state === 'new' && record) {
+                if (readOnlyReason) entry.reason = `本次结果仅供查看：${readOnlyReason}`;
+                if (!readOnlyReason && entry.state === 'new' && record) {
                     try {
                         record.path = await assetPath(asset.url);
                         const [data, meta, info] = await Promise.all([readFile(record.path), readFile(`${record.path}.meta`),
@@ -117,20 +146,24 @@ export class ImportReviewService {
         // Actual consumers, including overflow/tiled helpers and folded source aliases.
         for (const asset of assets.values()) {
             asset.nodeNames = after.nodes.filter((node) => node.components.some((component) =>
-                Object.values(component.properties).includes(asset.uuid))).map((node) => node.name);
+                Object.values(component.properties).some((value) => typeof value === 'string'
+                    && normalizeCocosUuid(value) === normalizeCocosUuid(asset.uuid)))).map((node) => node.name);
         }
+        // Fallback needs no live Scene, database, file reads or slicing analysis.
         const sourceTree: ImportReview['sourceTree'] = [];
-        const visit = (node: FigmaNode, depth: number) => {
-            sourceTree.push({ id: node.id, name: node.name, depth, type: node.type, visible: node.visible !== false });
-            node.children.forEach((child) => visit(child, depth + 1));
-        };
-        document.roots.forEach((node) => visit(node, 0));
+        if (readOnlyReason) {
+            const visit = (node: FigmaNode, depth: number) => {
+                sourceTree.push({ id: node.id, name: node.name, depth, type: node.type, visible: node.visible !== false });
+                node.children.forEach((child) => visit(child, depth + 1));
+            };
+            document.roots.forEach((node) => visit(node, 0));
+        } else sourceTree.push(...buildReviewSourceTree(document.roots, recorder, after));
         this.previewCache.clear();
         this.recorder = recorder;
         this.document = document;
         this.review = { id: recorder.id, createdAt: new Date().toISOString(), fileName: document.fileName,
             targetUrl, assets: [...assets.values()].sort((a, b) => Number(b.state === 'new') - Number(a.state === 'new')),
-            before, after, sourceTree, changes: diffReviewNodes(before.nodes, after.nodes), warnings, confirmed: false };
+            before, after, sourceTree, changes: diffReviewNodes(before.nodes, after.nodes), warnings, confirmed: false, readOnlyReason };
         return this.review;
     }
 

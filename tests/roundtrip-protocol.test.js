@@ -91,6 +91,17 @@ test('frozen round-trip files match the exporter manifest byte-for-byte', async 
     }
 });
 
+test('every manifest-pinned fixture has an explicit LF checkout rule', async () => {
+    const manifest = JSON.parse(await readFile(resolve('tests/fixtures/roundtrip/protocol-manifest.json'), 'utf8'));
+    const rules = new Set((await readFile(resolve('.gitattributes'), 'utf8'))
+        .split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#')));
+    for (const entry of manifest.files) {
+        const path = entry.path.startsWith('src/shared/')
+            ? `tests/fixtures/roundtrip/frozen/${entry.path}` : entry.path;
+        assert.ok(rules.has(`${path} text eol=lf`), `Missing frozen-byte checkout protection: ${path}`);
+    }
+});
+
 test('canonical JSON, SHA-256 and quantization match frozen vectors', async () => {
     assert.equal(
         canonical.canonicalStringify({ z: -0, a: '中文', nested: { y: 2, x: 1 } }),

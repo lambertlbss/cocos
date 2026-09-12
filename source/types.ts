@@ -255,7 +255,7 @@ export interface SpriteAssetSpec {
     /** Requested slicing could not be verified; import continues as SIMPLE. */
     sliceFallback?: string;
     tiled?: boolean;
-    /** Native tile size multiplier after the SpriteFrame's untrimmed pixel size. */
+    /** Legacy payload multiplier. New imports bake tile size into PNG pixels and set this to 1. */
     tileScale?: number;
     /**
      * Figma page-space pixels rendered outside the node's geometric frame.

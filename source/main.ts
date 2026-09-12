@@ -41,6 +41,7 @@ import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
 import { writeSlicedPng } from './importer/sliced-png';
+import { pixelSizedTileAsset, rasterizeTile, tiledRasterKey } from './importer/tiled-png';
 import {
     collectSceneSpecFigmaIds,
     createMinimalPrefabJson,
@@ -82,6 +83,7 @@ import {
 } from './types';
 import { sanitizeNodeName } from './node-name';
 import { ImportReviewRecorder, ImportReviewService } from './importer/import-review';
+import { finalizeImportReview } from './importer/import-review-finalize';
 import type { ImportReview, ReviewScene } from './import-review-model';
 
 const vault = new TokenVault(packageJSON.name);
@@ -827,6 +829,7 @@ async function buildAssets(
             nodes: FigmaNode[];
             source: TiledPaintSource;
             sourceKey: string;
+            assetKey: string;
         }
         interface PendingTile extends TileGroup {
             contents: Buffer | null;
@@ -837,11 +840,6 @@ async function buildAssets(
         const renderScale = (source: TiledPaintSource) => source.kind === 'source-node'
             ? clampImageScale(requestedScale(source))
             : 1;
-        const tileAsset = (asset: SpriteAssetSpec, source: TiledPaintSource): SpriteAssetSpec => ({
-            ...asset,
-            tiled: true,
-            tileScale: requestedScale(source) / renderScale(source),
-        });
         const groups = new Map<string, TileGroup>();
         for (const { node, source } of items) {
             const sourceKey = JSON.stringify({
@@ -851,10 +849,11 @@ async function buildAssets(
                 paintScale: source.scale,
                 renderScale: renderScale(source),
             });
-            const key = writer.buildTiledUrl(node.name, sourceKey, 'png')
+            const assetKey = tiledRasterKey(sourceKey, requestedScale(source));
+            const key = writer.buildTiledUrl(node.name, assetKey, 'png')
                 .normalize('NFKC')
                 .toLocaleLowerCase('en-US');
-            const group = groups.get(key) ?? { node, nodes: [], source, sourceKey };
+            const group = groups.get(key) ?? { node, nodes: [], source, sourceKey, assetKey };
             group.nodes.push(node);
             groups.set(key, group);
         }
@@ -874,18 +873,10 @@ async function buildAssets(
             }
             let existingAsset: SpriteAssetSpec | null = null;
             if (!importSettings.refreshAssets) {
-                for (const extension of RASTER_IMAGE_EXTENSIONS) {
-                    existingAsset = await writer.existing(
-                        writer.buildTiledUrl(group.node.name, group.sourceKey, extension),
-                        true,
-                    );
-                    if (existingAsset) {
-                        break;
-                    }
-                }
+                existingAsset = await writer.existing(writer.buildTiledUrl(group.node.name, group.assetKey, 'png'), true);
             }
             if (existingAsset) {
-                completeGroup(group.nodes, tileAsset(existingAsset, group.source), 'existing');
+                completeGroup(group.nodes, pixelSizedTileAsset(existingAsset), 'existing');
                 continue;
             }
             let contents: Buffer | null = null;
@@ -984,15 +975,22 @@ async function buildAssets(
             if (!extension) {
                 extension = detectImageExtension(contents);
             }
-            const url = writer.buildTiledUrl(item.node.name, item.sourceKey, extension);
+            const trace = diagnosticStart('平铺资源按实际尺寸生成', { node: item.node.name });
+            let raster: ReturnType<typeof rasterizeTile>;
+            try { raster = rasterizeTile(contents, requestedScale(item.source), renderScale(item.source)); }
+            catch (error) {
+                trace.fail(error);
+                throw new Error(`平铺资源“${item.node.name}”无法按实际尺寸生成：${(error as Error).message}`);
+            }
+            if (raster.rounded) warnings.add(`平铺资源“${item.node.name}”的显示尺寸已取整为 ${raster.width}×${raster.height} 像素（最小 1），节点 Scale 保持 1。`);
+            const url = writer.buildTiledUrl(item.node.name, item.assetKey, 'png');
             completeGroup(
                 item.nodes,
-                tileAsset(
-                    await writer.write(url, contents, undefined, true),
-                    item.source,
-                ),
+                pixelSizedTileAsset(await writer.write(url, raster.contents, undefined, true)),
                 item.sourceType,
             );
+            trace.done({ sourceWidth: raster.sourceWidth, sourceHeight: raster.sourceHeight,
+                width: raster.width, height: raster.height, tileScale: 1 });
         }
     };
 
@@ -2000,17 +1998,17 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings, reviewRecorder));
         const { assets, warnings } = builtAssets;
         const attachReview = async (result: SceneImportResult) => {
-            if (result.reviewBefore && result.reviewAfter) {
-                try {
-                    result.reviewAfter = await Editor.Message.request('scene', 'execute-scene-script', {
-                        name: packageJSON.name, method: 'refreshReviewAfter', args: [{ id: reviewRecorder.id }],
-                    }) as ReviewScene;
-                    result.review = await importReviews.complete(reviewRecorder, reviewDocument,
-                        result.reviewBefore, result.reviewAfter, result.prefabUrl, warnings);
-                    if (operationOwner) Editor.Message.send(packageJSON.name, 'import-review-ready', result.review);
-                } catch (error) {
-                    warnings.push(`导入已完成，但结果检查生成失败：${(error as Error).message}`);
-                }
+            result.review = await finalizeImportReview(importReviews, reviewRecorder, reviewDocument,
+                result.reviewBefore, result.reviewAfter, result.prefabUrl, warnings,
+                async () => await Editor.Message.request('scene', 'execute-scene-script', {
+                    name: packageJSON.name, method: 'refreshReviewAfter', args: [{ id: reviewRecorder.id }],
+                }) as ReviewScene);
+            // Also cover manual imports whose panel was closed while importing.
+            try {
+                await Editor.Panel.open(packageJSON.name);
+                Editor.Message.send(packageJSON.name, 'import-review-ready', result.review);
+            } catch (error) {
+                warnings.push(`结果已保存，但自动打开面板失败，请从插件中打开“导入结果检查”：${(error as Error).message}`);
             }
             delete result.reviewBefore;
             delete result.reviewAfter;
@@ -2096,7 +2094,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
             emitProgress({
                 phase: 'done',
                 value: 1,
-                message: `完成：新建 ${result.created}，更新 ${result.updated}，已打开预制体 ${prefabUrl}${warnings.length ? `；${warnings.length} 个三/九宫已降级为 PNG 整层` : ''}`,
+                message: `完成：新建 ${result.created}，更新 ${result.updated}，已打开预制体 ${prefabUrl}${warnings.length ? `；${warnings.length} 条导入/收尾提示` : ''}`,
             });
             return finalResult;
         }
@@ -2131,7 +2129,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         emitProgress({
             phase: 'done',
             value: 1,
-            message: `完成：新建 ${result.created}，更新 ${result.updated}${warnings.length ? `；${warnings.length} 个三/九宫已降级为 PNG 整层` : ''}`,
+            message: `完成：新建 ${result.created}，更新 ${result.updated}${warnings.length ? `；${warnings.length} 条导入/收尾提示` : ''}`,
         });
         trace.done();
         return finalResult;

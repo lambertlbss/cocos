@@ -1,4 +1,5 @@
-import { reviewFingerprint, type ReviewComponent, type ReviewNode, type ReviewScene } from './import-review-model';
+import { compareSavedReviewScene, reviewFingerprint, type ReviewComponent, type ReviewNode, type ReviewScene } from './import-review-model';
+import { normalizeCocosUuid } from './roundtrip/uuid';
 
 function walk(root: any, visit: (node: any, depth: number) => void, depth = 0): void {
     if (!root) return;
@@ -12,6 +13,14 @@ function componentId(component: any, index: number): string {
     return component.__prefab?.fileId || component.uuid || `${index}:${component.constructor?.name}`;
 }
 function assetId(asset: any): string | null { return asset?._uuid || asset?.uuid || null; }
+function instanceOf(component: any, Class: any): boolean {
+    return typeof Class === 'function' && component instanceof Class;
+}
+function recordColor(properties: ReviewComponent['properties'], component: any, key: string): void {
+    // Getters may have side effects. Read each supported color exactly once.
+    const color = component[key];
+    if (color) properties[key] = ['r', 'g', 'b', 'a'].map((channel) => color[channel]).join(',');
+}
 export function reviewManagedComponentIds(root: any, nodeMap: Record<string, string>, classes: any[]): string[] {
     const mapped = new Set(Object.values(nodeMap));
     const ids: string[] = [];
@@ -46,6 +55,18 @@ export function captureReviewScene(
             const type = cc.js?.getClassName?.(component) || component.constructor?.name || 'Component';
             const id = componentId(component, index);
             const properties: ReviewComponent['properties'] = { enabled: component.enabled !== false };
+            if (instanceOf(component, cc.Mask)) {
+                // Creator >=3.6 separates Mask rules from its Sprite/Graphics.
+                // Legacy Mask.color warns even on reads; do not probe legacy
+                // renderer properties (including Mask.spriteFrame) at all.
+                properties.type = number(component.type);
+                properties.inverted = Boolean(component.inverted);
+                properties.alphaThreshold = number(component.alphaThreshold);
+                properties.segments = number(component.segments);
+                const renderer = component.subComp;
+                if (instanceOf(renderer, cc.Sprite)) properties.spriteFrame = assetId(renderer.spriteFrame);
+                return { id, type, managed: managed.has(id), properties };
+            }
             for (const key of ['string', 'fontSize', 'lineHeight', 'overflow', 'type', 'sizeMode', 'opacity',
                 'horizontal', 'vertical', 'inverted', 'spacingX', 'spacingY', 'paddingLeft', 'paddingRight',
                 'paddingTop', 'paddingBottom', 'resizeMode', 'transition', 'enableOutline', 'outlineWidth']) {
@@ -56,7 +77,13 @@ export function captureReviewScene(
             for (const key of ['spriteFrame', 'font', 'normalSprite', 'pressedSprite', 'hoverSprite', 'disabledSprite']) {
                 if (key in component) properties[key] = assetId(component[key]);
             }
-            if (component.color) properties.color = ['r', 'g', 'b', 'a'].map((key) => component.color[key]).join(',');
+            if ([cc.Sprite, cc.Label, cc.RichText, cc.Graphics].some((Class) => instanceOf(component, Class))) {
+                recordColor(properties, component, 'color');
+            }
+            if (instanceOf(component, cc.Graphics)) {
+                recordColor(properties, component, 'fillColor');
+                recordColor(properties, component, 'strokeColor');
+            }
             return { id, type, managed: managed.has(id), properties };
         });
         nodes.push({
@@ -84,8 +111,12 @@ interface SceneReviewSession {
 }
 const sessions = new Map<string, SceneReviewSession>();
 
-export function registerSceneReview(id: string, root: any, cc: any, nodeMap: Record<string, string>, managedIds: string[]): ReviewScene {
+export function registerSceneReview(id: string, root: any, cc: any, nodeMap: Record<string, string>, managedIds: string[],
+    expectedTarget?: { targetUuid: string; mode: string }): ReviewScene {
     const after = captureReviewScene(root, cc, nodeMap, managedIds);
+    // Prefab import already verified this identity before writing. Facade queries
+    // can still expose the previous target while Creator finishes opening it.
+    if (expectedTarget) Object.assign(after, expectedTarget);
     sessions.clear();
     sessions.set(id, { root, scene: cc.director.getScene(), cc, nodeMap, managedIds, after });
     return after;
@@ -106,7 +137,7 @@ function sessionFor(id: string): SceneReviewSession {
 function containsAsset(value: any, ids: Set<string>, cc: any, seen = new Set<any>()): boolean {
     if (!value || typeof value !== 'object' || seen.has(value)) return false;
     const uuid = assetId(value);
-    if (uuid && ids.has(uuid)) return true;
+    if (uuid && ids.has(normalizeCocosUuid(uuid))) return true;
     if (value instanceof cc.Node || (cc.Component && value instanceof cc.Component)
         || (cc.Asset && value instanceof cc.Asset)) return false;
     seen.add(value);
@@ -124,7 +155,7 @@ function clearFrame(component: any, value: any, cc: any): void {
 export function prepareReviewRemoval(payload: { id: string; uuids: string[]; detach?: boolean }): ReviewScene {
     const session = sessionFor(payload.id);
     if (session.detached) throw new Error('资源清理正在执行。');
-    const ids = new Set(payload.uuids);
+    const ids = new Set(payload.uuids.map(normalizeCocosUuid));
     const snapshotNodes = new Map(session.after.nodes.map((node) => [node.uuid, node]));
     const allowed = new Set<any>();
     const slots: Array<{ component: any; asset: any }> = [];
@@ -133,7 +164,7 @@ export function prepareReviewRemoval(payload: { id: string; uuids: string[]; det
             const snapshot = snapshotNodes.get(node.uuid);
             const recorded = snapshot?.components.find((item) => item.id === componentId(component, index));
             if (component instanceof session.cc.Sprite && recorded?.managed
-                && ids.has(assetId(component.spriteFrame) ?? '')) {
+                && ids.has(normalizeCocosUuid(assetId(component.spriteFrame) ?? ''))) {
                 allowed.add(component);
                 slots.push({ component, asset: component.spriteFrame });
             }
@@ -188,9 +219,47 @@ export function finishReviewRemoval(payload: { id: string; restore?: boolean }):
 /** Called only by the main import flow after Creator's save/serialization has completed. */
 export function refreshReviewAfter(payload: { id: string }): ReviewScene {
     const session = sessions.get(payload.id);
-    if (!session || session.cc.director.getScene() !== session.scene) throw new Error('导入编辑目标已切换。');
-    const after = captureReviewScene(session.root, session.cc, session.nodeMap, session.managedIds);
-    if (after.targetUuid !== session.after.targetUuid || after.mode !== session.after.mode) throw new Error('导入编辑目标已切换。');
+    if (!session) throw new Error('导入检查会话已失效。');
+    const facade = (globalThis as any).cce?.SceneFacadeManager;
+    const targetUuid = String(facade?.queryCurrentSceneUuid?.() ?? '');
+    const mode = String(facade?.queryMode?.() ?? 'scene');
+    if (normalizeCocosUuid(targetUuid) !== normalizeCocosUuid(session.after.targetUuid) || mode !== session.after.mode) {
+        throw new Error(`导入编辑目标尚未稳定或已切换（预期 ${session.after.mode}:${session.after.targetUuid || '未保存'}，当前 ${mode}:${targetUuid || '未保存'}）。`);
+    }
+    const scene = session.cc.director.getScene();
+    let root = session.root;
+    let nodeMap = session.nodeMap;
+    if (scene !== session.scene || (session.cc.isValid && !session.cc.isValid(root, true))) {
+        const candidate = (globalThis as any).cce?.Scene?.rootNode;
+        const fileId = root?._prefab?.fileId;
+        if (mode !== 'prefab' || !targetUuid || !fileId || candidate?._prefab?.fileId !== fileId) {
+            throw new Error('保存后无法核实原导入根节点。');
+        }
+        const nodes = new Map<string, any>();
+        walk(candidate, (node) => {
+            const id = nodeId(node);
+            if (nodes.has(id)) throw new Error('保存后节点标识重复，无法安全恢复检查。');
+            nodes.set(id, node);
+        });
+        nodeMap = {};
+        for (const previous of session.after.nodes) {
+            const current = nodes.get(previous.id);
+            if (!current) throw new Error('保存后节点结构已改变。');
+            for (const id of previous.figmaIds) nodeMap[id] = current.uuid;
+        }
+        root = candidate;
+    }
+    const after = captureReviewScene(root, session.cc, nodeMap, session.managedIds);
+    const comparison = compareSavedReviewScene(session.after, after);
+    if (comparison.issues.length) {
+        throw new Error(`保存后节点或组件内容已变化，当前结果不能用于资源清理。具体差异：${comparison.issues.join('；')}`);
+    }
+    // Geometry changes do not change ownership or resource consumers. Adopt actual saved values;
+    // do not write them back to the scene. Subsequent cleanup still uses the strict fingerprint.
+    if (comparison.adjustments.count) after.saveAdjustments = comparison.adjustments;
+    session.scene = scene;
+    session.root = root;
+    session.nodeMap = nodeMap;
     session.after = after;
     return after;
 }

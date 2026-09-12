@@ -52,6 +52,8 @@ export class ImportReviewPanel {
     }
 
     open(report: ImportReview): void {
+        // Response, ready replay and notification can carry the same report.
+        if (this.dialog.open && this.report?.id === report.id) return;
         this.report = report;
         this.removed.clear();
         this.selected = report.assets[0]?.id ?? '';
@@ -74,7 +76,7 @@ export class ImportReviewPanel {
     private renderFooter(): void {
         const report = this.report!;
         this.footer.replaceChildren();
-        const note = el('div', report.confirmed ? '修改已确认。' : this.removed.size
+        const note = el('div', report.readOnlyReason ? '本次结果仅供查看，资源清理已禁用。' : report.confirmed ? '修改已确认。' : this.removed.size
             ? `待删除 ${this.removed.size} 项：确定后解除引用、保存当前目标并删除文件，节点保留。`
             : '所有新资源默认保留。取消勾选只标记待删除，关闭窗口放弃本次勾选。');
         if (report.backupFolder) note.append(el('small', `恢复备份：${report.backupFolder}`));
@@ -82,7 +84,7 @@ export class ImportReviewPanel {
         const close = button(report.confirmed ? '关闭' : '暂不修改', () => this.close());
         close.disabled = this.busy;
         const apply = button(this.busy ? '正在确认…' : '确定修改', () => { void this.apply(); }, 'button primary');
-        apply.disabled = this.busy || report.confirmed;
+        apply.disabled = this.busy || report.confirmed || Boolean(report.readOnlyReason);
         actions.append(close, apply);
         this.footer.append(note, actions);
     }
@@ -103,6 +105,11 @@ export class ImportReviewPanel {
             this.tabs.append(tab);
         }
         this.content.replaceChildren();
+        if (report.readOnlyReason) {
+            const notice = el('p', `只读结果：${report.readOnlyReason}`, 'review-readonly');
+            notice.setAttribute('role', 'status');
+            this.content.append(notice);
+        }
         if (report.warnings.length) {
             const details = el('details', '', 'review-warnings');
             details.append(el('summary', `${report.warnings.length} 条导入/收尾提示`));
@@ -153,7 +160,7 @@ export class ImportReviewPanel {
             }, 180);
         };
         const retain = button('全部保留', () => { this.removed.clear(); this.render(); });
-        retain.disabled = this.busy || this.report!.confirmed;
+        retain.disabled = this.busy || this.report!.confirmed || Boolean(this.report!.readOnlyReason);
         controls.append(search, filter, retain);
         this.content.append(controls);
         const matches = this.report!.assets.filter((asset) =>
@@ -162,12 +169,13 @@ export class ImportReviewPanel {
         const pager = this.pager(matches.length, 50, () => this.render());
         const layout = el('div', '', 'review-resource-layout');
         const list = el('div', '', 'review-resource-list');
+        const detail = el('div', '', 'review-resource-detail');
         for (const asset of matches.slice(this.page * 50, this.page * 50 + 50)) {
             const row = el('div', '', `review-resource-row ${asset.state}${this.removed.has(asset.id) ? ' pending' : ''}`);
             row.classList.toggle('selected', asset.id === this.selected);
             const checkbox = el('input'); checkbox.type = 'checkbox';
             checkbox.checked = asset.state !== 'deleted' && !this.removed.has(asset.id);
-            checkbox.disabled = !asset.canRemove || this.busy || this.report!.confirmed;
+            checkbox.disabled = !asset.canRemove || this.busy || this.report!.confirmed || Boolean(this.report!.readOnlyReason);
             checkbox.setAttribute('aria-label', `保留 ${asset.name}`);
             checkbox.title = asset.reason || (asset.canRemove ? '取消勾选：确定修改后删除本次新建资源' : '已有资源仅供查看');
             checkbox.onchange = () => {
@@ -175,14 +183,27 @@ export class ImportReviewPanel {
                 row.classList.toggle('pending', !checkbox.checked);
                 this.renderFooter();
             };
-            const select = button('', () => { this.selected = asset.id; this.render(); }, 'review-resource-select');
+            const select = button('', () => {
+                if (this.selected === asset.id) return;
+                this.selected = asset.id;
+                // Keep the live list, its scroll offset, checkbox state and
+                // keyboard focus. Only the selection and right detail change.
+                for (const item of Array.from(list.children)) {
+                    const selected = item === row;
+                    item.classList.toggle('selected', selected);
+                    item.querySelector('.review-resource-select')?.setAttribute('aria-pressed', String(selected));
+                }
+                this.previewRevision++;
+                detail.replaceChildren();
+                this.renderAssetDetail(asset, detail);
+            }, 'review-resource-select');
+            select.setAttribute('aria-pressed', String(asset.id === this.selected));
             select.append(el('strong', asset.name), el('span', `${assetLabels[asset.state]} · ${asset.nodeNames.length} 个节点引用`));
             select.title = asset.url;
             row.append(checkbox, select);
             list.append(row);
         }
         if (!matches.length) list.append(el('p', '没有符合条件的资源。', 'review-empty'));
-        const detail = el('div', '', 'review-resource-detail');
         layout.append(list, detail);
         this.content.append(layout, pager);
         const asset = this.report!.assets.find((item) => item.id === this.selected);
@@ -240,6 +261,9 @@ export class ImportReviewPanel {
             host.append(el('p', ancestor.join(' / '), 'review-path'));
         }
         if (asset.state !== 'deleted') host.append(button('在资源面板中定位', () => {
+            // Selection.select adds to the existing selection in Creator.
+            // Locate replaces only the asset selection, never scene nodes.
+            Editor.Selection.clear('asset');
             Editor.Selection.select('asset', asset.uuid);
         }));
     }
@@ -326,15 +350,19 @@ export class ImportReviewPanel {
             const left = el('div', `${source.name}${source.visible ? '' : '（隐藏）'}`, 'review-tree-cell');
             left.style.paddingLeft = `${8 + Math.min(source.depth, 12) * 12}px`;
             left.append(el('small', `${source.type} · ${source.id}`));
-            const right = el('div', target ? `${mapped ? '映射/合并 → ' : ''}${target.name}` : '未独立导入（忽略或整层 PNG 收口）', 'review-tree-cell');
+            const merge = source.sliceMerge;
+            const right = el('div', target ? `${mapped ? '映射/合并 → ' : ''}${target.name}`
+                : merge ? `${merge.mode === 'nine' ? '九宫' : '三宫'}合并 → ${merge.targetName}`
+                    : '未独立导入（忽略或整层 PNG 收口）', 'review-tree-cell');
             if (target) right.append(el('small', target.components.map((component) => component.type).join(' · ')));
+            else if (merge) right.append(el('small', '作为父资源的切片组成部分导入，不单独生成 Cocos 节点。'));
             row.append(left, right); table.append(row);
         }
         this.content.append(table, pager);
     }
 
     private async apply(): Promise<void> {
-        if (this.busy || this.report!.confirmed) return;
+        if (this.busy || this.report!.confirmed || this.report!.readOnlyReason) return;
         this.busy = true; this.setBusy(true); this.errors.textContent = ''; this.render();
         try {
             this.report = await this.request<ImportReview>('apply-import-review', this.report!.id, [...this.removed]);

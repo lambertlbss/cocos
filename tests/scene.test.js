@@ -1134,6 +1134,24 @@ for (const kind of ['label', 'richText']) {
     }
 }
 
+for (const kind of ['label', 'node']) {
+    test(`${kind} rounds stroke width after scaling to two decimals and preserves minimums`, async () => {
+        for (const [weight, scale, expected] of [[2.344, 1, 2.34], [2.345, 1, 2.35],
+            [1.234, 2, 2.47], [0.1, 1, kind === 'label' ? 1 : 0.5], [2, 1, 2]]) {
+            const spec = makeSpec({ name: 'StrokePrecision', kind,
+                figmaType: kind === 'label' ? 'TEXT' : 'RECTANGLE', characters: '描边',
+                strokes: [{ type: 'SOLID', visible: true, color: { r: 1, g: 0, b: 0, a: 1 } }],
+                strokeWeight: weight });
+            const environment = await importWithFakeCocos(spec, scale);
+            const imported = environment.canvas.children[0];
+            const component = imported.getComponent(kind === 'label' ? Label : Graphics);
+            assert.ok(component);
+            assert.equal(kind === 'label' ? component.outlineWidth : component.lineWidth, expected);
+            assert.equal(spec.strokeWeight, weight, 'do not round Figma source data');
+        }
+    });
+}
+
 test('keeps the initial Figma box without outline compensation', async () => {
     const root = makeSpec({
         name: 'TextRoot',
@@ -1860,6 +1878,50 @@ test('uses Cocos tiled rendering for a Figma TILE image fill', async () => {
     assert.deepEqual(transform.contentSize, { width: 180, height: 72 });
 });
 
+test('pixel-sized rectangular tile keeps original 598x434 frame and Scale 1 without a scaling helper', async () => {
+    const { pixelSizedTileAsset } = require('../dist/importer/tiled-png');
+    const environment = await importWithFakeCocos(makeSpec({
+        name: 'img_jade_panelbg2', action: 'render', kind: 'sprite', figmaType: 'RECTANGLE',
+        frame: { x: 0, y: 0, width: 598, height: 434 },
+        sprite: pixelSizedTileAsset({ uuid: 'sprite-frame', url: 'db://assets/tile-13x14.png', sliced: false }),
+    }));
+    const imported = environment.canvas.children[0];
+    assert.equal(imported.getComponent(Sprite).type, Sprite.Type.TILED);
+    assert.equal(imported.getComponent(Sprite).sizeMode, Sprite.SizeMode.CUSTOM);
+    assert.deepEqual(imported.getComponent(UITransform).contentSize, { width: 598, height: 434 });
+    assert.deepEqual(imported.scale, { x: 1, y: 1, z: 1 });
+    assert.equal(imported.getChildByName('__FigmaTiledSprite'), null);
+});
+
+test('reimporting a legacy scaled tile migrates to unit scale without dropping manual children', async () => {
+    const { pixelSizedTileAsset } = require('../dist/importer/tiled-png');
+    const spec = makeSpec({ name: 'TileMigration', figmaType: 'RECTANGLE', action: 'render', kind: 'sprite',
+        frame: { x: 0, y: 0, width: 598, height: 434 },
+        sprite: { uuid: 'sprite-frame', url: 'db://assets/legacy-tile.png', sliced: false, tiled: true, tileScale: 0.5 } });
+    const environment = await importWithFakeCocos(spec);
+    const imported = environment.canvas.children[0];
+    const helper = imported.getChildByName('__FigmaTiledSprite');
+    assert.ok(helper);
+    const manual = new FakeNode('ManualBadge'); helper.addChild(manual);
+    const position = { ...imported.position };
+    const originalLoad = Module._load;
+    Module._load = function(request, parent, isMain) {
+        return request === 'cc' ? environment.cc : originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        await methods.importDocument({ packageName: 'figma-importer-cocos', fileKey: 'file-key', rootName: 'Test',
+            rootFrame: { x: 0, y: 0, width: 100, height: 80 }, scale: 1, updateExisting: true,
+            existingMap: environment.result.nodeMap, centerInCanvas: true,
+            roots: [{ ...spec, sprite: pixelSizedTileAsset({ ...spec.sprite, url: 'db://assets/pixel-tile.png' }) }] });
+        assert.equal(imported.getChildByName('__FigmaTiledSprite'), null);
+        assert.equal(manual.parent, imported);
+        assert.deepEqual(imported.position, position);
+        assert.deepEqual(imported.scale, { x: 1, y: 1, z: 1 });
+        assert.deepEqual(imported.getComponent(UITransform).contentSize, { width: 598, height: 434 });
+        assert.equal(imported.getComponent(Sprite).type, Sprite.Type.TILED);
+    } finally { Module._load = originalLoad; }
+});
+
 test('clips an elliptical native tile with a Mask and a TILED Sprite helper', async () => {
     const environment = await importWithFakeCocos(makeSpec({
         action: 'render',
@@ -1887,6 +1949,7 @@ test('clips an elliptical native tile with a Mask and a TILED Sprite helper', as
     assert.ok(tiledNode);
     assert.equal(tiledNode.getComponent(Sprite).type, Sprite.Type.TILED);
     assert.deepEqual(tiledNode.getComponent(UITransform).contentSize, { width: 163, height: 154 });
+    assert.deepEqual(tiledNode.scale, { x: 1, y: 1, z: 1 });
 });
 
 test('scales an IMAGE tile with an isolated helper without masking manual children', async () => {

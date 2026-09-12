@@ -843,7 +843,7 @@ async function importToScene(): Promise<void> {
             { overrides, settings },
         );
         const fallbackNote = result?.warnings?.length
-            ? `；${result.warnings.length} 个三/九宫已临时作为 PNG 整层导入`
+            ? `；${result.warnings.length} 条导入/收尾提示（详见结果检查）`
             : '';
         showToast(result?.prefabUrl
             ? `导入完成，已创建预制体：${result.prefabUrl}${fallbackNote}`
@@ -1280,6 +1280,10 @@ module.exports = Editor.Panel.define({
                 element('#import-button-label').textContent = '请重启 Cocos';
                 element('#import-button-percent').textContent = '↻';
                 showToast('检测到旧版主进程仍在运行：请保存项目并完整重启 Cocos Creator。', true);
+            } else {
+                // Replay persisted in-memory report if completion preceded panel readiness.
+                const review = await request<ImportReview | null>('get-import-review');
+                if (review && !review.confirmed) importReviewPanel?.open(review);
             }
         } catch (error) {
             showToast(error instanceof Error ? error.message : '初始化失败。', true);
