@@ -742,7 +742,7 @@ function collectAssetRequests(
     return { png, tiled, rawImages, gradients };
 }
 
-async function buildAssets(
+export async function buildAssets(
     session: DocumentSession,
     decisions: Map<string, Decision>,
     importSettings: ImportSettings,
@@ -1038,16 +1038,12 @@ async function buildAssets(
             }
             const node = groupedNodes[0];
             const decision = decisions.get(node.id) ?? defaultDecision(node);
-            const sliceAnalysis = decision.nineSlice && format === 'png'
-                ? analyzeSliceGrid(node)
-                : null;
-            if (decision.nineSlice && !sliceAnalysis) {
-                warnings.add(`三/九宫节点“${node.name}”无法计算连续切片边界，已临时作为 PNG 整层导入`);
-            }
-            const borders = sliceAnalysis?.borders;
-            // Sliced assets retain their exact geometric canvas because their
-            // border metadata is expressed in that coordinate space.
-            const renderFrame = borders ? undefined : overflowingRenderFrame(node);
+            const reuseAsset = (asset: SpriteAssetSpec, source: 'local' | 'existing') => {
+                if (decision.nineSlice && !asset.sliced) {
+                    warnings.add(`三/九宫节点“${node.name}”已直接引用同名资源，但该 SpriteFrame 未配置九宫边距，暂按普通 Sprite 显示；请在原资源中设置边距：${asset.url}`);
+                }
+                completeGroup(groupedNodes, asset, source);
+            };
             let localMatch = null;
             for (const library of localResources) {
                 localMatch = await library.find(node.name, format);
@@ -1055,19 +1051,34 @@ async function buildAssets(
                     break;
                 }
             }
-            const localUrl = localMatch && !borders
+            // Project-local SpriteFrames own their pixels and slice borders.
+            // Reuse their UUID before any slice analysis, compaction or refresh.
+            const localUrl = localMatch
                 ? assetDatabaseUrl(localMatch.path)
                 : null;
             const localAsset = localUrl ? await writer.existing(localUrl) : null;
             if (localAsset) {
-                completeGroup(groupedNodes, localAsset, 'local');
+                reuseAsset(localAsset, 'local');
                 continue;
+            }
+            if (localUrl) {
+                throw new Error(`同名本地资源尚无可用 SpriteFrame，请先在 Cocos 中完成资源导入并设置为 SpriteFrame 后重试，不会另建副本：${localUrl}`);
             }
             const existing = !importSettings.refreshAssets ? await writer.existing(url) : null;
-            if (!localMatch && existing && !borders && !renderFrame) {
-                completeGroup(groupedNodes, existing, 'existing');
+            if (!localMatch && existing && (decision.nineSlice || !overflowingRenderFrame(node))) {
+                reuseAsset(existing, 'existing');
                 continue;
             }
+            const sliceAnalysis = decision.nineSlice && format === 'png'
+                ? analyzeSliceGrid(node)
+                : null;
+            if (decision.nineSlice && !sliceAnalysis) {
+                warnings.add(`三/九宫节点“${node.name}”无法计算连续切片边界，已临时作为 PNG 整层导入`);
+            }
+            const borders = sliceAnalysis?.borders;
+            // New sliced assets retain their exact geometric canvas because
+            // their generated borders use that coordinate space.
+            const renderFrame = borders ? undefined : overflowingRenderFrame(node);
             const key: CacheEntryKey = {
                 fileKey: session.fileKey,
                 nodeId: node.id,
