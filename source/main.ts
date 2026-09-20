@@ -873,7 +873,7 @@ export async function buildAssets(
             }
             let existingAsset: SpriteAssetSpec | null = null;
             if (!importSettings.refreshAssets) {
-                existingAsset = await writer.existing(writer.buildTiledUrl(group.node.name, group.assetKey, 'png'), true);
+                existingAsset = await writer.existingRaster(writer.buildTiledUrl(group.node.name, group.assetKey, 'png'), true);
             }
             if (existingAsset) {
                 completeGroup(group.nodes, pixelSizedTileAsset(existingAsset), 'existing');
@@ -1064,7 +1064,7 @@ export async function buildAssets(
             if (localUrl) {
                 throw new Error(`同名本地资源尚无可用 SpriteFrame，请先在 Cocos 中完成资源导入并设置为 SpriteFrame 后重试，不会另建副本：${localUrl}`);
             }
-            const existing = !importSettings.refreshAssets ? await writer.existing(url) : null;
+            const existing = !importSettings.refreshAssets ? await writer.existingRaster(url, false, node.name) : null;
             if (!localMatch && existing && (decision.nineSlice || !overflowingRenderFrame(node))) {
                 reuseAsset(existing, 'existing');
                 continue;
@@ -1092,7 +1092,8 @@ export async function buildAssets(
             pending.push({
                 node,
                 nodes: groupedNodes,
-                url,
+                url: localMatch && detectImageExtension(localMatch.contents) === 'jpg'
+                    ? url.replace(/\.png$/i, '.jpg') : url,
                 borders,
                 sliceAnalysis: sliceAnalysis ?? undefined,
                 renderFrame: localMatch ? undefined : renderFrame,
@@ -1256,7 +1257,7 @@ export async function buildAssets(
             const firstAsset = gradientAssets.get(gradientKey);
             const existing = firstAsset || importSettings.refreshAssets
                 ? null
-                : await writer.existing(url);
+                : await writer.existingRaster(url);
             const asset = firstAsset ?? existing ?? await writer.write(url, png);
             gradientAssets.set(gradientKey, asset);
             completeAsset(node, asset, firstAsset || existing ? 'existing' : 'generated');

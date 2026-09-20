@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { diagnosticTask } from '../diagnostics';
 import type { SpriteAssetSpec } from '../types';
+import { isPng, prepareNewRaster } from './raster-format';
 
 export type RasterImageExtension = 'png' | 'jpg' | 'webp' | 'gif' | 'bmp';
 
@@ -182,6 +183,7 @@ async function ensureFolder(url: string): Promise<void> {
 
 export class AssetWriter {
     readonly folder: string;
+    private readonly writeTargets = new Map<string, string>();
 
     constructor(folder: string, private readonly beforeWrite?: (url: string, existed: boolean) => Promise<void>) {
         this.folder = normalizeFolder(folder);
@@ -236,14 +238,44 @@ export class AssetWriter {
         };
     }
 
+    async existingRaster(url: string, tiled = false, nodeName = url): Promise<SpriteAssetSpec | null> {
+        if (!/\.(png|jpe?g)$/i.test(url)) return this.existing(url, tiled);
+        const named = nodeName.match(/\.(png|jpe?g)$/i)?.[1].toLowerCase();
+        const extensions = Array.from(new Set([...(named ? [named] : []), 'png', 'jpg', 'jpeg']));
+        for (const extension of extensions) {
+            const candidate = url.replace(/\.(png|jpe?g)$/i, `.${extension}`);
+            const asset = tiled ? await this.existing(candidate, true) : await this.existing(candidate);
+            if (asset) return asset;
+        }
+        return null;
+    }
+
     async write(
         url: string,
         contents: Buffer | string,
         borders?: { left: number; right: number; top: number; bottom: number },
         tiled = false,
     ): Promise<SpriteAssetSpec> {
-        const existing = await queryAsset(url);
-        const data = typeof contents === 'string' ? Buffer.from(contents, 'utf8') : contents;
+        const requestedUrl = url;
+        url = this.writeTargets.get(url) ?? url;
+        let existing = await queryAsset(url);
+        let data = typeof contents === 'string' ? Buffer.from(contents, 'utf8') : contents;
+        if (!existing && /\.png$/i.test(url)) {
+            const prepared = prepareNewRaster(data);
+            if (prepared.extension === 'jpg') {
+                const jpegUrl = url.replace(/\.png$/i, '.jpg');
+                // Repeated imports normally reuse this file before reaching write.
+                // A forced refresh must update it in place, preserving its UUID.
+                existing = await queryAsset(jpegUrl);
+                url = jpegUrl;
+                data = prepared.contents;
+            }
+        } else if (/\.jpe?g$/i.test(url) && isPng(data)) {
+            const prepared = prepareNewRaster(data);
+            if (prepared.extension !== 'jpg') throw new Error(`不能将透明 PNG 或转换失败的图片写入 JPG：${url}`);
+            data = prepared.contents;
+        }
+        this.writeTargets.set(requestedUrl, url);
         await this.beforeWrite?.(url, Boolean(existing));
         if (existing) {
             await assetRequest('asset-db', 'save-asset', url, data);

@@ -9,6 +9,14 @@
 
 ## 1. 文档目的
 
+### 2026-09-20 · 新图片透明度与 JPG 引用
+
+- `raster-format.ts` 使用 pngjs 解码逐像素判断 Alpha，兼容 RGBA、RGB/tRNS、调色板、低位灰度与 16 位 Alpha；不得只凭“带 Alpha 通道”判断透明度，也不得先将 16 位 Alpha 四舍五入到 8 位。完全不透明的新 PNG 通过 Creator 的 Electron `nativeImage.toJPEG(95)` 编码为 JPG，有任意透明像素保留原 PNG。
+- `AssetWriter.write()` 在实际写资产前确定格式、路径与已有状态，再调用资源检查记录器。已有 PNG 保留格式；JPG 刷新在原路径覆盖并保留 UUID。同一次九宫写入/完整原图恢复共享最终路径，避免九宫失败回退生成另一份 PNG，或将 PNG 字节写进 JPG。pngjs 打包到分发产物，Electron 延迟加载，不要求用户安装 node_modules。
+- `LocalResourceLibrary` 同名匹配扩展为 PNG/JPG/JPEG；仍按 Figma 原始名，不使用插件改名。显式图片后缀优先，无后缀按 PNG → JPG → JPEG；目录优先级及同格式的根目录优先/稳定排序不变。项目内匹配仍直接引用原 UUID，跳过转换、九宫处理、下载与覆盖，强制刷新不改变该优先级。项目外 JPG 复制时保留真实格式，不伪装 PNG。
+- 普通输出、九宫、Tiled 与渐变重复导入会查找已有 JPG/JPEG，不因原请求为 PNG 重复生成资源；Tiled 沿用原有专用 Meta 规则。下载缓存仍保存原始内容，实际输出路径以 SpriteAssetSpec.url 为准。原图直取的 WebP/GIF/BMP 本次不转码。
+- 已知限制：JPG 质量 95 仍有损，细线/九宫接缝需在 Creator 实际视觉验收；不能将磁盘压缩理解为纹理内存下降。超过 1600 万像素、损坏 PNG 或编码失败时警告并安全保留 PNG。已有 PNG 不迁移、不删除；没有批量改写项目资源或 Prefab。回归覆盖透明度、格式选择、重复引用、强刷保留 UUID、九宫恢复路径与检查报告真实路径；真实 Creator 视觉验收待执行。
+
 ### 2026-09-12 · V2 导入结果检查
 
 - 基于 `v2-MCP` 开发，保留该分支既有 MCP、Mask、字号/行高和切片规则。完成导入后面板自动打开结果检查；MCP 导入也生成报告并通知已打开的面板，MCP 简要结果增加 `reviewAvailable`。
@@ -186,7 +194,7 @@ source/
 │  └─ url.ts                       Figma URL/file key/node id 解析
 ├─ importer/
 │  ├─ assets.ts                    资源写入、同名复用、SpriteFrame UUID
-│  ├─ local-resources.ts           本地同名 PNG/SVG 搜索
+│  ├─ local-resources.ts           本地同名 PNG/JPG/JPEG 搜索（兼容 SVG 查询）
 │  ├─ cache.ts                     哈希键图片缓存
 │  ├─ fonts.ts                     项目字体扫描和映射匹配
 │  └─ svg.ts                       渐变 SVG/PNG 生成
@@ -396,10 +404,10 @@ Frame 链接的 Prefab 流程是当前最重要的特殊路径：
 
 `localResourceFolders` 最多 3 项，可为空。匹配规则：
 
-- 递归扫描 PNG/SVG；
+- 递归扫描 PNG/JPG/JPEG（保留 SVG 查询兼容）；
 - 文件名与 Figma 节点名规范化匹配；
 - 第一个命中目录优先；
-- 同目录重复命中按确定性排序取第一个；
+- 同目录内原节点名带图片后缀时优先该格式，否则按 PNG → JPG → JPEG；同格式根目录优先，其余按确定性排序取第一个；
 - 本地资源目录不等于输出目录。命中当前项目 `assets` 内已有可用 SpriteFrame 的普通 PNG 或三/九宫图片时，优先直接引用其 UUID，沿用本地边距，不下载、不最小化、不复制，也不修改原 Meta；`refreshAssets` 不覆盖显式本地目录的命中。
 - 三/九宫本地 SpriteFrame 没有边距时仍直接引用并提示暂按普通 Sprite 显示；项目内图片缺少可用 SpriteFrame 时停止并提示，不另建同名副本。Figma 切片几何识别只用于生成新资源，不作为引用本地九宫的前提。
 - 未命中本地目录且未启用刷新时，导入目录内已有同名九宫资源也直接复用。项目外素材没有 Cocos UUID，仍作为输入素材导入项目。

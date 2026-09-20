@@ -26,8 +26,9 @@ function sliceNode(mode = 'nine') {
 function setup(t, options = {}) {
     const project = join(tmpdir(), 'figma-local-slice-reuse-virtual');
     const folder = join(project, 'assets', 'shared');
-    const localUrl = 'db://assets/shared/Panel.png';
-    const outputUrl = 'db://assets/figma-importer/Panel.png';
+    const extension = options.extension ?? 'png';
+    const localUrl = `db://assets/shared/Panel.${extension}`;
+    const outputUrl = `db://assets/figma-importer/Panel.${extension}`;
     const asset = { uuid: 'original-sprite-frame', url: options.outputOnly ? outputUrl : localUrl,
         sliced: options.sliced !== false };
     const originalEditor = global.Editor;
@@ -41,12 +42,13 @@ function setup(t, options = {}) {
     t.mock.method(LocalResourceLibrary.prototype, 'find', async (name, format) => {
         assert.equal(name, 'Panel', 'match the original name, not the Cocos rename');
         assert.equal(format, 'png');
-        return options.outputOnly ? null : { path: join(folder, 'Panel.png'), contents: Buffer.from('not a PNG: must never be compacted') };
+        return options.outputOnly ? null : { path: join(folder, `Panel.${extension}`), contents: Buffer.from('not a PNG: must never be compacted') };
     });
     t.mock.method(AssetWriter.prototype, 'existing', async (url, tiled) => {
         assert.equal(tiled, undefined, 'do not rewrite local metadata');
         lookups.push(url);
         if (url === asset.url && !options.unready) return asset;
+        if (options.outputOnly) return null;
         assert.fail(`unexpected fallback lookup: ${url}`);
     });
     t.mock.method(AssetWriter.prototype, 'write', async () => assert.fail('must not create or rewrite an image'));
@@ -61,6 +63,20 @@ function setup(t, options = {}) {
     }, { bind(...args) { bindings.push(args); }, beforeWrite() { assert.fail('must not record generated assets'); } });
     return { run, asset, bindings, lookups };
 }
+
+for (const extension of ['jpg', 'JPEG']) test(`local ${extension} reuses original UUID despite Cocos rename and refresh`, async (t) => {
+    const f = setup(t, { extension, refresh: true });
+    const result = await f.run();
+    assert.equal(result.assets.get('panel'), f.asset);
+    assert.deepEqual(f.lookups, [f.asset.url]);
+});
+
+test('reimport finds the previously generated JPG without downloading PNG', async (t) => {
+    const f = setup(t, { extension: 'jpg', outputOnly: true });
+    const result = await f.run();
+    assert.equal(result.assets.get('panel'), f.asset);
+    assert.equal(f.bindings[0][2], 'existing');
+});
 
 for (const mode of ['nine', 'horizontal', 'vertical']) {
     for (const refresh of [false, true]) test(`${mode} reuses local UUID before slice compaction (refresh=${refresh})`, async (t) => {

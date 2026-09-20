@@ -7,7 +7,7 @@ export interface LocalResourceMatch {
     contents: Buffer;
 }
 
-const SUPPORTED_EXTENSIONS = new Set(['.png', '.svg']);
+const SUPPORTED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.svg']);
 const SKIPPED_DIRECTORIES = new Set(['.git', 'node_modules', 'library', 'temp']);
 
 function normalizedFileName(value: string): string {
@@ -22,7 +22,7 @@ function resourceBaseName(nodeName: string): string {
         : fileName;
 }
 
-function candidateNames(nodeName: string, format: 'png' | 'svg'): string[] {
+function candidateNames(nodeName: string, format: string): string[] {
     const baseName = resourceBaseName(nodeName);
     return Array.from(new Set([
         normalizedFileName(`${baseName}.${format}`),
@@ -54,6 +54,20 @@ export class LocalResourceLibrary {
 
     async find(nodeName: string, format: 'png' | 'svg'): Promise<LocalResourceMatch | null> {
         await this.initialize();
+        const namedExtension = extname(nodeName.trim()).slice(1).toLowerCase();
+        const formats = format === 'svg' ? ['svg']
+            : Array.from(new Set([
+                ...(['png', 'jpg', 'jpeg'].includes(namedExtension) ? [namedExtension] : []),
+                'png', 'jpg', 'jpeg',
+            ]));
+        for (const candidateFormat of formats) {
+            const match = await this.findFormat(nodeName, candidateFormat);
+            if (match) return match;
+        }
+        return null;
+    }
+
+    private async findFormat(nodeName: string, format: string): Promise<LocalResourceMatch | null> {
         const matches = new Set<string>();
         for (const candidate of candidateNames(nodeName, format)) {
             for (const path of this.filesByName.get(candidate) ?? []) {

@@ -18,6 +18,19 @@ async function withLibrary(run) {
     }
 }
 
+test('raster lookup supports JPG/JPEG and honors an explicit original-name extension', async () => {
+    await withLibrary(async (root) => {
+        await writeFile(join(root, 'Panel.JPG'), 'jpeg');
+        await writeFile(join(root, 'Photo.JPEG'), 'jpeg');
+        await writeFile(join(root, 'Panel.png'), 'png');
+        const library = new LocalResourceLibrary(root);
+        assert.equal((await library.find('Panel', 'png')).path, join(root, 'Panel.png'));
+        assert.equal((await library.find('Panel.JPG', 'png')).path, join(root, 'Panel.JPG'));
+        assert.equal((await library.find('Photo', 'png')).path, join(root, 'Photo.JPEG'));
+        assert.equal(await library.find('Photo', 'svg'), null);
+    });
+});
+
 test('recursively finds same-named local assets without case sensitivity', async () => {
     await withLibrary(async (root) => {
         const nested = join(root, 'ui', 'icons');
