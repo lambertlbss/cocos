@@ -49,6 +49,27 @@ test('uses original IMAGE paint for plain hidden image nodes and equal-size wrap
 const { parseNode } = require('../dist/figma/parser');
 const { analyzeSliceGrid } = require('../dist/figma/slicing');
 
+test('plain IMAGE simplification rejects crop transforms, filters and wrapper rendering semantics', () => {
+    const frame = { x: 0, y: 0, width: 20, height: 10 };
+    const raw = { id: 'image-safe', type: 'RECTANGLE', absoluteBoundingBox: frame,
+        fills: [{ type: 'IMAGE', imageRef: 'source', scaleMode: 'FILL' }] };
+    for (const patch of [
+        { rotation: Math.PI / 2 },
+        { relativeTransform: [[-1, 0, 0], [0, 1, 0]] },
+        { blendMode: 'MULTIPLY' },
+        { fills: [{ ...raw.fills[0], imageTransform: [[1, 0, 0], [0, 1, 0]] }] },
+        { fills: [{ ...raw.fills[0], filters: { exposure: 0.5 } }] },
+    ]) assert.equal(plainImageSourceRef(parseNode({ ...raw, ...patch })), undefined);
+    for (const patch of [{ clipsContent: true }, { cornerRadius: 5 },
+        { children: [{ ...raw, relativeTransform: [[-1, 0, 0], [0, 1, 0]] }] }]) {
+        assert.equal(plainImageSourceRef(parseNode({ id: 'wrapper', type: 'FRAME', absoluteBoundingBox: frame,
+            children: [raw], ...patch })), undefined);
+    }
+    const zero = parseNode({ ...raw, fills: [{ ...raw.fills[0], filters: { exposure: 0, contrast: 0 } }] });
+    assert.deepEqual(zero.fills[0].filters, { exposure: 0, contrast: 0 });
+    assert.equal(plainImageSourceRef(zero), 'source');
+});
+
 function node(value) {
     const parsed = parseNode({
         id: '1:1',
@@ -268,7 +289,7 @@ test('renders the nearest non-root structured boundary when its visible direct c
         name: 'panel_root',
         children: [{
             id: '11:1',
-            name: 'img_hongbao_bg_mini',
+            name: 'bg_hongbao_bg_mini',
             type: 'FRAME',
             absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 80 },
             children: [{
@@ -446,7 +467,7 @@ test('does not flatten all-messy wrappers that contain editable or runtime struc
             name: 'panel_root',
             children: [{
                 id: `wrapper:${label}`,
-                name: 'img_complex_asset',
+                name: 'bg_complex_asset',
                 type: 'FRAME',
                 absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
                 children: [child],
@@ -540,6 +561,86 @@ test('does not flatten structured, hidden-noise, root, or explicit ScrollView co
     assert.equal(shouldRenderMessySubtree(rootMess, true), false);
     assert.equal(shouldRenderMessySubtree(scroll, false), false);
     assert.equal(analyzeTree([rootMess])[0].action, 'generate');
+});
+
+test('merges icon_ and img_ visual resources regardless of structured children and text', () => {
+    for (const name of ['icon_reward', 'IMG_reward', ' img_公会_红包 ']) {
+        const resource = node({
+            id: `prefix:${name}`,
+            name,
+            visible: false,
+            children: [{
+                id: `prefix:${name}:text`,
+                name: 'txt_count',
+                type: 'TEXT',
+                characters: '12',
+                absoluteBoundingBox: { x: 12, y: 8, width: 20, height: 20 },
+            }, {
+                id: `prefix:${name}:image`,
+                name: 'icon_inner',
+                type: 'FRAME',
+                visible: false,
+                absoluteBoundingBox: { x: 4, y: 5, width: 24, height: 24 },
+            }],
+        });
+        const root = node({ id: `root:${name}`, children: [resource] });
+        const item = analyzeTree([root])[0].children[0];
+        assert.equal(inferAction(resource), 'render', name);
+        assert.equal(item.action, 'render', name);
+        assert.equal(item.renderSubtree, true, name);
+        assert.equal(item.visible, false);
+        assert.match(item.warning, /当前显隐合成.*隐藏子层不生成独立节点/);
+        assert.match(item.warning, /Inactive/);
+    }
+});
+
+test('keeps an independent nested slice when a prefix wrapper cannot preserve its resize behavior', () => {
+    const slice = {
+        id: 'prefix:slice',
+        name: 'common_bg',
+        type: 'FRAME',
+        visible: false,
+        absoluteBoundingBox: { x: 10, y: 20, width: 90, height: 30 },
+        children: [0, 1, 2].map((index) => ({
+            id: `prefix:slice:${index}`,
+            name: `Rectangle ${index}`,
+            type: 'RECTANGLE',
+            absoluteBoundingBox: { x: 10 + index * 30, y: 20, width: 30, height: 30 },
+        })),
+    };
+    const wrapper = node({ id: 'prefix:wrapper', name: 'img_card', children: [slice] });
+    const root = node({ id: 'prefix:root', children: [wrapper] });
+    const item = analyzeTree([root])[0].children[0];
+
+    assert.equal(item.action, 'generate');
+    assert.equal(item.renderSubtree, false);
+    assert.match(item.warning, /内部存在独立三\/九宫资源/);
+    assert.equal(item.children[0].patchCandidate, true);
+    assert.equal(item.children[0].visible, false);
+});
+
+test('keeps a selected prefix Frame root structural and gives its own slice priority', () => {
+    const root = node({
+        id: 'prefix:root-frame',
+        name: 'icon_selected_frame',
+        children: [{ id: 'prefix:root-child', name: 'icon_child', type: 'FRAME' }],
+    });
+    assert.equal(analyzeTree([root])[0].action, 'generate');
+    const sliced = node({
+        id: 'prefix:own-slice',
+        name: 'img_sliced',
+        absoluteBoundingBox: { x: 0, y: 0, width: 90, height: 30 },
+        children: [0, 1, 2].map((index) => ({
+            id: `prefix:own-slice:${index}`,
+            name: `Rectangle ${index}`,
+            type: 'RECTANGLE',
+            absoluteBoundingBox: { x: index * 30, y: 0, width: 30, height: 30 },
+        })),
+    });
+    const item = analyzeTree([sliced])[0];
+    assert.equal(item.action, 'render');
+    assert.equal(item.patchCandidate, true);
+    assert.match(item.warning, /3\/9 个 Rectangle 连续切片/);
 });
 
 test('does not warn about supported Figma automatic wrapping', () => {

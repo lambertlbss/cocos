@@ -116,6 +116,17 @@ export class ImportReviewPanel {
             for (const warning of report.warnings) details.append(el('p', warning));
             this.content.append(details);
         }
+        if (report.decisions?.length) {
+            const labels = { reused: '复用', created: '新建', updated: '更新', merged: '合并', tinted: '实例改色', fallback: '回退' };
+            const details = el('details', '', 'review-warnings');
+            details.append(el('summary', `${report.decisions.length} 条导入决策与原因`));
+            for (const item of report.decisions) {
+                const row = el('p', `${labels[item.action]} · ${item.name}：${item.reason}`);
+                if (item.url) row.title = item.url;
+                details.append(row);
+            }
+            this.content.append(details);
+        }
         if (this.tab === 'assets') this.renderAssets();
         else if (this.tab === 'nodes') this.renderNodes();
         else this.renderSource();

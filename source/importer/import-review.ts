@@ -46,6 +46,11 @@ export class ImportReviewRecorder {
     readonly id = randomBytes(18).toString('hex');
     readonly records = new Map<string, RecordedAsset>();
     readonly bindings = new Map<string, { asset: SpriteAssetSpec; node: FigmaNode; source: string }>();
+    readonly decisions: NonNullable<ImportReview['decisions']> = [];
+
+    note(action: NonNullable<ImportReview['decisions']>[number]['action'], name: string, reason: string, url?: string): void {
+        this.decisions.push({ action, name, reason, ...(url ? { url } : {}) });
+    }
 
     async beforeWrite(url: string, existedInDatabase: boolean): Promise<void> {
         if (this.records.has(url)) return;
@@ -163,7 +168,8 @@ export class ImportReviewService {
         this.document = document;
         this.review = { id: recorder.id, createdAt: new Date().toISOString(), fileName: document.fileName,
             targetUrl, assets: [...assets.values()].sort((a, b) => Number(b.state === 'new') - Number(a.state === 'new')),
-            before, after, sourceTree, changes: diffReviewNodes(before.nodes, after.nodes), warnings, confirmed: false, readOnlyReason };
+            before, after, sourceTree, changes: diffReviewNodes(before.nodes, after.nodes), warnings,
+            decisions: recorder.decisions ?? [], confirmed: false, readOnlyReason };
         return this.review;
     }
 

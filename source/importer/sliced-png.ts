@@ -18,6 +18,8 @@ export interface CompactSliceResult {
     contents: Buffer;
     borders: SliceBorders;
     optimization: SliceOptimization;
+    /** Full-image fallback when export pixels cannot safely use these insets. */
+    sliceFallback?: string;
 }
 
 interface Segment { start: number; size: number; }
@@ -105,9 +107,12 @@ export function compactSlicePng(contents: Buffer, node: FigmaNode, analysis: Sli
     const unchanged = (reason: string, status: 'skipped' | 'unchanged' = 'skipped'): CompactSliceResult => ({
         contents, borders, optimization: { ...optimization, status, reason },
     });
+    const fallback = (reason: string): CompactSliceResult => ({
+        ...unchanged(reason), sliceFallback: reason,
+    });
     try {
         if (!Number.isFinite(scale) || scale <= 0 || !axisAligned(node)) {
-            return unchanged('旋转、翻转或无效倍率的切片保留完整图片');
+            return fallback('旋转、翻转或无效倍率的切片保留完整图片');
         }
         const frame = node.absoluteBoundingBox;
         const header = inspectPng(contents);
@@ -119,7 +124,7 @@ export function compactSlicePng(contents: Buffer, node: FigmaNode, analysis: Sli
             || frame.width <= 0 || frame.height <= 0
             || Math.abs(header.width - frame.width * scale) > 1
             || Math.abs(header.height - frame.height * scale) > 1) {
-            return unchanged('图片尺寸与切片画布不匹配，保留完整图片');
+            return fallback('图片尺寸与切片画布不匹配，保留完整图片');
         }
         const horizontal = analysis.mode !== 'vertical';
         const vertical = analysis.mode !== 'horizontal';
@@ -127,7 +132,7 @@ export function compactSlicePng(contents: Buffer, node: FigmaNode, analysis: Sli
             || Object.values(analysis.borders).some((value) => !Number.isFinite(value) || value < 0)
             || (horizontal && (borders.left <= 0 || borders.right <= 0 || borders.left + borders.right >= header.width))
             || (vertical && (borders.top <= 0 || borders.bottom <= 0 || borders.top + borders.bottom >= header.height))) {
-            return unchanged('切片像素边界无效，保留完整图片');
+            return fallback('切片像素边界无效，保留完整图片');
         }
         const keep = Math.max(1, Math.round(2 * scale));
         const canShrinkX = horizontal && header.width - borders.left - borders.right > keep;
@@ -163,7 +168,7 @@ export function compactSlicePng(contents: Buffer, node: FigmaNode, analysis: Sli
             width: output.width, height: output.height, bytes: result.length,
         } };
     } catch (error) {
-        return unchanged(error instanceof Error ? error.message : 'PNG 最小化失败，保留完整图片');
+        return fallback(error instanceof Error ? error.message : 'PNG 最小化失败，保留完整图片');
     }
 }
 
@@ -176,6 +181,14 @@ export async function writeSlicedPng(
     node: FigmaNode, analysis: SliceAnalysis, scale: number,
 ): Promise<{ asset: SpriteAssetSpec; optimization: SliceOptimization }> {
     const compact = compactSlicePng(contents, node, analysis, scale);
+    if (compact.sliceFallback) {
+        // Keeping the full PNG alone does not make insets safe: a mismatched
+        // export canvas would still stretch/sample the wrong pixels. Explicitly
+        // clear stale insets on refresh as well as suppressing SLICED this run.
+        const asset = await writer.write(url, contents, { left: 0, right: 0, top: 0, bottom: 0 });
+        return { asset: { ...asset, sliced: false, sliceFallback: compact.sliceFallback },
+            optimization: compact.optimization };
+    }
     let asset: SpriteAssetSpec;
     try {
         asset = await writer.write(url, compact.contents, compact.borders);

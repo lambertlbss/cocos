@@ -1,6 +1,7 @@
 import {
     blocksDescendants,
     isTerminalAction,
+    isMergedResourceName,
     kindForImportAction,
     normalizeImportAction,
 } from '../../import-actions';
@@ -16,6 +17,9 @@ const REASON_LABELS: Record<NonNullable<TreeNodeDto['reason']>, string> = {
     'root-structure': '保留根节点结构',
     'manual-export': 'Figma Export 资源边界',
     'slice-resource': '三/九宫资源边界',
+    'prefix-merge': 'icon_/img_ 整层资源边界',
+    'prefix-merge-slice-conflict': '保留内部独立三/九宫资源',
+    'prefix-merge-override-conflict': '保留子层手动策略或命名',
     'semantic-container': '保留语义容器',
     'editable-text': '保留可编辑文字',
     'single-image-fold': '单图片包装层可折叠',
@@ -148,13 +152,29 @@ export function resolveEffectiveActions(
     roots: TreeNodeDto[],
     preferredActions: ReadonlyMap<string, ImportAction>,
     forcedRenderIds: ReadonlySet<string> = new Set(),
+    explicitIds: ReadonlySet<string> = new Set(),
+    renamedIds: ReadonlySet<string> = new Set(),
 ): { actions: Map<string, ImportAction>; suppressed: Set<string> } {
     const actions = new Map<string, ImportAction>();
     const suppressed = new Set<string>();
     const visit = (node: TreeNodeDto, blockedByAncestor: boolean): void => {
-        const preferred = forcedRenderIds.has(node.id)
+        let preferred = forcedRenderIds.has(node.id)
             ? 'render'
             : preferredActions.get(node.id) ?? smartActionForNode(node);
+        const descendantHasProtectedBoundary = (child: TreeNodeDto): boolean =>
+            explicitIds.has(child.id)
+            || renamedIds.has(child.id)
+            || forcedRenderIds.has(child.id)
+            || child.patchCandidate
+            || child.children.some(descendantHasProtectedBoundary);
+        if (preferred === 'render'
+            && node.reason === 'prefix-merge'
+            && isMergedResourceName(node.name)
+            && !explicitIds.has(node.id)
+            && !forcedRenderIds.has(node.id)
+            && node.children.some(descendantHasProtectedBoundary)) {
+            preferred = 'generate';
+        }
         const action = blockedByAncestor ? 'ignore' : normalizeImportAction(preferred);
         if (blockedByAncestor) {
             suppressed.add(node.id);

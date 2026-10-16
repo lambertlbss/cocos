@@ -975,6 +975,9 @@ async function configureSprite(
     }
     const { Sprite, UITransform, assetManager } = cc;
     const sprite = node.getComponent(Sprite) ?? node.addComponent(Sprite);
+    // Reset on every import: color belongs to this Sprite, never its shared
+    // SpriteFrame/texture. Node opacity is applied independently by UIOpacity.
+    sprite.color = toColor(cc.Color, spec.sprite.tint ?? { r: 1, g: 1, b: 1, a: 1 });
     const transform = node.getComponent(UITransform);
     const targetWidth = Math.max(0, targetFrame.width * scale);
     const targetHeight = Math.max(0, targetFrame.height * scale);

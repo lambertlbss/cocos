@@ -11,6 +11,7 @@ import {
     inferCocosLayoutMode,
     inferKind,
     isPatchCandidate,
+    isNamedSliceGroup,
     isVectorNode,
     nativeTiledPaintSource,
     plainImageSourceRef,
@@ -20,7 +21,9 @@ import { parseDocument } from './figma/parser';
 import {
     annotateTreeWithImportPlan,
     compileImportPlan,
+    resolveAutomaticMergeDecisions,
 } from './figma/import-planner';
+import { analyzeMaskTint, verifyWhiteAlphaPng } from './figma/mask-tint';
 import { analyzeSliceGrid, type SliceAnalysis } from './figma/slicing';
 import { parseFigmaSource } from './figma/url';
 import {
@@ -42,6 +45,7 @@ import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
 import { writeSlicedPng } from './importer/sliced-png';
 import { pixelSizedTileAsset, rasterizeTile, tiledRasterKey } from './importer/tiled-png';
+import { rasterizeImageFill } from './importer/image-fill';
 import {
     collectSceneSpecFigmaIds,
     createMinimalPrefabJson,
@@ -693,14 +697,16 @@ function annotateDocumentPlan(session: DocumentSession): DocumentSession {
 function collectAssetRequests(
     roots: FigmaNode[],
     decisions: Map<string, Decision>,
+    prepared: ReadonlySet<string> = new Set(),
 ): { png: FigmaNode[]; tiled: TiledAssetRequest[]; rawImages: RawImageAssetRequest[]; gradients: FigmaNode[] } {
     const png: FigmaNode[] = [];
     const tiled: TiledAssetRequest[] = [];
     const rawImages: RawImageAssetRequest[] = [];
     const gradients: FigmaNode[] = [];
     const visit = (node: FigmaNode, ancestorsVisible: boolean) => {
+        if (prepared.has(node.id)) return;
         const decision = decisionForNode(node, decisions);
-        if (decision.action === 'ignore') {
+        if (decision.action === 'ignore' || decision.action === 'transform') {
             return;
         }
         const effectivelyVisible = ancestorsVisible && node.visible !== false && node.opacity > 0;
@@ -717,7 +723,9 @@ function collectAssetRequests(
             if (source) {
                 tiled.push({ node, source });
             } else {
-                const imageRef = effectivelyVisible ? undefined : plainImageSourceRef(node);
+                // The same plain IMAGE source and centered crop path serve both
+                // visibility states; whole-node exports can bake different alpha.
+                const imageRef = plainImageSourceRef(node);
                 if (imageRef) {
                     rawImages.push({ node, imageRef });
                 } else {
@@ -748,6 +756,9 @@ export async function buildAssets(
     importSettings: ImportSettings,
     review: ImportReviewRecorder,
 ): Promise<AssetBuildResult> {
+    const resolvedDecisions = resolveAutomaticMergeDecisions(session.roots, decisions);
+    decisions.clear();
+    resolvedDecisions.forEach((value, key) => decisions.set(key, value));
     const writer = new AssetWriter(importSettings.assetFolder, (url, existed) => review.beforeWrite(url, existed));
     await writer.initialize();
     const cache = new LocalAssetCache(defaultCacheFolder());
@@ -755,9 +766,87 @@ export async function buildAssets(
     const localResources = importSettings.localResourceFolders
         .map((folder) => new LocalResourceLibrary(folder));
     await Promise.all(localResources.map((library) => library.initialize()));
-    const promoteLocalParents = async (node: FigmaNode): Promise<void> => {
+    // Capture names before any image writes. An image created by this import
+    // must still be compared by content when a later same-name source arrives.
+    const outputPath = join(Editor.Project.path, 'assets', writer.folder);
+    const outputResources = existsSync(outputPath) ? new LocalResourceLibrary(outputPath) : null;
+    await outputResources?.initialize();
+    const assets = new Map<string, SpriteAssetSpec>();
+    const warnings = new Set<string>();
+    const note = (action: NonNullable<ImportReview['decisions']>[number]['action'], name: string, reason: string, url?: string) =>
+        review.note?.(action, name, reason, url);
+    const nodeSourceKey = (node: FigmaNode, variant = 'raster-v2') =>
+        JSON.stringify([session.fileKey, node.id, importSettings.scale, variant]);
+    const groupSourceKey = (assetKey: string) => JSON.stringify([session.fileKey, 'tile-v2', assetKey]);
+    const imageDetails = (node: FigmaNode) => {
+        let leaf = node, innerOpacity = 1;
+        while (leaf.children.length === 1) {
+            leaf = leaf.children[0];
+            innerOpacity *= leaf.opacity;
+        }
+        return { leaf, innerOpacity };
+    };
+    const findOutput = async (name: string) => {
+        if (!importSettings.refreshAssets && outputResources) {
+            const match = await outputResources.find(name, 'png');
+            if (match) return { ...match, source: 'existing' as const };
+        }
+        return null;
+    };
+    const findLocal = async (name: string, includeOutput = true) => {
+        for (const library of localResources) {
+            const match = await library.find(name, 'png');
+            // Directory order, extension preference and root-before-subfolder
+            // ordering are the existing user-declared name mapping contract.
+            if (match) return { ...match, source: 'local' as const };
+        }
+        return includeOutput ? findOutput(name) : null;
+    };
+    const prepareMask = async (node: FigmaNode): Promise<void> => {
         const decision = decisionForNode(node, decisions);
-        if (decision.action === 'ignore') {
+        if (decision.action === 'ignore' || decision.action === 'transform' || decision.nineSlice) return;
+        const analysis = analyzeMaskTint(node);
+        if (analysis && !subtreeHasExplicitOverride(node, decisions, false)) {
+            decisions.set(node.id, { ...decision, action: 'render', kind: 'sprite', nineSlice: false });
+            let reason = analysis.reason;
+            if (analysis.candidate) {
+                const { mask, tint } = analysis.candidate;
+                const match = await findLocal(mask.name);
+                const localUrl = match ? assetDatabaseUrl(match.path) : null;
+                const asset = localUrl ? await writer.existing(localUrl)
+                    : await writer.existingForSource(nodeSourceKey(mask), { tiled: false });
+                // Verify the bytes of the referenced asset, never an unrelated
+                // same-name file from a project-external library directory.
+                const bytes = localUrl && asset ? match!.contents
+                    : asset ? await readFile(join(Editor.Project.path, asset.url.slice('db://'.length))) : null;
+                const verified = bytes ? verifyWhiteAlphaPng(bytes) : { valid: false, reason: '没有可验证的本地白色底图' };
+                reason = verified.reason;
+                if (asset && verified.valid) {
+                    const tinted = { ...asset, tint };
+                    assets.set(node.id, tinted);
+                    review.bind(node, tinted, match?.source ?? 'existing');
+                    note('tinted', node.name, `${analysis.reason}；${verified.reason}；沿用原 UUID 与九宫参数，透明度仅计算一次`, asset.url);
+                    return;
+                }
+            }
+            note('fallback', node.name, `${reason}；使用 Figma 完整蒙版合成，不修改共享底图`);
+            return;
+        }
+        if (decision.action === 'render') return;
+        for (const child of node.children) await prepareMask(child);
+    };
+    for (const root of session.roots) await prepareMask(root);
+    const protectedDescendant = (node: FigmaNode): boolean => node.children.some((child) => {
+        const childDecision = decisionForNode(child, decisions);
+        if (childDecision.action === 'ignore') return false;
+        return Boolean(child.isMask || child.children.some((part) => part.isMask)
+            || assets.has(child.id) || childDecision.nineSlice || isNamedSliceGroup(child) || isPatchCandidate(child))
+            || (childDecision.action !== 'render' && protectedDescendant(child));
+    });
+    const promoteLocalParents = async (node: FigmaNode): Promise<void> => {
+        if (assets.has(node.id) || analyzeMaskTint(node)) return;
+        const decision = decisionForNode(node, decisions);
+        if (decision.action !== 'generate') {
             return;
         }
         if (node.children.length
@@ -767,16 +856,13 @@ export async function buildAssets(
             // a strategy override on itself or any override below it blocks
             // promotion because descendants would otherwise disappear.
             && !subtreeHasExplicitOverride(node, decisions, false)
+            // A same-name ancestor is not permission to erase independent slice
+            // resources or a verified/fallback mask representation below it.
+            && !protectedDescendant(node)
             // A local parent resource cannot represent independently inactive
             // descendants. Keep the hierarchy whenever such a boundary exists.
             && !hasHiddenDescendant(node)) {
-            let localMatch = null;
-            for (const library of localResources) {
-                localMatch = await library.find(node.name, 'png');
-                if (localMatch) {
-                    break;
-                }
-            }
+            const localMatch = await findLocal(node.name, false);
             if (localMatch) {
                 decisions.set(node.id, { ...decision, action: 'render', nineSlice: false });
                 return;
@@ -785,9 +871,30 @@ export async function buildAssets(
         await Promise.all(node.children.map(promoteLocalParents));
     };
     await Promise.all(session.roots.map(promoteLocalParents));
-    const requests = collectAssetRequests(session.roots, decisions);
-    const assets = new Map<string, SpriteAssetSpec>();
-    const warnings = new Set<string>();
+    const finalDecisions = resolveAutomaticMergeDecisions(session.roots, decisions);
+    decisions.clear();
+    finalDecisions.forEach((value, key) => decisions.set(key, value));
+    const plans = compileImportPlan(session.roots, decisions);
+    const activeIds = new Set<string>();
+    const activeBoundary = (node: FigmaNode) => {
+        const decision = decisionForNode(node, decisions);
+        if (decision.action === 'ignore') return;
+        activeIds.add(node.id);
+        if (isTerminalAction(decision.action) || decision.nineSlice || assets.has(node.id)) return;
+        node.children.forEach(activeBoundary);
+    };
+    session.roots.forEach(activeBoundary);
+    for (const [id, plan] of plans) {
+        if (!activeIds.has(id)) continue;
+        const node = session.nodeById?.get(id);
+        if (plan.reason === 'prefix-merge') note('merged', node?.name ?? id,
+            plan.warning ?? 'icon_/img_ 最外层资源边界，按当前显隐合成，保留父节点几何与透明度');
+        else if (plan.warning) {
+            warnings.add(`${node?.name ?? id}：${plan.warning}`);
+            note('fallback', node?.name ?? id, plan.warning);
+        }
+    }
+    const requests = collectAssetRequests(session.roots, decisions, new Set(assets.keys()));
     const total = requests.png.length + requests.tiled.length
         + requests.rawImages.length + requests.gradients.length;
     let completed = 0;
@@ -805,6 +912,9 @@ export async function buildAssets(
     ) => {
         assets.set(node.id, asset);
         review.bind(node, asset, source);
+        if (source === 'local' || source === 'existing') note('reused', node.name,
+            source === 'local' ? '用户指定本地目录的同名映射，保留原 SpriteFrame UUID 与切片参数'
+                : '按已有资源名称或历史来源映射复用原 SpriteFrame，保留 UUID 与原切片参数', asset.url);
         completed += 1;
         const verb = source === 'local'
             ? '复用本地资源'
@@ -873,7 +983,7 @@ export async function buildAssets(
             }
             let existingAsset: SpriteAssetSpec | null = null;
             if (!importSettings.refreshAssets) {
-                existingAsset = await writer.existingRaster(writer.buildTiledUrl(group.node.name, group.assetKey, 'png'), true);
+                existingAsset = await writer.existingForSource(groupSourceKey(group.assetKey), { tiled: true });
             }
             if (existingAsset) {
                 completeGroup(group.nodes, pixelSizedTileAsset(existingAsset), 'existing');
@@ -986,7 +1096,7 @@ export async function buildAssets(
             const url = writer.buildTiledUrl(item.node.name, item.assetKey, 'png');
             completeGroup(
                 item.nodes,
-                pixelSizedTileAsset(await writer.write(url, raster.contents, undefined, true)),
+                pixelSizedTileAsset(await writer.resolve(url, raster.contents, { sourceKey: groupSourceKey(item.assetKey), tiled: true })),
                 item.sourceType,
             );
             trace.done({ sourceWidth: raster.sourceWidth, sourceHeight: raster.sourceHeight,
@@ -1007,7 +1117,8 @@ export async function buildAssets(
                 format,
                 importSettings.scale,
             );
-            const key = url.normalize('NFKC').toLocaleLowerCase('en-US');
+            // A name is a user-facing label, never proof of equal rendered pixels.
+            const key = `${session.fileKey}:${node.id}:${importSettings.scale}`;
             const group = groups.get(key) ?? { url, nodes: [] };
             group.nodes.push(node);
             groups.set(key, group);
@@ -1044,13 +1155,7 @@ export async function buildAssets(
                 }
                 completeGroup(groupedNodes, asset, source);
             };
-            let localMatch = null;
-            for (const library of localResources) {
-                localMatch = await library.find(node.name, format);
-                if (localMatch) {
-                    break;
-                }
-            }
+            const localMatch = analyzeMaskTint(node) ? null : await findLocal(node.name, false);
             // Project-local SpriteFrames own their pixels and slice borders.
             // Reuse their UUID before any slice analysis, compaction or refresh.
             const localUrl = localMatch
@@ -1058,20 +1163,34 @@ export async function buildAssets(
                 : null;
             const localAsset = localUrl ? await writer.existing(localUrl) : null;
             if (localAsset) {
-                reuseAsset(localAsset, 'local');
+                reuseAsset(localAsset, localMatch!.source);
                 continue;
             }
             if (localUrl) {
                 throw new Error(`同名本地资源尚无可用 SpriteFrame，请先在 Cocos 中完成资源导入并设置为 SpriteFrame 后重试，不会另建副本：${localUrl}`);
             }
-            const existing = !importSettings.refreshAssets ? await writer.existingRaster(url, false, node.name) : null;
+            const sliceAnalysis = decision.nineSlice && format === 'png'
+                ? analyzeSliceGrid(node)
+                : null;
+            const lookupBorders = sliceAnalysis ? {
+                left: Math.round(sliceAnalysis.borders.left * importSettings.scale),
+                right: Math.round(sliceAnalysis.borders.right * importSettings.scale),
+                top: Math.round(sliceAnalysis.borders.top * importSettings.scale),
+                bottom: Math.round(sliceAnalysis.borders.bottom * importSettings.scale),
+            } : undefined;
+            const existing = !importSettings.refreshAssets ? await writer.existingForSource(nodeSourceKey(node),
+                { tiled: false, sliced: Boolean(sliceAnalysis), borders: lookupBorders }) : null;
             if (!localMatch && existing && (decision.nineSlice || !overflowingRenderFrame(node))) {
                 reuseAsset(existing, 'existing');
                 continue;
             }
-            const sliceAnalysis = decision.nineSlice && format === 'png'
-                ? analyzeSliceGrid(node)
-                : null;
+            const namedOutput = !localMatch && !existing && !analyzeMaskTint(node) ? await findOutput(node.name) : null;
+            if (namedOutput) {
+                const namedAsset = await writer.existing(assetDatabaseUrl(namedOutput.path)!);
+                if (!namedAsset) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
+                reuseAsset(namedAsset, 'existing');
+                continue;
+            }
             if (decision.nineSlice && !sliceAnalysis) {
                 warnings.add(`三/九宫节点“${node.name}”无法计算连续切片边界，已临时作为 PNG 整层导入`);
             }
@@ -1133,15 +1252,19 @@ export async function buildAssets(
                 contents = await (await getApi()).download(remoteUrl, `${item.node.name} (${item.node.id})`);
                 await cache.write(item.key, contents);
             }
+            if (activeController?.signal.aborted) throw new CancelledError();
             let asset: SpriteAssetSpec;
             if (item.sliceAnalysis) {
                 const trace = diagnosticStart('三/九宫资源最小化', { node: item.node.name });
-                const result = await writeSlicedPng(writer, item.url, contents, item.node,
+                const result = await writeSlicedPng({ write: (url, bytes, borders) => writer.resolve(url, bytes,
+                    { sourceKey: nodeSourceKey(item.node), borders }) }, item.url, contents, item.node,
                     item.sliceAnalysis, importSettings.scale);
                 asset = result.asset;
                 trace.done(result.optimization);
+                note(asset.sliceFallback ? 'fallback' : 'merged', item.node.name,
+                    `三/九宫：${result.optimization.reason ?? result.optimization.status}`, asset.url);
             } else {
-                asset = await writer.write(item.url, contents, item.borders);
+                asset = await writer.resolve(item.url, contents, { sourceKey: nodeSourceKey(item.node), borders: item.borders });
             }
             if (asset.sliceFallback) {
                 warnings.add(`三/九宫节点“${item.node.name}”切片设置失败，已临时作为 PNG 整层导入：${asset.sliceFallback}`);
@@ -1162,7 +1285,7 @@ export async function buildAssets(
         if (!items.length) return;
         const groups = new Map<string, { node: FigmaNode; nodes: FigmaNode[]; imageRef: string }>();
         for (const item of items) {
-            const key = `${item.node.name.normalize('NFKC').toLocaleLowerCase('en-US')}\0${item.imageRef}`;
+            const key = item.node.id;
             const group = groups.get(key) ?? { node: item.node, nodes: [], imageRef: item.imageRef };
             group.nodes.push(item.node);
             groups.set(key, group);
@@ -1172,6 +1295,28 @@ export async function buildAssets(
         const downloads = new Map<string, Promise<Buffer>>();
         for (const group of groups.values()) {
             if (activeController?.signal.aborted) throw new CancelledError();
+            const { leaf, innerOpacity } = imageDetails(group.node);
+            const match = await findLocal(group.node.name, false);
+            const localUrl = match ? assetDatabaseUrl(match.path) : null;
+            if (localUrl) {
+                const localAsset = await writer.existing(localUrl);
+                if (!localAsset) throw new Error(`同名本地资源尚无可用 SpriteFrame，不会另建副本：${localUrl}`);
+                const instanceAsset = innerOpacity < 1
+                    ? { ...localAsset, tint: { r: 1, g: 1, b: 1, a: innerOpacity } } : localAsset;
+                for (const node of group.nodes) completeAsset(node, instanceAsset, match!.source);
+                continue;
+            }
+            const mapped = !match && !importSettings.refreshAssets
+                ? await writer.existingForSource(nodeSourceKey(group.node, 'image-fill-v1'), { tiled: false, sliced: false }) : null;
+            const namedOutput = !match && !mapped ? await findOutput(group.node.name) : null;
+            const existing = mapped ?? (namedOutput ? await writer.existing(assetDatabaseUrl(namedOutput.path)!) : null);
+            if (existing) {
+                const instanceAsset = innerOpacity < 1
+                    ? { ...existing, tint: { r: 1, g: 1, b: 1, a: innerOpacity } } : existing;
+                for (const node of group.nodes) completeAsset(node, instanceAsset, 'existing');
+                continue;
+            }
+            if (namedOutput) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
             let contents: Buffer | null = null;
             let extension: RasterImageExtension | undefined;
             let source: 'cache' | 'figma' = 'cache';
@@ -1216,25 +1361,39 @@ export async function buildAssets(
                 }, contents);
             }
             extension ??= detectImageExtension(contents);
+            const fill = leaf.fills.find((paint) => paint.visible !== false && paint.type === 'IMAGE');
+            const frame = nodeFrame(group.node);
+            const raster = rasterizeImageFill(contents, fill?.scaleMode?.toUpperCase() === 'FIT' ? 'FIT' : 'FILL',
+                frame.width, frame.height, importSettings.scale);
+            if (activeController?.signal.aborted) throw new CancelledError();
             const url = writer.buildUrl(
                 group.node.name,
                 `${session.fileKey}:image-ref:${group.imageRef}`,
-                extension,
-                1,
+                'png',
+                importSettings.scale,
             );
-            const asset = await writer.write(url, contents);
+            const resolved = await writer.resolve(url, raster, { sourceKey: nodeSourceKey(group.node, 'image-fill-v1') });
+            const asset = innerOpacity < 1 ? { ...resolved, tint: { r: 1, g: 1, b: 1, a: innerOpacity } } : resolved;
+            if (group.node.children.length) note('merged', group.node.name,
+                '普通 IMAGE 在隐藏和显示状态使用相同中心裁切/适配；源图缓存保留原始像素，节点透明度单独应用', asset.url);
             for (const node of group.nodes) completeAsset(node, asset, source);
         }
     };
 
     await diagnosticTask('准备平铺资源', { count: requests.tiled.length }, () => processTiled(requests.tiled));
     await diagnosticTask('准备 PNG 资源', { count: requests.png.length }, () => processRemote(requests.png));
-    // Run after whole-node renders so a correct visibility-independent source
-    // image wins if both paths share the same legacy asset filename.
-    await diagnosticTask('准备隐藏图片资源', { count: requests.rawImages.length }, () => processRawImages(requests.rawImages));
+    await diagnosticTask('准备原始 IMAGE 填充资源', { count: requests.rawImages.length }, () => processRawImages(requests.rawImages));
 
     const gradientAssets = new Map<string, SpriteAssetSpec>();
     for (const node of requests.gradients) {
+        const named = await findLocal(node.name, false);
+        const namedUrl = named ? assetDatabaseUrl(named.path) : null;
+        if (namedUrl) {
+            const existing = await writer.existing(namedUrl);
+            if (!existing) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedUrl}`);
+            completeAsset(node, existing, named!.source);
+            continue;
+        }
         const frame = node.absoluteBoundingBox;
         const fill = node.fills.find((item) => item.visible !== false && item.type.startsWith('GRADIENT_'));
         const png = frame && fill
@@ -1253,12 +1412,17 @@ export async function buildAssets(
                 'png',
                 importSettings.scale,
             );
-            const gradientKey = url.normalize('NFKC').toLocaleLowerCase('en-US');
+            const gradientKey = nodeSourceKey(node, 'gradient-v2');
             const firstAsset = gradientAssets.get(gradientKey);
-            const existing = firstAsset || importSettings.refreshAssets
+            let existing = firstAsset || importSettings.refreshAssets
                 ? null
-                : await writer.existingRaster(url);
-            const asset = firstAsset ?? existing ?? await writer.write(url, png);
+                : await writer.existingForSource(gradientKey, { sliced: false, tiled: false });
+            const namedOutput = !firstAsset && !existing ? await findOutput(node.name) : null;
+            if (namedOutput) {
+                existing = await writer.existing(assetDatabaseUrl(namedOutput.path)!);
+                if (!existing) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
+            }
+            const asset = firstAsset ?? existing ?? await writer.resolve(url, png, { sourceKey: gradientKey });
             gradientAssets.set(gradientKey, asset);
             completeAsset(node, asset, firstAsset || existing ? 'existing' : 'generated');
             continue;
@@ -1270,6 +1434,7 @@ export async function buildAssets(
             message: `生成渐变 ${completed}/${total} · ${node.name}`,
         });
     }
+    for (const event of writer.events) note(event.action, basename(event.url), event.reason, event.url);
     return { assets, warnings: [...warnings] };
 }
 
@@ -2009,6 +2174,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         const reviewRecorder = new ImportReviewRecorder();
         const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings, reviewRecorder));
         const { assets, warnings } = builtAssets;
+        if (controller.signal.aborted) throw new CancelledError();
         const attachReview = async (result: SceneImportResult) => {
             result.review = await finalizeImportReview(importReviews, reviewRecorder, reviewDocument,
                 result.reviewBefore, result.reviewAfter, result.prefabUrl, warnings,

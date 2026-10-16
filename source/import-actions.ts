@@ -7,6 +7,11 @@ const CURRENT_ACTIONS = new Set<ImportAction>([
     'transform',
 ]);
 
+/** Explicit visual-resource naming convention; other image-role aliases stay editable. */
+export function isMergedResourceName(name: string): boolean {
+    return /^(?:icon|img)_.+/i.test(name.trim().normalize('NFKC'));
+}
+
 export function normalizeImportAction(value: unknown): ImportAction {
     if (value === 'merge' || value === 'svg') {
         return 'render';

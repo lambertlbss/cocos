@@ -135,6 +135,8 @@ export interface ImportReview {
     }>;
     changes: ReviewNodeChange[];
     warnings: string[];
+    decisions?: Array<{ action: 'reused' | 'created' | 'updated' | 'merged' | 'tinted' | 'fallback';
+        name: string; reason: string; url?: string }>;
     confirmed: boolean;
     /** Historical snapshot only; no cleanup transaction may be started. */
     readOnlyReason?: string;

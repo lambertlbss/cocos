@@ -7,6 +7,7 @@ const {
     annotateTreeWithImportPlan,
     compileImportPlan,
     importPlanReasonText,
+    resolveAutomaticMergeDecisions,
     semanticRoleForNode,
 } = require('../dist/figma/import-planner');
 const { parseNode } = require('../dist/figma/parser');
@@ -338,7 +339,7 @@ test('builds folded SceneNodeSpecs from the same plan and child resource referen
 test('preserves the folded image source type and composed opacity', () => {
     const image = node({
         id: 'spec:image',
-        name: 'img_avatar',
+        name: 'image_avatar',
         opacity: 0.8,
         children: [{
             id: 'spec:ellipse',
@@ -580,4 +581,152 @@ test('protects descendant overrides from local same-name parent promotion', () =
     decisions.get(parent.id).name = 'renamed_parent';
     assert.equal(subtreeHasExplicitOverride(parent, decisions), true);
     assert.equal(subtreeHasExplicitOverride(parent, decisions, false), false);
+});
+
+function prefixResourceFixture() {
+    return node({
+        id: 'merge:root',
+        name: 'PopupRoot',
+        absoluteBoundingBox: { x: 50, y: 60, width: 640, height: 480 },
+        children: [{
+            id: 'merge:outer',
+            name: 'img_reward',
+            type: 'FRAME',
+            opacity: 0.8,
+            visible: false,
+            absoluteBoundingBox: { x: 75, y: 95, width: 160, height: 90 },
+            children: [{
+                id: 'merge:inner',
+                name: 'icon_badge',
+                type: 'FRAME',
+                absoluteBoundingBox: { x: 91, y: 101, width: 30, height: 30 },
+                children: [{
+                    id: 'merge:leaf',
+                    name: 'star',
+                    type: 'VECTOR',
+                    absoluteBoundingBox: { x: 91, y: 101, width: 30, height: 30 },
+                }],
+            }, {
+                id: 'merge:text',
+                name: 'txt_count',
+                type: 'TEXT',
+                characters: '12',
+                absoluteBoundingBox: { x: 130, y: 115, width: 40, height: 24 },
+            }],
+        }],
+    });
+}
+
+test('uses the outermost prefix resource as one Sprite without duplicate nested nodes or geometry changes', () => {
+    const root = prefixResourceFixture();
+    const original = decisionsFor([root]);
+    const before = JSON.stringify([...original]);
+    const decisions = resolveAutomaticMergeDecisions([root], original);
+    const again = resolveAutomaticMergeDecisions([root], decisions);
+    const plans = compileImportPlan([root], decisions);
+    const asset = { uuid: 'merged-frame', url: 'db://assets/reward.png', sliced: false };
+    const spec = makeSpec(root, root.absoluteBoundingBox, decisions, plans,
+        indexNodes([root]), new Map([['merge:outer', asset]]), new Map(), true);
+    const resource = spec.children[0];
+
+    assert.deepEqual([...again], [...decisions]);
+    assert.equal(JSON.stringify([...original]), before, 'input decisions stay immutable');
+    assert.equal(resource.action, 'render');
+    assert.equal(resource.kind, 'sprite');
+    assert.equal(resource.sprite, asset);
+    assert.equal(resource.visible, false);
+    assert.equal(resource.opacity, 0.8);
+    assert.deepEqual(resource.frame, root.children[0].absoluteBoundingBox);
+    assert.deepEqual(resource.parentFrame, root.absoluteBoundingBox);
+    assert.equal(resource.flattenBoundary, true);
+    assert.deepEqual(resource.children, []);
+    assert.equal(plans.get('merge:outer').reason, 'prefix-merge');
+    assert.match(plans.get('merge:outer').warning, /当前显隐合成.*隐藏子层不生成独立节点/);
+});
+
+test('descendant manual strategies and renames cancel only automatic prefix boundaries', () => {
+    for (const override of [
+        { action: 'generate', explicit: true },
+        { action: 'ignore', explicit: true },
+        { name: 'custom_badge', explicit: false },
+    ]) {
+        const root = prefixResourceFixture();
+        const decisions = resolveAutomaticMergeDecisions([root], decisionsFor([root], {
+            'merge:inner': override,
+        }));
+        const plans = compileImportPlan([root], decisions);
+        assert.equal(decisions.get('merge:outer').action, 'generate');
+        assert.equal(plans.get('merge:outer').reason, 'prefix-merge-override-conflict');
+        assert.match(plans.get('merge:outer').warning, /手动策略或命名/);
+        assert.deepEqual(decisions.get('merge:inner'), {
+            ...decisionsFor([root]).get('merge:inner'), ...override,
+        });
+    }
+
+    const root = prefixResourceFixture();
+    const explicitParent = resolveAutomaticMergeDecisions([root], decisionsFor([root], {
+        'merge:outer': { action: 'render', explicit: true },
+        'merge:inner': { action: 'generate', explicit: true },
+    }));
+    assert.equal(explicitParent.get('merge:outer').action, 'render');
+    assert.equal(compileImportPlan([root], explicitParent).get('merge:outer').reason, 'user-override');
+});
+
+test('keeps independent inner slices and preserves own slicing before the prefix convention', () => {
+    const root = prefixResourceFixture();
+    root.children[0].children[0] = node(slicedChild('merge:inner-slice', 'common_bg',
+        { x: 91, y: 101, width: 30, height: 30 }));
+    const decisions = resolveAutomaticMergeDecisions([root], decisionsFor([root], {
+        'merge:inner-slice': { nineSlice: true },
+    }));
+    const plans = compileImportPlan([root], decisions);
+    assert.equal(decisions.get('merge:outer').action, 'generate');
+    assert.equal(decisions.get('merge:inner-slice').nineSlice, true);
+    assert.equal(plans.get('merge:outer').reason, 'prefix-merge-slice-conflict');
+    assert.match(plans.get('merge:outer').warning, /切片能力/);
+
+    const ownSlice = resolveAutomaticMergeDecisions([root], decisionsFor([root], {
+        'merge:outer': { nineSlice: true },
+        'merge:inner-slice': { nineSlice: true },
+    }));
+    assert.equal(ownSlice.get('merge:outer').nineSlice, true);
+    assert.equal(compileImportPlan([root], ownSlice).get('merge:outer').reason, 'slice-resource');
+});
+
+test('keeps a selected prefix root structural unless its strategy is explicitly changed', () => {
+    const root = prefixResourceFixture();
+    root.name = 'img_selected_frame';
+    const implicit = resolveAutomaticMergeDecisions([root], decisionsFor([root]));
+    assert.equal(implicit.get(root.id).action, 'generate');
+    assert.equal(compileImportPlan([root], implicit).get(root.id).reason, 'root-structure');
+
+    const explicit = resolveAutomaticMergeDecisions([root], decisionsFor([root], {
+        [root.id]: { action: 'render', explicit: true },
+    }));
+    assert.equal(explicit.get(root.id).action, 'render');
+});
+
+test('preserves resolved mask composites and explicitly sliced wrappers across prefix planning', () => {
+    const mask = node({
+        id: 'prefix:mask-root', name: 'img_masked',
+        children: [{
+            ...slicedChild('prefix:mask', 'common_bg'),
+            isMask: true, maskType: 'ALPHA',
+        }],
+    });
+    const prepared = decisionsFor([mask], {
+        [mask.id]: { action: 'render' },
+        'prefix:mask': { nineSlice: true },
+    });
+    assert.equal(resolveAutomaticMergeDecisions([mask], prepared).get(mask.id).action, 'render');
+
+    const wrapper = node({
+        id: 'prefix:own-wrapper', name: 'image_sliced',
+        children: [slicedChild('prefix:own-child', 'common_bg')],
+    });
+    const plan = planForChild(wrapper, {
+        [wrapper.id]: { action: 'generate', nineSlice: true },
+    });
+    assert.equal(plan.reason, 'slice-resource');
+    assert.equal(plan.fold, undefined, 'a slice requested on the wrapper uses its own asset');
 });

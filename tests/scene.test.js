@@ -4252,3 +4252,35 @@ test('rejects a user-replaced nested tiled Sprite slot before any mutation', asy
     assert.deepEqual(manualTransform.contentSize, { width: 13, height: 17 });
     assert.equal(manualSprite._spriteFrame, 'manual-frame');
 });
+
+test('Sprite tint belongs to each instance, preserves SLICED/CUSTOM and resets when removed', async () => {
+    const shared = { uuid: 'existing-sliced-frame', url: 'db://assets/shared.png', sliced: true };
+    const root = makeSpec({ name: 'TintRoot', children: [
+        makeSpec({ figmaId: 'tint-a', name: 'TintA', action: 'render', kind: 'sprite', opacity: 0.4,
+            sprite: { ...shared, tint: { r: 208 / 255, g: 157 / 255, b: 105 / 255, a: 0.5 } } }),
+        makeSpec({ figmaId: 'tint-b', name: 'TintB', action: 'render', kind: 'sprite',
+            sprite: { ...shared, tint: { r: 1, g: 0, b: 0, a: 1 } } }),
+    ] });
+    const environment = await importWithFakeCocos(root);
+    const imported = environment.canvas.getChildByName('TintRoot');
+    const a = imported.getChildByName('TintA'), b = imported.getChildByName('TintB');
+    const first = a.getComponent(Sprite), second = b.getComponent(Sprite);
+    assert.deepEqual({ ...first.color }, { r: 208, g: 157, b: 105, a: 128 });
+    assert.deepEqual({ ...second.color }, { r: 255, g: 0, b: 0, a: 255 });
+    assert.equal(a.getComponent(UIOpacity).opacity, 102);
+    assert.equal(first.type, Sprite.Type.SLICED);
+    assert.equal(first.sizeMode, Sprite.SizeMode.CUSTOM);
+    assert.equal(shared.tint, undefined);
+    root.children[0].sprite = shared;
+    const originalLoad = Module._load;
+    Module._load = function load(request, parent, isMain) {
+        return request === 'cc' ? environment.cc : originalLoad.call(this, request, parent, isMain);
+    };
+    try {
+        await methods.importDocument({ packageName: 'figma-importer-cocos', fileKey: 'file-key', rootName: 'Test',
+            rootFrame: root.frame, scale: 1, updateExisting: true, existingMap: environment.result.nodeMap, roots: [root] });
+    } finally { Module._load = originalLoad; }
+    assert.equal(a.getComponent(Sprite), first);
+    assert.deepEqual({ ...first.color }, { r: 255, g: 255, b: 255, a: 255 });
+    assert.deepEqual({ ...second.color }, { r: 255, g: 0, b: 0, a: 255 });
+});

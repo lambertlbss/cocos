@@ -6,6 +6,7 @@ const {
     blocksDescendants,
     isTerminalAction,
     kindForImportAction,
+    isMergedResourceName,
     normalizeImportAction,
 } = require('../dist/import-actions');
 const {
@@ -53,6 +54,15 @@ test('normalizes legacy merge and svg actions to the single PNG render action', 
     assert.equal(kindForImportAction('scrollView', 'render'), 'sprite');
     assert.equal(kindForImportAction('layout', 'render'), 'sprite');
     assert.equal(kindForImportAction('button', 'render'), 'button');
+});
+
+test('recognizes only icon_ and img_ as default merge resource prefixes', () => {
+    for (const name of ['icon_reward', 'IMG_reward', ' img_背景 ']) {
+        assert.equal(isMergedResourceName(name), true, name);
+    }
+    for (const name of ['image_reward', 'bg_reward', 'my_icon_reward', 'icon', 'img_', 'img-reward']) {
+        assert.equal(isMergedResourceName(name), false, name);
+    }
 });
 
 test('keeps the node-list scroll position while strategy changes rerender the tree', () => {
@@ -248,4 +258,45 @@ test('restores nested PNG boundaries and keeps their descendants suppressed', ()
     assert.equal(ignored.actions.get(outer.id), 'ignore');
     assert.equal(ignored.actions.get(inner.id), 'ignore');
     assert.equal(ignored.actions.get(leaf.id), 'ignore');
+});
+
+test('panel default prefix merges match descendant override and slice protections', () => {
+    const leaf = treeNode({ id: 'prefix:leaf', name: 'vector', type: 'VECTOR', action: 'render' });
+    const inner = treeNode({
+        id: 'prefix:inner', name: 'icon_badge', action: 'render', renderSubtree: true,
+        reason: 'prefix-merge', children: [leaf],
+    });
+    const outer = treeNode({
+        id: 'prefix:outer', name: 'img_card', action: 'render', renderSubtree: true,
+        reason: 'prefix-merge', children: [inner],
+    });
+    const preferred = new Map([[outer.id, 'render'], [inner.id, 'generate'], [leaf.id, 'render']]);
+    const automatic = resolveEffectiveActions([outer], preferred);
+    assert.equal(automatic.actions.get(inner.id), 'ignore');
+    assert.equal(automatic.actions.get(leaf.id), 'ignore');
+
+    const manualChild = resolveEffectiveActions([outer], preferred, new Set(), new Set([inner.id]));
+    assert.equal(manualChild.actions.get(outer.id), 'generate');
+    assert.equal(manualChild.actions.get(inner.id), 'generate');
+    assert.equal(manualChild.actions.get(leaf.id), 'render');
+    assert.equal(manualChild.suppressed.size, 0);
+
+    const renamedChild = resolveEffectiveActions([outer], preferred, new Set(), new Set(), new Set([inner.id]));
+    assert.equal(renamedChild.actions.get(outer.id), 'generate');
+    assert.equal(renamedChild.actions.get(inner.id), 'generate');
+    const renamedParent = resolveEffectiveActions([outer], preferred, new Set(), new Set([inner.id]), new Set([outer.id]));
+    assert.equal(renamedParent.actions.get(outer.id), 'generate', 'renaming the parent does not override its strategy');
+
+    const manualParent = resolveEffectiveActions([outer], preferred, new Set(), new Set([outer.id, inner.id]));
+    assert.equal(manualParent.actions.get(outer.id), 'render');
+    assert.equal(manualParent.actions.get(inner.id), 'ignore');
+
+    const slicedChild = resolveEffectiveActions([outer], preferred, new Set([inner.id]));
+    assert.equal(slicedChild.actions.get(outer.id), 'generate');
+    assert.equal(slicedChild.actions.get(inner.id), 'render');
+    assert.equal(slicedChild.actions.get(leaf.id), 'ignore');
+
+    const ownSlice = resolveEffectiveActions([outer], preferred, new Set([outer.id, inner.id]));
+    assert.equal(ownSlice.actions.get(outer.id), 'render');
+    assert.equal(ownSlice.actions.get(inner.id), 'ignore');
 });

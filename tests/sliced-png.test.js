@@ -139,6 +139,36 @@ test('detail on the top edge prevents horizontal compaction, not only center det
     assertReconstructs(contents, result);
 });
 
+test('a white motif in the fixed left cap is preserved without copying into the stretch band', () => {
+    const analysis = { mode: 'horizontal', borders: { left: 20, right: 14, top: 0, bottom: 0 } };
+    const contents = encode(80, 28, (x, y) => {
+        const motif = x >= 6 && x <= 14 && y >= 7 && y <= 20
+            && (x <= 10 || y >= 12);
+        return motif ? [255, 255, 255, 255] : [20, 110, 240, 255];
+    });
+    const result = compactSlicePng(contents, node(80, 28), analysis, 1);
+    assert.equal(result.optimization.status, 'compacted');
+    assert.equal(result.optimization.width, 36);
+    assertReconstructs(contents, result);
+    const image = PNG.sync.read(result.contents);
+    for (const width of [80, 160, 240]) {
+        for (let y = 0; y < image.height; y++) for (let x = 0; x < width; x++) {
+            const sample = pixel(image, restoreAxis(x, width, image.width, 20, 14), y);
+            if (x >= 20) assert.notEqual(sample[0], 255, `unexpected white at ${x},${y}, width ${width}`);
+        }
+    }
+});
+
+test('a white motif crossing the inset is never removed to make a smaller stretch band', () => {
+    const analysis = { mode: 'horizontal', borders: { left: 8, right: 8, top: 0, bottom: 0 } };
+    const contents = encode(80, 28, (x, y) => x >= 6 && x <= 14 && y >= 7 && y <= 20
+        ? [255, 255, 255, 255] : [20, 110, 240, 255]);
+    const result = compactSlicePng(contents, node(80, 28), analysis, 1);
+    assert.equal(result.contents, contents);
+    assert.equal(result.optimization.status, 'unchanged');
+    assert.equal(result.sliceFallback, undefined, 'valid insets remain available; compaction cannot repair the design');
+});
+
 test('color gamma metadata is preserved rather than silently changing interpretation', () => {
     const contents = encode(30, 20, () => [70, 80, 90, 160], 0.45455);
     const result = compactSlicePng(contents, node(), nine, 1);
@@ -196,6 +226,44 @@ test('writer uses the compact PNG and correct pixel borders without changing ass
     assert.deepEqual(calls[0].borders, { left: 6, right: 8, top: 4, bottom: 6 });
     assert.equal(result.asset.uuid, 'same-frame');
     assert.equal(result.optimization.status, 'compacted');
+});
+
+test('a mismatched export canvas clears stale insets instead of writing Figma-space borders', async () => {
+    const contents = fixture();
+    const calls = [];
+    const result = await writeSlicedPng({ async write(url, data, borders) {
+        calls.push({ url, data, borders });
+        return { uuid: 'same-frame', url, sliced: true };
+    } }, 'db://assets/panel.png', contents, node(40, 20), nine, 1);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].data, contents);
+    assert.deepEqual(calls[0].borders, { left: 0, right: 0, top: 0, bottom: 0 });
+    assert.equal(result.asset.uuid, 'same-frame');
+    assert.equal(result.asset.sliced, false);
+    assert.match(result.asset.sliceFallback, /尺寸与切片画布不匹配/);
+    assert.equal(result.optimization.status, 'skipped');
+});
+
+test('invalid scale and invalid pixel insets never reach SpriteFrame metadata', async () => {
+    const contents = fixture();
+    for (const [analysis, scale] of [[nine, NaN], [nine, Infinity],
+        [{ ...nine, borders: { ...nine.borders, left: NaN } }, 1],
+        [{ ...nine, borders: { ...nine.borders, right: 30 } }, 1]]) {
+        const calls = [];
+        const result = await writeSlicedPng({ async write(url, data, borders) {
+            calls.push({ data, borders });
+            return { uuid: 'same-frame', url, sliced: false };
+        } }, 'db://assets/panel.png', contents, node(), analysis, scale);
+        assert.equal(calls[0].data, contents);
+        assert.deepEqual(calls[0].borders, { left: 0, right: 0, top: 0, bottom: 0 });
+        assert.equal(result.asset.sliced, false);
+        assert.ok(result.asset.sliceFallback);
+    }
+});
+
+test('full-image fallback still propagates failed writes', async () => {
+    await assert.rejects(writeSlicedPng({ async write() { throw new Error('full PNG save failed'); } },
+        'db://assets/panel.png', fixture(), node(40, 20), nine, 1), /full PNG save failed/);
 });
 
 for (const retrySucceeds of [false, true]) {
@@ -256,7 +324,9 @@ test('remote import applies compaction after caching original bytes and only for
     const end = main.indexOf('const processRawImages =', start);
     const flow = main.substring(start, end);
     assert.match(flow, /analyzeSliceGrid\(node\)/);
-    assert.ok(flow.indexOf('cache.write(item.key, contents)') < flow.indexOf('writeSlicedPng(writer'));
+    const cacheWrite = flow.indexOf('cache.write(item.key, contents)');
+    const sliceWrite = flow.indexOf('await writeSlicedPng(');
+    assert.ok(cacheWrite >= 0 && sliceWrite > cacheWrite);
     assert.match(flow, /if \(item.sliceAnalysis\)/);
-    assert.match(flow, /else\s*\{\s*asset = await writer.write\(item.url, contents, item.borders\)/);
+    assert.match(flow, /else\s*\{\s*asset = await writer.resolve\(item.url, contents,/);
 });

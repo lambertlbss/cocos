@@ -2,7 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { join } = require('node:path');
+const { join, resolve, relative, isAbsolute } = require('node:path');
+const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { buildAssets } = require('../dist/main');
 const { parseNode } = require('../dist/figma/parser');
@@ -24,8 +25,12 @@ function sliceNode(mode = 'nine') {
 }
 
 function setup(t, options = {}) {
-    const project = join(tmpdir(), 'figma-local-slice-reuse-virtual');
+    const project = mkdtempSync(join(tmpdir(), 'figma-local-slice-reuse-'));
     const folder = join(project, 'assets', 'shared');
+    const outputFolder = join(project, 'assets', DEFAULT_SETTINGS.assetFolder);
+    mkdirSync(folder, { recursive: true });
+    mkdirSync(outputFolder, { recursive: true });
+    mkdirSync(join(project, 'temp'), { recursive: true });
     const extension = options.extension ?? 'png';
     const localUrl = `db://assets/shared/Panel.${extension}`;
     const outputUrl = `db://assets/figma-importer/Panel.${extension}`;
@@ -33,21 +38,28 @@ function setup(t, options = {}) {
         sliced: options.sliced !== false };
     const originalEditor = global.Editor;
     global.Editor = { Project: { path: project, tmpDir: join(project, 'temp') }, Message: { send() {} } };
-    t.after(() => { global.Editor = originalEditor; });
+    t.after(() => {
+        global.Editor = originalEditor;
+        const suffix = relative(resolve(tmpdir()), resolve(project));
+        assert.ok(suffix && !suffix.startsWith('..') && !isAbsolute(suffix), 'cleanup stays inside the temporary directory');
+        rmSync(project, { recursive: true, force: true });
+    });
+    writeFileSync(join(options.outputOnly ? outputFolder : folder, `Panel.${extension}`),
+        Buffer.from('preexisting bitmap: must never be compacted'));
     const bindings = [];
     const lookups = [];
+    const localAssets = new Map([[asset.url, asset]]);
     t.mock.method(AssetWriter.prototype, 'initialize', async () => {});
     t.mock.method(LocalAssetCache.prototype, 'initialize', async () => {});
-    t.mock.method(LocalResourceLibrary.prototype, 'initialize', async () => {});
-    t.mock.method(LocalResourceLibrary.prototype, 'find', async (name, format) => {
-        assert.equal(name, 'Panel', 'match the original name, not the Cocos rename');
-        assert.equal(format, 'png');
-        return options.outputOnly ? null : { path: join(folder, `Panel.${extension}`), contents: Buffer.from('not a PNG: must never be compacted') };
+    t.mock.method(AssetWriter.prototype, 'existingForSource', async (sourceKey) => {
+        assert.deepEqual(JSON.parse(sourceKey).slice(0, 2), ['file', 'panel']);
+        return null;
     });
+    t.mock.method(AssetWriter.prototype, 'resolve', async () => assert.fail('must not create or rewrite an image'));
     t.mock.method(AssetWriter.prototype, 'existing', async (url, tiled) => {
         assert.equal(tiled, undefined, 'do not rewrite local metadata');
         lookups.push(url);
-        if (url === asset.url && !options.unready) return asset;
+        if (localAssets.has(url) && !options.unready) return localAssets.get(url);
         if (options.outputOnly) return null;
         assert.fail(`unexpected fallback lookup: ${url}`);
     });
@@ -58,10 +70,11 @@ function setup(t, options = {}) {
     if (options.invalidGrid) node.children = [];
     const decisions = new Map([['panel', { action: 'render', kind: 'sprite', nineSlice: true,
         explicit: true, name: 'RenamedPanel' }]]);
-    const run = () => buildAssets({ fileKey: 'file', roots: [node] }, decisions, {
+    const run = (settings = {}) => buildAssets({ fileKey: 'file', roots: [node] }, decisions, {
         ...DEFAULT_SETTINGS, scale: 2, refreshAssets: Boolean(options.refresh), localResourceFolders: [folder],
+        ...settings,
     }, { bind(...args) { bindings.push(args); }, beforeWrite() { assert.fail('must not record generated assets'); } });
-    return { run, asset, bindings, lookups };
+    return { run, asset, bindings, lookups, folder, outputFolder, project, localAssets };
 }
 
 for (const extension of ['jpg', 'JPEG']) test(`local ${extension} reuses original UUID despite Cocos rename and refresh`, async (t) => {
@@ -111,6 +124,39 @@ test('existing output slice resource is reused on repeated import without refres
     const result = await f.run();
     assert.equal(result.assets.get('panel'), f.asset);
     assert.equal(f.bindings[0][2], 'existing');
+    assert.deepEqual(f.lookups, [f.asset.url], 'an output file present before this import is found by its original name');
+});
+
+test('same-name files in one local library retain root-before-nested priority even with different pixels', async (t) => {
+    const f = setup(t);
+    const nested = join(f.folder, 'nested');
+    mkdirSync(nested);
+    writeFileSync(join(nested, 'Panel.png'), Buffer.from('different nested bitmap: lower original priority'));
+    const lower = { uuid: 'lower-nested-slice', url: 'db://assets/shared/nested/Panel.png', sliced: true };
+    f.localAssets.set(lower.url, lower);
+
+    const result = await f.run();
+    assert.equal(result.assets.get('panel'), f.asset);
+    assert.deepEqual(f.lookups, [f.asset.url]);
+});
+
+test('declared local directory order wins over different same-name candidates and an existing output snapshot', async (t) => {
+    const f = setup(t);
+    const secondFolder = join(f.project, 'assets', 'second-shared');
+    mkdirSync(secondFolder);
+    writeFileSync(join(secondFolder, 'Panel.png'), Buffer.from('second library bitmap: original ordering decides'));
+    const second = { uuid: 'second-library-slice', url: 'db://assets/second-shared/Panel.png', sliced: true };
+    f.localAssets.set(second.url, second);
+    writeFileSync(join(f.outputFolder, 'Panel.png'), Buffer.from('lower-priority preexisting output bitmap'));
+    const output = { uuid: 'existing-output-slice', url: 'db://assets/figma-importer/Panel.png', sliced: true };
+    f.localAssets.set(output.url, output);
+
+    const firstOrder = await f.run({ localResourceFolders: [f.folder, secondFolder] });
+    const secondOrder = await f.run({ localResourceFolders: [secondFolder, f.folder] });
+    assert.equal(firstOrder.assets.get('panel'), f.asset);
+    assert.equal(secondOrder.assets.get('panel'), second);
+    assert.deepEqual(f.lookups, [f.asset.url, second.url]);
+    assert.ok(f.bindings.every((binding) => binding[2] === 'local'));
 });
 
 test('unregistered local SpriteFrame reports an error rather than creating a duplicate', async (t) => {
@@ -131,8 +177,8 @@ test('without a local or existing asset, cached full PNG still follows slice gen
     t.mock.method(AssetWriter.prototype, 'existing', async () => null);
     t.mock.method(LocalAssetCache.prototype, 'read', async () => contents);
     const writes = [];
-    t.mock.method(AssetWriter.prototype, 'write', async (url, bytes, borders) => {
-        writes.push({ url, bytes, borders });
+    t.mock.method(AssetWriter.prototype, 'resolve', async (url, bytes, options) => {
+        writes.push({ url, bytes, borders: options.borders });
         return { uuid: 'new-sliced-frame', url, sliced: true };
     });
     const result = await f.run();

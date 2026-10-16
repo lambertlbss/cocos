@@ -150,6 +150,17 @@ test('journal groups actual shared consumers and distinguishes overwrite from ne
     assert.deepEqual(f.report.assets[0].nodeNames, ['root']);
     assert.equal(f.calls.some((call) => ['delete-asset', 'save-scene'].includes(call[1])), false);
 });
+
+test('import report retains explicit reuse, merge, tint and fallback reasons', async (t) => {
+    const f = await fixture(t);
+    for (const action of ['reused', 'created', 'merged', 'tinted', 'fallback']) {
+        f.recorder.note(action, 'Example', `${action} reason`, f.url);
+    }
+    const report = await f.service.complete(f.recorder,
+        { fileName: 'Test', roots: [], nodeById: new Map() }, f.report.before, f.report.after);
+    assert.deepEqual(report.decisions.map((item) => item.action), ['reused', 'created', 'merged', 'tinted', 'fallback']);
+    assert.ok(report.decisions.every((item) => item.reason && item.name === 'Example' && item.url === f.url));
+});
 test('confirm without deselection performs no scene or asset mutation', async (t) => {
     const f = await fixture(t); f.calls.length = 0;
     await f.service.apply(f.report.id, []);

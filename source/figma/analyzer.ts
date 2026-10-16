@@ -1,5 +1,6 @@
 import type { FigmaNode, ImportAction, NodeKind, TreeNodeDto } from '../types';
 import { analyzeSliceGrid } from './slicing';
+import { isMergedResourceName } from '../import-actions';
 
 const CONTAINER_TYPES = new Set([
     'DOCUMENT',
@@ -128,6 +129,16 @@ function framesMatch(left: FigmaNode, right: FigmaNode): boolean {
  * the source IMAGE paint is visibility-independent and preserves its pixels.
  */
 export function plainImageSourceRef(node: FigmaNode): string | undefined {
+    const transform = node.relativeTransform;
+    if (Math.abs(node.rotation) > 0.0001 || node.clipsContent
+        || (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode))
+        || (transform && (transform.length !== 2
+            || ![transform[0]?.[0], transform[0]?.[1], transform[1]?.[0], transform[1]?.[1]].every(Number.isFinite)
+            || Math.abs(transform[0]?.[0] - 1) > 0.0001 || Math.abs(transform[0]?.[1]) > 0.0001
+            || Math.abs(transform[1]?.[0]) > 0.0001 || Math.abs(transform[1]?.[1] - 1) > 0.0001))
+        || [node.cornerRadius ?? 0, ...(node.rectangleCornerRadii ?? [])].some((radius) => radius > 0)) {
+        return undefined;
+    }
     const visibleFills = node.fills.filter((fill) =>
         fill.visible !== false && (fill.opacity ?? 1) > 0);
     const noOwnVisual = visibleFills.length === 0 && !hasVisibleStrokeOrEffect(node);
@@ -141,7 +152,9 @@ export function plainImageSourceRef(node: FigmaNode): string | undefined {
         return fill.type === 'IMAGE'
             && Boolean(fill.imageRef)
             && ['FILL', 'FIT'].includes(mode)
-            && (fill.opacity ?? 1) >= 0.999
+            && fill.imageTransform === undefined
+            && (!fill.filters || Object.values(fill.filters).every((value) => value === 0))
+            && (fill.opacity ?? 1) === 1
             && Math.abs(fill.rotation ?? 0) <= 1e-6
             && (!fill.blendMode || ['NORMAL', 'PASS_THROUGH'].includes(fill.blendMode))
             && radii.every((radius) => radius <= 1e-6)
@@ -156,7 +169,8 @@ export function plainImageSourceRef(node: FigmaNode): string | undefined {
         return undefined;
     }
     const child = node.children[0];
-    return framesMatch(node, child) ? plainImageSourceRef(child) : undefined;
+    return child.visible !== false && !child.isMask && framesMatch(node, child)
+        ? plainImageSourceRef(child) : undefined;
 }
 
 /**
@@ -285,7 +299,20 @@ export function inferKind(node: FigmaNode): NodeKind {
     return 'sprite';
 }
 
-export function inferAction(node: FigmaNode): ImportAction {
+export function hasIndependentSliceDescendant(node: FigmaNode): boolean {
+    return node.children.some((child) => isNamedSliceGroup(child)
+        || isPatchCandidate(child)
+        || hasIndependentSliceDescendant(child));
+}
+
+export function shouldMergeResourceNode(node: FigmaNode, isRoot = false): boolean {
+    return !isRoot
+        && node.type !== 'TEXT'
+        && isMergedResourceName(node.name)
+        && !hasIndependentSliceDescendant(node);
+}
+
+export function inferAction(node: FigmaNode, isRoot = false): ImportAction {
     if (node.type === 'TEXT') {
         // Text remains an editable Cocos Label. Even when Figma reports fills,
         // shadows, export settings, or other paint data, exporting a bitmap
@@ -294,6 +321,9 @@ export function inferAction(node: FigmaNode): ImportAction {
         return 'generate';
     }
     if (hasManualExport(node) || isNamedSliceGroup(node)) {
+        return 'render';
+    }
+    if (shouldMergeResourceNode(node, isRoot)) {
         return 'render';
     }
     if (CONTAINER_TYPES.has(node.type)) {
@@ -383,6 +413,7 @@ export function shouldRenderMessySubtree(node: FigmaNode, isRoot: boolean): bool
         || !isStructuredNodeName(node.name)
         || hasManualExport(node)
         || isNamedSliceGroup(node)
+        || (isMergedResourceName(node.name) && hasIndependentSliceDescendant(node))
         || isRuntimeRoleBoundary(node)) {
         return false;
     }
@@ -408,6 +439,8 @@ function warningFor(
     node: FigmaNode,
     renderManualExportSubtree: boolean,
     renderMessySubtree: boolean,
+    mergeResourceSubtree: boolean,
+    isRoot: boolean,
 ): string | undefined {
     const inactive = node.visible
         ? undefined
@@ -425,6 +458,17 @@ function warningFor(
             ? '检测到有效的 3/9 个 Rectangle 连续切片，将按 PNG 整层导入、自动启用切片并优先复用同名资源'
             : '检测到 3/9 个 Rectangle 命名节点，但几何未形成连续切片；将按 PNG 整层导入，不自动启用切片');
     }
+    if (!isRoot && node.type !== 'TEXT' && isMergedResourceName(node.name)) {
+        if (isPatchCandidate(node)) {
+            return withInactive('检测到有效三/九宫切片，切片策略优先于前缀合并');
+        }
+        if (hasIndependentSliceDescendant(node)) {
+            return withInactive('前缀整层合并已停用：内部存在独立三/九宫资源，优先保留切片能力');
+        }
+        if (mergeResourceSubtree) {
+            return withInactive('icon_/img_ 前缀按 PNG 整层合并，采用当前显隐合成；隐藏子层不生成独立节点');
+        }
+    }
     if (node.blendMode && !['NORMAL', 'PASS_THROUGH'].includes(node.blendMode)) {
         return withInactive(`混合模式 ${node.blendMode} 将近似处理`);
     }
@@ -441,13 +485,14 @@ function warningFor(
 function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
     const frame = node.absoluteBoundingBox;
     const sliceAnalysis = analyzeSliceGrid(node);
-    const inferredAction = inferAction(node);
+    const inferredAction = inferAction(node, isRoot);
     const renderManualExportSubtree = inferredAction !== 'ignore'
         && node.type !== 'TEXT'
         && hasManualExport(node);
     const renderMessySubtree = shouldRenderMessySubtree(node, isRoot);
+    const mergeResourceSubtree = shouldMergeResourceNode(node, isRoot);
     const renderSubtree = inferredAction !== 'ignore'
-        && (renderManualExportSubtree || isNamedSliceGroup(node) || renderMessySubtree);
+        && (renderManualExportSubtree || isNamedSliceGroup(node) || renderMessySubtree || mergeResourceSubtree);
     return {
         id: node.id,
         name: node.name,
@@ -460,7 +505,7 @@ function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
         renderSubtree,
         patchCandidate: Boolean(sliceAnalysis),
         sliceMode: sliceAnalysis?.mode,
-        warning: warningFor(node, renderManualExportSubtree, renderMessySubtree),
+        warning: warningFor(node, renderManualExportSubtree, renderMessySubtree, mergeResourceSubtree, isRoot),
         children: node.children.map((child) => toTree(child, false)),
     };
 }

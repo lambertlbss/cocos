@@ -71,3 +71,29 @@ test('uses the first deterministic match when folders contain duplicate names', 
         assert.deepEqual(match?.contents, Buffer.from('a'));
     });
 });
+
+test('findAll exposes different same-name candidates including hidden and library/temp folders', async () => {
+    await withLibrary(async (root) => {
+        for (const folder of ['.hidden', 'library', 'temp']) {
+            await mkdir(join(root, folder));
+            await writeFile(join(root, folder, 'icon.png'), folder);
+        }
+        const library = new LocalResourceLibrary(root);
+        const [first, second] = await Promise.all([library.findAll('icon', 'png'), library.findAll('ICON', 'png')]);
+        assert.equal(first.length, 3);
+        assert.equal(second.length, 3);
+        assert.equal(new Set(first.map((item) => item.path)).size, 3, 'concurrent initialization must not duplicate paths');
+        assert.equal(new Set(first.map((item) => item.contents.toString())).size, 3);
+    });
+});
+
+test('failed index initialization can retry without retaining a partial index', async () => {
+    await withLibrary(async (root) => {
+        const selected = join(root, 'not-created');
+        const library = new LocalResourceLibrary(selected);
+        await assert.rejects(library.initialize(), { code: 'ENOENT' });
+        await mkdir(selected);
+        await writeFile(join(selected, 'icon.png'), 'pixels');
+        assert.equal((await library.findAll('icon', 'png')).length, 1);
+    });
+});

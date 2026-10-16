@@ -15,7 +15,9 @@ import {
     inferAction,
     inferKind,
     isNamedSliceGroup,
+    isPatchCandidate,
 } from './analyzer';
+import { isMergedResourceName } from '../import-actions';
 
 const CONTAINER_TYPES = new Set([
     'DOCUMENT',
@@ -188,6 +190,65 @@ function subtreeHasExplicitConflict(
         || node.children.some((child) => subtreeHasExplicitConflict(child, decisions));
 }
 
+function subtreeHasSliceBoundary(
+    node: FigmaNode,
+    decisions: ReadonlyMap<string, ImportDecision>,
+): boolean {
+    return Boolean(resolvedDecision(node, decisions).nineSlice)
+        || isNamedSliceGroup(node)
+        || isPatchCandidate(node)
+        || node.children.some((child) => subtreeHasSliceBoundary(child, decisions));
+}
+
+function prefixMergeConflict(
+    node: FigmaNode,
+    decisions: ReadonlyMap<string, ImportDecision>,
+): 'prefix-merge-slice-conflict' | 'prefix-merge-override-conflict' | undefined {
+    if (node.children.some((child) => subtreeHasExplicitConflict(child, decisions))) {
+        return 'prefix-merge-override-conflict';
+    }
+    return node.children.some((child) => subtreeHasSliceBoundary(child, decisions))
+        ? 'prefix-merge-slice-conflict'
+        : undefined;
+}
+
+/**
+ * Resolve automatic resource boundaries before collecting assets and building
+ * scene specs. Descendant overrides and independent slices must never be lost
+ * to the naming default. The input map and Figma nodes remain untouched.
+ */
+export function resolveAutomaticMergeDecisions(
+    roots: FigmaNode[],
+    decisions: ReadonlyMap<string, ImportDecision>,
+): Map<string, ImportDecision> {
+    const result = new Map(decisions);
+    const visit = (node: FigmaNode, isRoot: boolean): void => {
+        const decision = resolvedDecision(node, result);
+        if (node.type !== 'TEXT'
+            && isMergedResourceName(node.name)
+            && !decision.explicit
+            && decision.action !== 'ignore'
+            && decision.action !== 'transform'
+            // Real mask groups have already been resolved by the mask planner
+            // to either a safe base+tint or a whole composite fallback.
+            && !node.children.some((child) => child.isMask)
+            && !decision.nineSlice
+            && !hasManualExport(node)
+            && !isNamedSliceGroup(node)
+            && !isPatchCandidate(node)) {
+            result.set(node.id, {
+                ...decision,
+                action: isRoot || prefixMergeConflict(node, result) ? 'generate' : 'render',
+            });
+        } else if (!result.has(node.id)) {
+            result.set(node.id, decision);
+        }
+        node.children.forEach((child) => visit(child, false));
+    };
+    roots.forEach((root) => visit(root, true));
+    return result;
+}
+
 function baseReason(
     node: FigmaNode,
     role: NodeSemanticRole,
@@ -198,8 +259,11 @@ function baseReason(
     if (decision.action === 'ignore') return 'ignored';
     if (isRoot) return 'root-structure';
     if (node.type === 'TEXT') return 'editable-text';
+    if (decision.nineSlice || isNamedSliceGroup(node) || isPatchCandidate(node)) return 'slice-resource';
     if (hasManualExport(node)) return 'manual-export';
-    if (decision.nineSlice || isNamedSliceGroup(node)) return 'slice-resource';
+    if (isMergedResourceName(node.name)) {
+        return decision.action === 'render' ? 'prefix-merge' : 'default-generate';
+    }
     if (['panel', 'list', 'layout', 'button', 'view', 'content'].includes(role)) {
         return 'semantic-container';
     }
@@ -235,6 +299,9 @@ function visualFoldForNode(
         || (role === 'button' && decision.kind === 'button')
     );
     if (decision.action !== 'generate'
+        || decision.nineSlice
+        || isNamedSliceGroup(node)
+        || isPatchCandidate(node)
         || (decision.explicit && !explicitKindRequestsFold)
         || !isSafeVisualHost(node)) {
         return undefined;
@@ -295,6 +362,7 @@ export function compileImportPlan(
     roots: FigmaNode[],
     decisions: ReadonlyMap<string, ImportDecision>,
 ): Map<string, NodeImportPlan> {
+    decisions = resolveAutomaticMergeDecisions(roots, decisions);
     const plans = new Map<string, NodeImportPlan>();
     const visit = (node: FigmaNode, isRoot: boolean) => {
         const decision = resolvedDecision(node, decisions);
@@ -302,12 +370,30 @@ export function compileImportPlan(
         const children = effectiveChildren(node, decisions);
         const fold = visualFoldForNode(node, role, decision, decisions);
         const emptyTextKind = plannedKindForEmptyTextHost(node, role, decision, children);
+        const prefixConflict = !isRoot
+            && node.type !== 'TEXT'
+            && isMergedResourceName(node.name)
+            && !decision.explicit
+            && decision.action === 'generate'
+            && !decision.nineSlice
+            && !hasManualExport(node)
+            && !isNamedSliceGroup(node)
+            && !isPatchCandidate(node)
+            ? prefixMergeConflict(node, decisions)
+            : undefined;
+        const reason = fold?.reason ?? prefixConflict
+            ?? (emptyTextKind ? 'editable-text' : baseReason(node, role, decision, isRoot));
         plans.set(node.id, {
             nodeId: node.id,
             role,
-            reason: fold?.reason ?? (emptyTextKind ? 'editable-text' : baseReason(node, role, decision, isRoot)),
+            reason,
             kind: fold?.kind ?? emptyTextKind,
             fold: fold?.fold,
+            warning: !fold && prefixConflict
+                ? importPlanReasonText(prefixConflict)
+                : reason === 'prefix-merge'
+                    ? 'icon_/img_ 前缀按 PNG 整层合并，采用当前显隐合成；隐藏子层不生成独立节点'
+                    : undefined,
         });
         node.children.forEach((child) => visit(child, false));
     };
@@ -324,6 +410,9 @@ export function annotateTreeWithImportPlan(
         return {
             ...node,
             reason: plan?.reason,
+            warning: node.warning && plan?.warning && node.warning.includes(plan.warning)
+                ? node.warning
+                : [...new Set([node.warning, plan?.warning].filter(Boolean))].join('；') || undefined,
             fold: plan?.fold?.kind,
             absorbedNodeIds: plan?.fold?.absorbedNodeIds,
             children: annotateTreeWithImportPlan(node.children, plans),
@@ -337,6 +426,9 @@ export function importPlanReasonText(reason: ImportPlanReason | undefined): stri
         case 'root-structure': return '保留为 Prefab 根结构';
         case 'manual-export': return '检测到 Figma Export，按整层资源导入';
         case 'slice-resource': return '识别为三/九宫资源';
+        case 'prefix-merge': return 'icon_/img_ 前缀默认合并为单个资源';
+        case 'prefix-merge-slice-conflict': return '前缀合并已回退：内部存在独立三/九宫资源，保留其结构与切片能力';
+        case 'prefix-merge-override-conflict': return '前缀合并已回退：子层存在手动策略或命名，保留独立子节点';
         case 'semantic-container': return '保留 Cocos 运行时语义容器';
         case 'editable-text': return '保留为可编辑文字';
         case 'single-image-fold': return '单一图片子层提升到父节点';

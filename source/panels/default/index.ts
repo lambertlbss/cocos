@@ -514,6 +514,8 @@ function reconcileActions(): void {
         state.document?.tree ?? [],
         state.preferredActions,
         state.patches,
+        state.explicitIds,
+        state.renamedIds,
     );
     state.actions = effective.actions;
     state.suppressed = effective.suppressed;

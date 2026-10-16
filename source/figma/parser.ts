@@ -97,6 +97,14 @@ function parsePaint(value: unknown): FigmaPaint {
         blendMode: stringValue(input.blendMode) || undefined,
         color: parseColor(input.color),
         imageRef: stringValue(input.imageRef) || undefined,
+        ...(input.imageTransform === undefined ? {} : {
+            imageTransform: arrayValue(input.imageTransform).map((row) =>
+                arrayValue(row).map((value) => numberValue(value, Number.NaN))),
+        }),
+        ...(input.filters === undefined ? {} : {
+            filters: Object.fromEntries(Object.entries(record(input.filters))
+                .map(([key, value]) => [key, numberValue(value, Number.NaN)])),
+        }),
         scaleMode: stringValue(input.scaleMode) || undefined,
         rotation: typeof input.rotation === 'number' ? numberValue(input.rotation) : undefined,
         sourceNodeId: stringValue(input.sourceNodeId) || undefined,
@@ -184,6 +192,9 @@ export function parseNode(value: unknown): FigmaNode | null {
         opacity: Math.max(0, Math.min(1, numberValue(input.opacity, 1))),
         blendMode: stringValue(input.blendMode) || undefined,
         clipsContent: booleanValue(input.clipsContent, false),
+        isMask: booleanValue(input.isMask, false),
+        maskType: stringValue(input.maskType) || undefined,
+        componentId: stringValue(input.componentId) || undefined,
         cornerRadius: typeof input.cornerRadius === 'number' ? numberValue(input.cornerRadius) : undefined,
         rectangleCornerRadii: cornerRadii.length === 4 ? cornerRadii : undefined,
         arcData: Object.keys(arcData).length ? {

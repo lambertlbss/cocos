@@ -30,6 +30,9 @@ export type ImportPlanReason =
     | 'root-structure'
     | 'manual-export'
     | 'slice-resource'
+    | 'prefix-merge'
+    | 'prefix-merge-slice-conflict'
+    | 'prefix-merge-override-conflict'
     | 'semantic-container'
     | 'editable-text'
     | 'single-image-fold'
@@ -66,6 +69,7 @@ export interface NodeImportPlan {
     /** 折叠后父节点实际应使用的 Cocos 类型。 */
     kind?: NodeKind;
     fold?: VisualFoldPlan;
+    warning?: string;
 }
 
 export interface Rect {
@@ -89,6 +93,9 @@ export interface FigmaPaint {
     blendMode?: string;
     color?: FigmaColor;
     imageRef?: string;
+    /** Explicit crop transform; the standard centered FILL/FIT path cannot infer it. */
+    imageTransform?: number[][];
+    filters?: Record<string, number>;
     scaleMode?: string;
     rotation?: number;
     /** Figma PATTERN paint 的平铺源节点。 */
@@ -140,6 +147,10 @@ export interface FigmaNode {
     rotation: number;
     opacity: number;
     blendMode?: string;
+    /** Preserve actual Figma mask semantics; a named group is not mask evidence. */
+    isMask?: boolean;
+    maskType?: string;
+    componentId?: string;
     clipsContent: boolean;
     cornerRadius?: number;
     rectangleCornerRadii?: number[];
@@ -255,6 +266,8 @@ export interface SpriteAssetSpec {
     /** Requested slicing could not be verified; import continues as SIMPLE. */
     sliceFallback?: string;
     tiled?: boolean;
+    /** Per-instance multiply color, only after a white RGB + alpha source is verified. */
+    tint?: FigmaColor;
     /** Legacy payload multiplier. New imports bake tile size into PNG pixels and set this to 1. */
     tileScale?: number;
     /**
