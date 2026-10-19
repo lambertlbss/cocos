@@ -57,9 +57,9 @@ function fixture(t) {
     });
     for (const level of ['log', 'warn', 'error']) t.mock.method(console, level, () => {});
 
-    const exports = [], downloads = [], resolves = [], lookups = [], existing = [], bindings = [], notes = [];
+    const exports = [], downloads = [], writes = [], lookups = [], existing = [], bindings = [], notes = [];
     const exportBytes = new Map(), fillBytes = new Map(), localAssets = new Map();
-    const assetsBySource = new Map();
+    const assetsByName = new Map();
     let fillRequests = 0;
     t.mock.method(AssetWriter.prototype, 'initialize', async () => {});
     t.mock.method(AssetWriter.prototype, 'existingForSource', async (sourceKey, options) => {
@@ -71,17 +71,17 @@ function fixture(t) {
         assert.ok(localAssets.has(url), `only registered local or output snapshot resources may be reused: ${url}`);
         return localAssets.get(url);
     });
-    t.mock.method(AssetWriter.prototype, 'write', async () => assert.fail('pipeline must resolve source identity before writing'));
-    const resolveAsset = async (url, contents, options) => {
-        resolves.push({ url, contents: Buffer.from(contents), options: { ...options } });
-        let asset = assetsBySource.get(options.sourceKey);
+    const writeAsset = async (url, contents, borders) => {
+        writes.push({ url, contents: Buffer.from(contents), borders });
+        let asset = assetsByName.get(url);
         if (!asset) {
-            asset = { uuid: `resolved-${assetsBySource.size + 1}`, url, sliced: false };
-            assetsBySource.set(options.sourceKey, asset);
+            asset = { uuid: `written-${assetsByName.size + 1}`, url, sliced: false };
+            assetsByName.set(url, asset);
         }
         return asset;
     };
-    t.mock.method(AssetWriter.prototype, 'resolve', resolveAsset);
+    t.mock.method(AssetWriter.prototype, 'write', writeAsset);
+    t.mock.method(AssetWriter.prototype, 'resolve', async () => assert.fail('same-name resources must not compare source identity or contents'));
     t.mock.method(TokenVault.prototype, 'get', async () => 'test-token');
     t.mock.method(FigmaClient.prototype, 'getImageUrls', async (fileKey, ids, format, scale) => {
         exports.push({ fileKey, ids: [...ids], format, scale });
@@ -106,12 +106,12 @@ function fixture(t) {
         async beforeWrite() { assert.fail('mock resolver does not mutate the asset database'); },
         note(action, name, reason, url) { notes.push({ action, name, reason, url }); },
     });
-    return { run, localFolder, outputFolder, exportBytes, fillBytes, localAssets, exports, downloads, resolves,
-        lookups, existing, bindings, notes, resolveAsset, fillRequests: () => fillRequests };
+    return { run, localFolder, outputFolder, exportBytes, fillBytes, localAssets, exports, downloads, writes,
+        lookups, existing, bindings, notes, writeAsset, fillRequests: () => fillRequests };
 }
 
 for (const identicalPixels of [false, true]) {
-    test(`same-name rendered nodes retain separate source bindings before pixel resolution (identical pixels: ${identicalPixels})`, async (t) => {
+    test(`same-name rendered nodes export and write only the first node (unused second pixels identical: ${identicalPixels})`, async (t) => {
         const f = fixture(t);
         const a = imageNode('A'), b = imageNode('B');
         // Effects require Figma's complete render path; plain IMAGE uses the
@@ -121,14 +121,11 @@ for (const identicalPixels of [false, true]) {
         f.exportBytes.set(a.id, bitmap(20));
         f.exportBytes.set(b.id, identicalPixels ? f.exportBytes.get(a.id) : bitmap(230));
         const result = await f.run([a, b]);
-        assert.deepEqual(f.exports.flatMap((item) => item.ids), ['A', 'B']);
-        assert.equal(f.downloads.length, 2, 'both source nodes are rendered before any equality decision');
-        assert.equal(f.resolves.length, 2);
-        assert.equal(f.resolves[0].url, f.resolves[1].url, 'legacy same-name target is resolved by content, not grouped early');
-        assert.notEqual(f.resolves[0].options.sourceKey, f.resolves[1].options.sourceKey);
-        assert.deepEqual(f.resolves.map((item) => JSON.parse(item.options.sourceKey).slice(0, 2)),
-            [['integration-file', 'A'], ['integration-file', 'B']]);
-        assert.equal(f.resolves[0].contents.equals(f.resolves[1].contents), identicalPixels);
+        assert.deepEqual(f.exports.flatMap((item) => item.ids), ['A']);
+        assert.equal(f.downloads.length, 1);
+        assert.equal(f.writes.length, 1);
+        assert.deepEqual(f.lookups, [], 'no project-wide source/content validation');
+        assert.equal(result.assets.get(a.id), result.assets.get(b.id));
         assert.equal(result.assets.size, 2);
         assert.deepEqual(f.existing, [], 'no preexisting same-name resource exists in this import');
     });
@@ -148,10 +145,10 @@ for (const hiddenFirst of [true, false]) {
         assert.equal(f.exports.length, 0, 'visible and hidden plain IMAGE both use the original fill source');
         assert.equal(f.fillRequests(), 1);
         assert.equal(f.downloads.length, 1, 'the original fill pixels are cached across the visibility change');
-        assert.equal(f.resolves.length, 2);
-        assert.equal(f.resolves[0].options.sourceKey, f.resolves[1].options.sourceKey);
-        assert.deepEqual(f.resolves[0].contents, f.resolves[1].contents);
-        const cropped = PNG.sync.read(f.resolves[0].contents);
+        assert.equal(f.writes.length, 2);
+        assert.equal(f.writes[0].url, f.writes[1].url);
+        assert.deepEqual(f.writes[0].contents, f.writes[1].contents);
+        const cropped = PNG.sync.read(f.writes[0].contents);
         assert.equal(cropped.width, 20);
         assert.equal(cropped.height, 10);
         for (let offset = 0; offset < cropped.data.length; offset += 4) {
@@ -173,14 +170,14 @@ test('hidden IMAGE restores explicit local resource priority before cache or rem
     const result = await f.run([node]);
     assert.equal(result.assets.get(node.id), asset);
     assert.deepEqual(f.existing, [url]);
-    assert.equal(f.resolves.length, 0);
+    assert.equal(f.writes.length, 0);
     assert.equal(f.exports.length, 0);
     assert.equal(f.fillRequests(), 0);
     assert.deepEqual(f.downloads, []);
     assert.equal(f.bindings[0].source, 'local');
 });
 
-test('same-name generated gradients do not share a source key or overwrite each other before resolution', async (t) => {
+test('same-name generated gradients share the first generated resource without comparing contents', async (t) => {
     const f = fixture(t);
     const gradient = (id, color) => parseNode({ id, name: 'Shared Gradient', type: 'FRAME',
         absoluteBoundingBox: { x: 0, y: 0, width: 20, height: 10 },
@@ -194,26 +191,23 @@ test('same-name generated gradients do not share a source key or overwrite each 
     const decisions = new Map([a, b].map((node) => [node.id,
         { action: 'generate', kind: 'node', nineSlice: false, explicit: true }]));
     const result = await f.run([a, b], decisions);
-    assert.equal(f.resolves.length, 2);
-    assert.equal(f.resolves[0].url, f.resolves[1].url);
-    assert.notEqual(f.resolves[0].options.sourceKey, f.resolves[1].options.sourceKey);
-    assert.ok(!f.resolves[0].contents.equals(f.resolves[1].contents));
-    assert.ok(f.resolves.every((item) => JSON.parse(item.options.sourceKey)[3] === 'gradient-v2'));
-    assert.notEqual(result.assets.get(a.id).uuid, result.assets.get(b.id).uuid);
+    assert.equal(f.writes.length, 1);
+    assert.equal(result.assets.get(a.id), result.assets.get(b.id));
+    assert.deepEqual(f.lookups, []);
     assert.deepEqual(f.downloads, []);
 });
 
 for (const interruption of [false, true]) {
-    test(`a failed import propagates ${interruption ? 'cancellation' : 'a write error'} and retry resolves the cached source without a partial binding`, async (t) => {
+    test(`a failed import propagates ${interruption ? 'cancellation' : 'a write error'} and retry writes the cached source without a partial binding`, async (t) => {
         const f = fixture(t);
         const node = imageNode('retry-node');
         f.fillBytes.set('ref-retry-node', bitmap(140));
         const failure = interruption ? new CancelledError() : new Error('simulated asset write failure');
         let attempts = 0;
-        t.mock.method(AssetWriter.prototype, 'resolve', async (...args) => {
+        t.mock.method(AssetWriter.prototype, 'write', async (...args) => {
             attempts += 1;
             if (attempts === 1) throw failure;
-            return f.resolveAsset(...args);
+            return f.writeAsset(...args);
         });
         await assert.rejects(f.run([node]), (error) => error === failure);
         assert.deepEqual(f.bindings, [], 'failure must not be reported as a bound asset');
@@ -224,7 +218,7 @@ for (const interruption of [false, true]) {
         assert.equal(f.fillRequests(), 1);
         assert.equal(f.bindings.length, 1);
         assert.equal(result.assets.get(node.id), f.bindings[0].asset);
-        assert.deepEqual(JSON.parse(f.resolves[0].options.sourceKey).slice(0, 2), ['integration-file', node.id]);
+        assert.equal(f.writes[0].url, 'db://assets/figma-importer/Shared.png');
     });
 }
 
@@ -268,10 +262,10 @@ test('preexisting same-name resource takes priority over different IMAGE leaf FI
     const a = wrapper('fill-wrapper', 'FILL'), b = wrapper('fit-wrapper', 'FIT');
     const asset = registerLocal(f, 'Shared', { uuid: 'original-wrapper-local', sliced: false });
     const result = await f.run([a, b]);
-    assert.deepEqual(f.existing, [asset.url, asset.url]);
+    assert.deepEqual(f.existing, [asset.url]);
     assert.equal(result.assets.get(a.id), asset);
     assert.equal(result.assets.get(b.id), asset);
-    assert.equal(f.resolves.length, 0);
+    assert.equal(f.writes.length, 0);
     assert.equal(f.fillRequests(), 0);
     assert.deepEqual(f.exports, []);
     assert.deepEqual(f.downloads, []);
@@ -288,7 +282,7 @@ test('local IMAGE wrapper applies child opacity only to its own Sprite instance'
     assert.equal(result.assets.get(wrapper.id).uuid, base.uuid);
     assert.deepEqual(result.assets.get(wrapper.id).tint, { r: 1, g: 1, b: 1, a: 0.5 });
     assert.equal(base.tint, undefined);
-    assert.equal(f.resolves.length, 0);
+    assert.equal(f.writes.length, 0);
 });
 
 test('a non-prefix same-name local ancestor cannot absorb an independent slice inside a prefix resource', async (t) => {
@@ -317,7 +311,7 @@ test('a non-prefix same-name local ancestor cannot absorb an independent slice i
     assert.equal(result.assets.has(root.id), false);
     assert.deepEqual(f.existing, [asset.url]);
     assert.deepEqual(f.exports, []);
-    assert.deepEqual(f.resolves, []);
+    assert.deepEqual(f.writes, []);
     assert.ok(f.notes.some((note) => note.action === 'fallback' && note.name === 'img_card' && /九宫/.test(note.reason)));
     assert.ok(!f.notes.some((note) => note.name === root.name && note.action === 'reused'));
 });
@@ -338,7 +332,7 @@ test('a non-prefix same-name local ancestor cannot hide a prepared mask or repor
     assert.deepEqual(result.assets.get(mask.id).tint, { r: 208 / 255, g: 157 / 255, b: 105 / 255, a: 1 });
     assert.deepEqual(f.bindings.map((binding) => binding.id), [mask.id]);
     assert.deepEqual(f.exports, []);
-    assert.deepEqual(f.resolves, []);
+    assert.deepEqual(f.writes, []);
     assert.ok(f.notes.some((note) => note.action === 'tinted' && note.name === mask.name));
     assert.ok(f.notes.every((note) => note.name === mask.name), 'only the actual outer mask boundary is reported');
 });
@@ -360,7 +354,7 @@ test('an explicit transform ancestor prepares no descendant resources, tint or m
     assert.equal(result.assets.size, 0);
     assert.deepEqual(f.exports, []);
     assert.deepEqual(f.downloads, []);
-    assert.deepEqual(f.resolves, []);
+    assert.deepEqual(f.writes, []);
     assert.deepEqual(f.existing, []);
     assert.deepEqual(f.bindings, []);
     assert.deepEqual(f.notes, []);
@@ -386,7 +380,7 @@ test('an external same-name white PNG cannot validate a different colored source
     assert.deepEqual(f.bindings.map((binding) => binding.id), [mask.id]);
     assert.ok(f.notes.some((note) => note.action === 'fallback' && /底图含非白 RGB/.test(note.reason)));
     assert.ok(!f.notes.some((note) => note.action === 'tinted'));
-    assert.equal(f.resolves.length, 1, 'the correct complete mask composition is resolved instead');
+    assert.equal(f.writes.length, 1, 'the correct complete mask composition is resolved instead');
 });
 
 for (const alias of [false, true]) {
@@ -398,13 +392,13 @@ for (const alias of [false, true]) {
         const local = registerLocal(f, localName, { uuid: 'original-local-candidate', sliced: false }, bitmap(70));
         const result = await f.run([a, b]);
 
-        assert.deepEqual(f.existing, [local.url, local.url]);
+        assert.deepEqual(f.existing, alias ? [local.url, local.url] : [local.url]);
         assert.equal(result.assets.get(a.id), local);
         assert.equal(result.assets.get(b.id), local);
         assert.equal(f.exports.length, 0);
         assert.equal(f.fillRequests(), 0);
         assert.equal(f.downloads.length, 0);
-        assert.equal(f.resolves.length, 0);
+        assert.equal(f.writes.length, 0);
         assert.ok(f.bindings.every((binding) => binding.source === 'local'));
         assert.ok(!f.notes.some((note) => /同一本地文件/.test(note.reason)));
     });
@@ -420,8 +414,8 @@ test('identical IMAGE reference and geometry retain declared local name reuse ac
 
     assert.equal(result.assets.get(a.id), local);
     assert.equal(result.assets.get(b.id), local);
-    assert.deepEqual(f.existing, [local.url, local.url]);
-    assert.deepEqual(f.resolves, []);
+    assert.deepEqual(f.existing, [local.url]);
+    assert.deepEqual(f.writes, []);
     assert.deepEqual(f.exports, []);
     assert.equal(f.fillRequests(), 0);
     assert.deepEqual(f.downloads, []);
@@ -438,24 +432,24 @@ test('preexisting same-name SpriteFrame retains its UUID for different IMAGE tar
     const local = registerLocal(f, 'Shared', { uuid: 'existing-geometry-frame', sliced: false });
     const result = await f.run([a, b]);
 
-    assert.deepEqual(f.existing, [local.url, local.url]);
+    assert.deepEqual(f.existing, [local.url]);
     assert.equal(f.fillRequests(), 0);
     assert.equal(f.downloads.length, 0);
-    assert.equal(f.resolves.length, 0);
+    assert.equal(f.writes.length, 0);
     assert.equal(result.assets.get(a.id), local);
     assert.equal(result.assets.get(b.id), local);
     assert.ok(!f.notes.some((note) => /同一本地文件/.test(note.reason)));
 });
 
-test('a newly written same-name PNG is excluded from the preimport snapshot before a different raw IMAGE resolves', async (t) => {
+test('whole-node PNG and raw IMAGE share the first same-name resource without downloading the second source', async (t) => {
     const f = fixture(t);
     const rendered = imageNode('mixed-render');
     rendered.effects = [{ type: 'DROP_SHADOW', visible: true }];
     const raw = imageNode('mixed-raw', false);
     f.exportBytes.set(rendered.id, bitmap(30));
     f.fillBytes.set(raw.fills[0].imageRef, bitmap(220));
-    t.mock.method(AssetWriter.prototype, 'resolve', async (url, contents, options) => {
-        const asset = await f.resolveAsset(url, contents, options);
+    t.mock.method(AssetWriter.prototype, 'write', async (url, contents, borders) => {
+        const asset = await f.writeAsset(url, contents, borders);
         const path = join(f.outputFolder, url.split('/').pop());
         writeFileSync(path, contents);
         f.localAssets.set(url, asset);
@@ -464,14 +458,11 @@ test('a newly written same-name PNG is excluded from the preimport snapshot befo
     const result = await f.run([rendered, raw]);
 
     assert.deepEqual(f.exports.flatMap((entry) => entry.ids), [rendered.id]);
-    assert.equal(f.fillRequests(), 1);
-    assert.equal(f.downloads.length, 2);
-    assert.deepEqual(f.existing, [], 'the file written earlier in this import was absent from the snapshot');
-    assert.equal(f.resolves.length, 2, 'both distinct sources reach content/config resolution');
-    assert.equal(f.resolves[0].url, f.resolves[1].url);
-    assert.notEqual(f.resolves[0].options.sourceKey, f.resolves[1].options.sourceKey);
-    assert.notDeepEqual(f.resolves[0].contents, f.resolves[1].contents);
-    assert.notEqual(result.assets.get(rendered.id).uuid, result.assets.get(raw.id).uuid);
+    assert.equal(f.fillRequests(), 0);
+    assert.equal(f.downloads.length, 1);
+    assert.deepEqual(f.existing, []);
+    assert.equal(f.writes.length, 1);
+    assert.equal(result.assets.get(rendered.id), result.assets.get(raw.id));
 });
 
 for (const plain of [false, true]) {
@@ -486,7 +477,7 @@ for (const plain of [false, true]) {
 
         assert.equal(result.assets.get(node.id), asset);
         assert.deepEqual(f.existing, [asset.url]);
-        assert.equal(f.resolves.length, 0);
+        assert.equal(f.writes.length, 0);
         assert.deepEqual(f.exports, []);
         assert.deepEqual(f.downloads, []);
         assert.equal(f.fillRequests(), 0);
@@ -495,50 +486,44 @@ for (const plain of [false, true]) {
 }
 
 for (const plain of [false, true]) {
-    test(`verified historical source bindings preserve base/hash UUIDs over an output name snapshot for ${plain ? 'raw IMAGE' : 'remote PNG'}`, async (t) => {
+    test(`same-name output wins without consulting legacy source variants (raw IMAGE: ${plain})`, async (t) => {
         const f = fixture(t);
-        const a = imageNode(`history-A-${plain}`);
-        const b = imageNode(`history-B-${plain}`);
-        if (plain) {
-            f.fillBytes.set(a.fills[0].imageRef, bitmap(40));
-            f.fillBytes.set(b.fills[0].imageRef, bitmap(210));
-        } else {
+        const a = imageNode('history-A'), b = imageNode('history-B');
+        if (!plain) {
             a.effects = [{ type: 'DROP_SHADOW', visible: true }];
             b.effects = [{ type: 'DROP_SHADOW', visible: true }];
-            f.exportBytes.set(a.id, bitmap(40));
-            f.exportBytes.set(b.id, bitmap(210));
         }
-        const history = new Map();
-        t.mock.method(AssetWriter.prototype, 'existingForSource', async (sourceKey, options) => {
-            f.lookups.push({ sourceKey, options });
-            return history.get(sourceKey) ?? null;
-        });
-        t.mock.method(AssetWriter.prototype, 'resolve', async (url, contents, options) => {
-            const resolved = await f.resolveAsset(url, contents, options);
-            const asset = { ...resolved,
-                url: history.size === 0 ? url : url.replace(/\.png$/i, '__content_variant.png') };
-            history.set(options.sourceKey, asset);
-            writeFileSync(join(f.outputFolder, asset.url.split('/').pop()), contents);
-            f.localAssets.set(asset.url, asset);
-            return asset;
-        });
+        const asset = { uuid: 'original-output-frame', url: 'db://assets/figma-importer/Shared.png', sliced: true };
+        writeFileSync(join(f.outputFolder, 'Shared.png'), bitmap(90));
+        f.localAssets.set(asset.url, asset);
+        t.mock.method(AssetWriter.prototype, 'existingForSource', async () => assert.fail('name reuse must not inspect legacy source variants'));
+        const result = await f.run([a, b]);
+        assert.equal(result.assets.get(a.id), asset);
+        assert.equal(result.assets.get(b.id), asset);
+        assert.equal(f.writes.length, 0);
+        assert.deepEqual(f.exports, []);
+        assert.deepEqual(f.downloads, []);
+    });
+}
 
-        const first = await f.run([a, b]);
-        const firstA = first.assets.get(a.id), firstB = first.assets.get(b.id);
-        assert.notEqual(firstA.uuid, firstB.uuid);
-        assert.notEqual(firstA.url, firstB.url, 'the first import produced a base file and a content variant');
-        assert.equal(f.resolves.length, 2);
-        const before = { exports: f.exports.length, downloads: f.downloads.length, fills: f.fillRequests() };
-
-        const second = await f.run([a, b]);
-        assert.equal(second.assets.get(a.id), firstA);
-        assert.equal(second.assets.get(b.id), firstB,
-            'the second source must retain its content-variant binding instead of falling back to the base name');
-        assert.deepEqual(f.existing, [], 'verified historical source bindings win before output-name fallback');
-        assert.equal(f.resolves.length, 2, 'the second import creates or rewrites neither asset');
-        assert.equal(f.exports.length, before.exports);
-        assert.equal(f.downloads.length, before.downloads);
-        assert.equal(f.fillRequests(), before.fills);
-        assert.deepEqual(f.bindings.slice(-2).map((binding) => binding.source), ['existing', 'existing']);
+for (const refresh of [false, true]) {
+    test(`same-name IMAGE downloads and writes once while keeping each instance opacity (refresh: ${refresh})`, async (t) => {
+        const f = fixture(t);
+        const wrapper = (id, opacity, width, visible) => parseNode({ id, name: 'Shared', type: 'INSTANCE', visible,
+            absoluteBoundingBox: { x: 0, y: 0, width, height: 10 }, children: [{
+                id: `${id}:leaf`, name: 'Leaf', type: 'RECTANGLE', opacity,
+                absoluteBoundingBox: { x: 0, y: 0, width, height: 10 },
+                fills: [{ type: 'IMAGE', imageRef: 'shared-image-ref', scaleMode: 'FILL' }],
+            }] });
+        const a = wrapper('same-A', 0.25, 20, true), b = wrapper('same-B', 0.75, 10, false);
+        f.fillBytes.set('shared-image-ref', bitmap(120));
+        const result = await f.run([a, b], renderDecisions([a, b]), { refreshAssets: refresh });
+        assert.equal(f.fillRequests(), 1);
+        assert.equal(f.downloads.length, 1);
+        assert.equal(f.writes.length, 1);
+        assert.deepEqual(f.lookups, []);
+        assert.equal(result.assets.get(a.id).uuid, result.assets.get(b.id).uuid);
+        assert.equal(result.assets.get(a.id).tint.a, 0.25);
+        assert.equal(result.assets.get(b.id).tint.a, 0.75);
     });
 }

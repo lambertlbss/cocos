@@ -759,22 +759,34 @@ export async function buildAssets(
     const resolvedDecisions = resolveAutomaticMergeDecisions(session.roots, decisions);
     decisions.clear();
     resolvedDecisions.forEach((value, key) => decisions.set(key, value));
-    const writer = new AssetWriter(importSettings.assetFolder, (url, existed) => review.beforeWrite(url, existed));
+    const writeStates = new Map<string, boolean>();
+    const writer = new AssetWriter(importSettings.assetFolder, async (url, existed) => {
+        await review.beforeWrite(url, existed);
+        writeStates.set(url, existed);
+    });
     await writer.initialize();
     const cache = new LocalAssetCache(defaultCacheFolder());
     await cache.initialize();
     const localResources = importSettings.localResourceFolders
         .map((folder) => new LocalResourceLibrary(folder));
     await Promise.all(localResources.map((library) => library.initialize()));
-    // Capture names before any image writes. An image created by this import
-    // must still be compared by content when a later same-name source arrives.
+    // Index existing names once; new resources are shared by name below.
     const outputPath = join(Editor.Project.path, 'assets', writer.folder);
     const outputResources = existsSync(outputPath) ? new LocalResourceLibrary(outputPath) : null;
     await outputResources?.initialize();
     const assets = new Map<string, SpriteAssetSpec>();
+    // The project contract is same name = same resource. Share across render,
+    // IMAGE and gradient paths before downloading or comparing any pixels.
+    const sharedAssets = new Map<string, SpriteAssetSpec>();
+    const resourceKey = (node: FigmaNode) => writer.buildUrl(node.name, '', 'png', importSettings.scale)
+        .normalize('NFKC').toLocaleLowerCase('en-US');
     const warnings = new Set<string>();
     const note = (action: NonNullable<ImportReview['decisions']>[number]['action'], name: string, reason: string, url?: string) =>
         review.note?.(action, name, reason, url);
+    const noteWrite = (asset: SpriteAssetSpec) => note(writeStates.get(asset.url) ? 'updated' : 'created',
+        basename(asset.url), writeStates.get(asset.url)
+            ? '写入同名输出资源，保留原 UUID'
+            : '按名称导入一份资源，同名节点直接共用', asset.url);
     const nodeSourceKey = (node: FigmaNode, variant = 'raster-v2') =>
         JSON.stringify([session.fileKey, node.id, importSettings.scale, variant]);
     const groupSourceKey = (assetKey: string) => JSON.stringify([session.fileKey, 'tile-v2', assetKey]);
@@ -914,7 +926,7 @@ export async function buildAssets(
         review.bind(node, asset, source);
         if (source === 'local' || source === 'existing') note('reused', node.name,
             source === 'local' ? '用户指定本地目录的同名映射，保留原 SpriteFrame UUID 与切片参数'
-                : '按已有资源名称或历史来源映射复用原 SpriteFrame，保留 UUID 与原切片参数', asset.url);
+                : '按已有资源或本批同名资源复用原 SpriteFrame，保留 UUID 与原切片参数', asset.url);
         completed += 1;
         const verb = source === 'local'
             ? '复用本地资源'
@@ -1117,8 +1129,7 @@ export async function buildAssets(
                 format,
                 importSettings.scale,
             );
-            // A name is a user-facing label, never proof of equal rendered pixels.
-            const key = `${session.fileKey}:${node.id}:${importSettings.scale}`;
+            const key = resourceKey(node);
             const group = groups.get(key) ?? { url, nodes: [] };
             group.nodes.push(node);
             groups.set(key, group);
@@ -1150,11 +1161,17 @@ export async function buildAssets(
             const node = groupedNodes[0];
             const decision = decisions.get(node.id) ?? defaultDecision(node);
             const reuseAsset = (asset: SpriteAssetSpec, source: 'local' | 'existing') => {
+                sharedAssets.set(resourceKey(node), asset);
                 if (decision.nineSlice && !asset.sliced) {
                     warnings.add(`三/九宫节点“${node.name}”已直接引用同名资源，但该 SpriteFrame 未配置九宫边距，暂按普通 Sprite 显示；请在原资源中设置边距：${asset.url}`);
                 }
                 completeGroup(groupedNodes, asset, source);
             };
+            const shared = sharedAssets.get(resourceKey(node));
+            if (shared) {
+                reuseAsset(shared, 'existing');
+                continue;
+            }
             const localMatch = analyzeMaskTint(node) ? null : await findLocal(node.name, false);
             // Project-local SpriteFrames own their pixels and slice borders.
             // Reuse their UUID before any slice analysis, compaction or refresh.
@@ -1169,28 +1186,16 @@ export async function buildAssets(
             if (localUrl) {
                 throw new Error(`同名本地资源尚无可用 SpriteFrame，请先在 Cocos 中完成资源导入并设置为 SpriteFrame 后重试，不会另建副本：${localUrl}`);
             }
-            const sliceAnalysis = decision.nineSlice && format === 'png'
-                ? analyzeSliceGrid(node)
-                : null;
-            const lookupBorders = sliceAnalysis ? {
-                left: Math.round(sliceAnalysis.borders.left * importSettings.scale),
-                right: Math.round(sliceAnalysis.borders.right * importSettings.scale),
-                top: Math.round(sliceAnalysis.borders.top * importSettings.scale),
-                bottom: Math.round(sliceAnalysis.borders.bottom * importSettings.scale),
-            } : undefined;
-            const existing = !importSettings.refreshAssets ? await writer.existingForSource(nodeSourceKey(node),
-                { tiled: false, sliced: Boolean(sliceAnalysis), borders: lookupBorders }) : null;
-            if (!localMatch && existing && (decision.nineSlice || !overflowingRenderFrame(node))) {
-                reuseAsset(existing, 'existing');
-                continue;
-            }
-            const namedOutput = !localMatch && !existing && !analyzeMaskTint(node) ? await findOutput(node.name) : null;
+            const namedOutput = !localMatch && !analyzeMaskTint(node) ? await findOutput(node.name) : null;
             if (namedOutput) {
                 const namedAsset = await writer.existing(assetDatabaseUrl(namedOutput.path)!);
                 if (!namedAsset) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
                 reuseAsset(namedAsset, 'existing');
                 continue;
             }
+            const sliceAnalysis = decision.nineSlice && format === 'png'
+                ? analyzeSliceGrid(node)
+                : null;
             if (decision.nineSlice && !sliceAnalysis) {
                 warnings.add(`三/九宫节点“${node.name}”无法计算连续切片边界，已临时作为 PNG 整层导入`);
             }
@@ -1256,16 +1261,17 @@ export async function buildAssets(
             let asset: SpriteAssetSpec;
             if (item.sliceAnalysis) {
                 const trace = diagnosticStart('三/九宫资源最小化', { node: item.node.name });
-                const result = await writeSlicedPng({ write: (url, bytes, borders) => writer.resolve(url, bytes,
-                    { sourceKey: nodeSourceKey(item.node), borders }) }, item.url, contents, item.node,
+                const result = await writeSlicedPng(writer, item.url, contents, item.node,
                     item.sliceAnalysis, importSettings.scale);
                 asset = result.asset;
                 trace.done(result.optimization);
                 note(asset.sliceFallback ? 'fallback' : 'merged', item.node.name,
                     `三/九宫：${result.optimization.reason ?? result.optimization.status}`, asset.url);
             } else {
-                asset = await writer.resolve(item.url, contents, { sourceKey: nodeSourceKey(item.node), borders: item.borders });
+                asset = await writer.write(item.url, contents, item.borders);
             }
+            noteWrite(asset);
+            sharedAssets.set(resourceKey(item.node), asset);
             if (asset.sliceFallback) {
                 warnings.add(`三/九宫节点“${item.node.name}”切片设置失败，已临时作为 PNG 整层导入：${asset.sliceFallback}`);
             }
@@ -1285,7 +1291,7 @@ export async function buildAssets(
         if (!items.length) return;
         const groups = new Map<string, { node: FigmaNode; nodes: FigmaNode[]; imageRef: string }>();
         for (const item of items) {
-            const key = item.node.id;
+            const key = resourceKey(item.node);
             const group = groups.get(key) ?? { node: item.node, nodes: [], imageRef: item.imageRef };
             group.nodes.push(item.node);
             groups.set(key, group);
@@ -1293,27 +1299,35 @@ export async function buildAssets(
 
         let imageFillUrlsPromise: Promise<Record<string, string | null>> | undefined;
         const downloads = new Map<string, Promise<Buffer>>();
+        const completeImages = (nodes: FigmaNode[], base: SpriteAssetSpec,
+            source: 'local' | 'existing' | 'cache' | 'figma') => {
+            sharedAssets.set(resourceKey(nodes[0]), base);
+            for (const node of nodes) {
+                const { innerOpacity } = imageDetails(node);
+                const asset = innerOpacity < 1 ? { ...base, tint: { r: 1, g: 1, b: 1, a: innerOpacity } } : base;
+                completeAsset(node, asset, source);
+            }
+        };
         for (const group of groups.values()) {
             if (activeController?.signal.aborted) throw new CancelledError();
-            const { leaf, innerOpacity } = imageDetails(group.node);
+            const shared = sharedAssets.get(resourceKey(group.node));
+            if (shared) {
+                completeImages(group.nodes, shared, 'existing');
+                continue;
+            }
+            const { leaf } = imageDetails(group.node);
             const match = await findLocal(group.node.name, false);
             const localUrl = match ? assetDatabaseUrl(match.path) : null;
             if (localUrl) {
                 const localAsset = await writer.existing(localUrl);
                 if (!localAsset) throw new Error(`同名本地资源尚无可用 SpriteFrame，不会另建副本：${localUrl}`);
-                const instanceAsset = innerOpacity < 1
-                    ? { ...localAsset, tint: { r: 1, g: 1, b: 1, a: innerOpacity } } : localAsset;
-                for (const node of group.nodes) completeAsset(node, instanceAsset, match!.source);
+                completeImages(group.nodes, localAsset, match!.source);
                 continue;
             }
-            const mapped = !match && !importSettings.refreshAssets
-                ? await writer.existingForSource(nodeSourceKey(group.node, 'image-fill-v1'), { tiled: false, sliced: false }) : null;
-            const namedOutput = !match && !mapped ? await findOutput(group.node.name) : null;
-            const existing = mapped ?? (namedOutput ? await writer.existing(assetDatabaseUrl(namedOutput.path)!) : null);
+            const namedOutput = !match ? await findOutput(group.node.name) : null;
+            const existing = namedOutput ? await writer.existing(assetDatabaseUrl(namedOutput.path)!) : null;
             if (existing) {
-                const instanceAsset = innerOpacity < 1
-                    ? { ...existing, tint: { r: 1, g: 1, b: 1, a: innerOpacity } } : existing;
-                for (const node of group.nodes) completeAsset(node, instanceAsset, 'existing');
+                completeImages(group.nodes, existing, 'existing');
                 continue;
             }
             if (namedOutput) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
@@ -1372,11 +1386,11 @@ export async function buildAssets(
                 'png',
                 importSettings.scale,
             );
-            const resolved = await writer.resolve(url, raster, { sourceKey: nodeSourceKey(group.node, 'image-fill-v1') });
-            const asset = innerOpacity < 1 ? { ...resolved, tint: { r: 1, g: 1, b: 1, a: innerOpacity } } : resolved;
+            const resolved = await writer.write(url, raster);
+            noteWrite(resolved);
             if (group.node.children.length) note('merged', group.node.name,
-                '普通 IMAGE 在隐藏和显示状态使用相同中心裁切/适配；源图缓存保留原始像素，节点透明度单独应用', asset.url);
-            for (const node of group.nodes) completeAsset(node, asset, source);
+                '普通 IMAGE 在隐藏和显示状态使用相同中心裁切/适配；源图缓存保留原始像素，节点透明度单独应用', resolved.url);
+            completeImages(group.nodes, resolved, source);
         }
     };
 
@@ -1384,14 +1398,27 @@ export async function buildAssets(
     await diagnosticTask('准备 PNG 资源', { count: requests.png.length }, () => processRemote(requests.png));
     await diagnosticTask('准备原始 IMAGE 填充资源', { count: requests.rawImages.length }, () => processRawImages(requests.rawImages));
 
-    const gradientAssets = new Map<string, SpriteAssetSpec>();
     for (const node of requests.gradients) {
+        const shared = sharedAssets.get(resourceKey(node));
+        if (shared) {
+            completeAsset(node, shared, 'existing');
+            continue;
+        }
         const named = await findLocal(node.name, false);
         const namedUrl = named ? assetDatabaseUrl(named.path) : null;
         if (namedUrl) {
             const existing = await writer.existing(namedUrl);
             if (!existing) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedUrl}`);
+            sharedAssets.set(resourceKey(node), existing);
             completeAsset(node, existing, named!.source);
+            continue;
+        }
+        const namedOutput = !named ? await findOutput(node.name) : null;
+        if (namedOutput) {
+            const existing = await writer.existing(assetDatabaseUrl(namedOutput.path)!);
+            if (!existing) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
+            sharedAssets.set(resourceKey(node), existing);
+            completeAsset(node, existing, 'existing');
             continue;
         }
         const frame = node.absoluteBoundingBox;
@@ -1412,19 +1439,10 @@ export async function buildAssets(
                 'png',
                 importSettings.scale,
             );
-            const gradientKey = nodeSourceKey(node, 'gradient-v2');
-            const firstAsset = gradientAssets.get(gradientKey);
-            let existing = firstAsset || importSettings.refreshAssets
-                ? null
-                : await writer.existingForSource(gradientKey, { sliced: false, tiled: false });
-            const namedOutput = !firstAsset && !existing ? await findOutput(node.name) : null;
-            if (namedOutput) {
-                existing = await writer.existing(assetDatabaseUrl(namedOutput.path)!);
-                if (!existing) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
-            }
-            const asset = firstAsset ?? existing ?? await writer.resolve(url, png, { sourceKey: gradientKey });
-            gradientAssets.set(gradientKey, asset);
-            completeAsset(node, asset, firstAsset || existing ? 'existing' : 'generated');
+            const asset = await writer.write(url, png);
+            noteWrite(asset);
+            sharedAssets.set(resourceKey(node), asset);
+            completeAsset(node, asset, 'generated');
             continue;
         }
         completed += 1;

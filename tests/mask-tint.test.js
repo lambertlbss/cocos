@@ -93,7 +93,7 @@ async function integration(t, options = {}) {
     t.mock.method(AssetWriter.prototype, 'existingRaster', async () => assert.fail('same-name lookup is not source identity'));
     t.mock.method(AssetWriter.prototype, 'existingForSource', async () => null);
     t.mock.method(LocalAssetCache.prototype, 'read', async () => png([208, 157, 105]));
-    t.mock.method(AssetWriter.prototype, 'resolve', async (url, bytes, config) => {
+    t.mock.method(AssetWriter.prototype, 'write', async (url, bytes, config) => {
         writes.push({ url, bytes, config }); return { uuid: 'composite', url, sliced: false };
     });
     const node = masked();

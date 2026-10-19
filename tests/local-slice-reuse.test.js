@@ -177,8 +177,8 @@ test('without a local or existing asset, cached full PNG still follows slice gen
     t.mock.method(AssetWriter.prototype, 'existing', async () => null);
     t.mock.method(LocalAssetCache.prototype, 'read', async () => contents);
     const writes = [];
-    t.mock.method(AssetWriter.prototype, 'resolve', async (url, bytes, options) => {
-        writes.push({ url, bytes, borders: options.borders });
+    t.mock.method(AssetWriter.prototype, 'write', async (url, bytes, borders) => {
+        writes.push({ url, bytes, borders });
         return { uuid: 'new-sliced-frame', url, sliced: true };
     });
     const result = await f.run();

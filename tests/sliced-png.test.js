@@ -328,5 +328,5 @@ test('remote import applies compaction after caching original bytes and only for
     const sliceWrite = flow.indexOf('await writeSlicedPng(');
     assert.ok(cacheWrite >= 0 && sliceWrite > cacheWrite);
     assert.match(flow, /if \(item.sliceAnalysis\)/);
-    assert.match(flow, /else\s*\{\s*asset = await writer.resolve\(item.url, contents,/);
+    assert.match(flow, /else\s*\{\s*asset = await writer.write\(item.url, contents,/);
 });
