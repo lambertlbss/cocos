@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import packageJSON from '../../../package.json';
 import { ImportReviewPanel } from './import-review';
+import { PanelWorkflow, type WorkflowResult } from './workflow';
 import type { ImportReview } from '../../import-review-model';
 import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import { normalizeImportAction } from '../../import-actions';
@@ -85,6 +86,9 @@ interface PanelState {
 
 let panelHost: any = null;
 let importReviewPanel: ImportReviewPanel | null = null;
+let workflow: PanelWorkflow | null = null;
+let pendingImportReview: ImportReview | null = null;
+let forceDocumentRead = false;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let importButtonResetTimer: ReturnType<typeof setTimeout> | null = null;
 let nodeOverrideSaveTask: Promise<void> = Promise.resolve();
@@ -142,6 +146,13 @@ function showToast(message: string, error = false): void {
     toast.textContent = message;
     toast.classList.toggle('error', error);
     toast.classList.add('show');
+    const credentialDialog = root().querySelector<HTMLDialogElement>('#credential-dialog');
+    const credentialStatus = root().querySelector<HTMLElement>('#credential-status');
+    if (credentialDialog?.open && credentialStatus) {
+        credentialStatus.hidden = false;
+        credentialStatus.textContent = message;
+        credentialStatus.classList.toggle('error', error);
+    }
     if (toastTimer) {
         clearTimeout(toastTimer);
     }
@@ -177,6 +188,7 @@ function setConnection(vault: {
         ?? (vault.persistent ? `由 ${vault.backend} 加密，项目中仅保存非敏感设置` : 'Token 不写入项目文件');
     (element<HTMLButtonElement>('#verify-token')).disabled = !vault.hasToken;
     (element<HTMLButtonElement>('#clear-token')).disabled = !vault.hasToken;
+    workflow?.setConnection(vault.hasToken);
 }
 
 function flatten(nodes: TreeNodeDto[]): TreeNodeDto[] {
@@ -257,6 +269,8 @@ function initializeDocument(document: DocumentDto): void {
     state.defaults.clear();
     state.collapsed.clear();
     state.suppressed.clear();
+    state.selectedId = document.tree[0]?.id;
+    pendingImportReview = null;
     for (const node of flatten(document.tree)) {
         const action = smartActionForNode(node);
         state.preferredActions.set(node.id, action);
@@ -301,6 +315,7 @@ function initializeDocument(document: DocumentDto): void {
     renderFontMap();
     renderTree(true);
     updateSummary();
+    workflow?.documentReady();
 }
 
 function applySettings(settings: ImportSettings): void {
@@ -324,6 +339,7 @@ function applySettings(settings: ImportSettings): void {
     element<HTMLInputElement>('#auto-save').checked = settings.autoSave;
     updateTargetHint();
     renderFontMap();
+    workflow?.render();
 }
 
 function readSettings(showError = true): ImportSettings | null {
@@ -377,7 +393,10 @@ function readSettings(showError = true): ImportSettings | null {
 }
 
 function setBusy(value: boolean): void {
+    value = value || Boolean(workflow?.pending);
     state.busy = value;
+    // Capture editable control states before the existing button lock changes them.
+    workflow?.render();
     element<HTMLButtonElement>('#fetch-document').disabled = value;
     element<HTMLButtonElement>('#save-token').disabled = value;
     element<HTMLButtonElement>('#pick-asset-folder').disabled = value;
@@ -395,6 +414,8 @@ function setBusy(value: boolean): void {
         || !state.document
         || !state.runtimeCompatible;
     element('#cancel-import').classList.toggle('is-hidden', !value);
+    workflow?.render();
+    if (!value) renderNodeProperties();
 }
 
 function resetRoundtripTokens(): void {
@@ -444,7 +465,7 @@ function resetImportButton(): void {
     button.classList.remove('is-running', 'is-success', 'is-error');
     button.removeAttribute('aria-busy');
     button.title = '导入到当前打开场景或预制体';
-    element('#import-button-label').textContent = '导入到场景';
+    element('#import-button-label').textContent = '开始导入';
     element('#import-button-percent').textContent = '→';
     (element('#import-button-progress') as HTMLElement).style.width = '0%';
 }
@@ -461,6 +482,8 @@ function importProgress(event: ProgressEvent): number {
 }
 
 function updateProgress(event: ProgressEvent): void {
+    if (['fetch', 'assets', 'scene'].includes(event.phase)) setBusy(true);
+    workflow?.progress(event);
     const region = element('#progress-region');
     const busy = ['fetch', 'assets', 'scene'].includes(event.phase);
     region.classList.toggle('is-busy', busy);
@@ -502,6 +525,12 @@ function updateProgress(event: ProgressEvent): void {
     }
     if (['done', 'error', 'cancelled', 'idle'].includes(event.phase)) {
         setBusy(false);
+    }
+    if (event.phase === 'done' && !workflow?.pending && pendingImportReview) {
+        const review = pendingImportReview;
+        pendingImportReview = null;
+        workflow?.complete({ review });
+        importReviewPanel?.open(review);
     }
 }
 
@@ -631,17 +660,12 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     const copy = document.createElement('div');
     copy.className = 'node-copy';
     const displayName = effectiveNodeName(node);
-    const name = document.createElement('input');
-    name.type = 'text';
-    name.className = `node-name-input${state.renamedIds.has(node.id) ? ' is-renamed' : ''}`;
-    name.value = displayName;
-    name.maxLength = 96;
-    name.spellcheck = false;
-    name.dataset.nameFor = node.id;
-    name.setAttribute('aria-label', `${node.name} 导入节点名`);
+    const name = document.createElement('div');
+    name.className = `node-name${state.renamedIds.has(node.id) ? ' is-renamed' : ''}`;
+    name.textContent = displayName;
     const strategySummary = strategySummaryForNode(node, state.explicitIds.has(node.id));
     name.title = [
-        state.renamedIds.has(node.id) ? `Figma 原名：${node.name}` : '点击修改导入节点名',
+        state.renamedIds.has(node.id) ? `Figma 原名：${node.name}` : '选择节点，在右侧修改导入节点名',
         strategySummary.strategy,
         strategySummary.warning,
     ]
@@ -668,6 +692,51 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     row.classList.toggle('has-detail', Boolean(strategySummary.strategy || strategySummary.warning));
     main.append(collapse, dot, copy);
 
+    const actionBadge = document.createElement('span');
+    actionBadge.className = 'node-action-badge';
+    const selectedAction = safeAction(node, state.actions.get(node.id) ?? node.action);
+    actionBadge.textContent = actionOptionsForNode(node).find(([value]) => value === selectedAction)?.[1] ?? selectedAction;
+    actionBadge.title = strategySummary.strategy || actionBadge.textContent;
+    row.append(main, actionBadge);
+    container.appendChild(row);
+
+    if (!state.collapsed.has(node.id) || state.search) {
+        node.children.forEach((child) => appendTreeNode(container, child, depth + 1));
+    }
+}
+
+function renderNodeProperties(): void {
+    const container = element('#node-properties');
+    container.replaceChildren();
+    const node = state.selectedId ? findNode(state.selectedId) : undefined;
+    if (!node) {
+        const empty = document.createElement('p');
+        empty.className = 'inspector-empty';
+        empty.textContent = '选择节点，查看预览并调整导入设置。';
+        container.appendChild(empty);
+        return;
+    }
+    const displayName = effectiveNodeName(node);
+    const field = (label: string, control: HTMLElement): void => {
+        const row = document.createElement('label');
+        row.className = 'field';
+        const heading = document.createElement('span');
+        heading.textContent = label;
+        row.append(heading, control);
+        container.appendChild(row);
+    };
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'node-name-input';
+    name.value = displayName;
+    name.maxLength = 96;
+    name.spellcheck = false;
+    name.dataset.nameFor = node.id;
+    name.setAttribute('aria-label', `${node.name} 导入节点名`);
+    name.title = `Figma 原名：${node.name}；Enter 保存，Esc 取消`;
+    name.disabled = state.busy;
+    field('导入节点名', name);
+
     const selectedAction = safeAction(node, state.actions.get(node.id) ?? node.action);
     const actionOptions = actionOptionsForNode(node);
     const action = makeSelect(
@@ -677,6 +746,8 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
         `${displayName} 导入方式`,
     );
     action.dataset.actionFor = node.id;
+    action.disabled = state.busy;
+    field('导入方式', action);
 
     const selectedKind = state.kinds.get(node.id) ?? node.kind;
     const effectiveKind = effectiveKindForNode(
@@ -693,9 +764,11 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
         `${displayName} 节点类型`,
     );
     kind.dataset.kindFor = node.id;
+    kind.disabled = state.busy;
+    field('节点类型', kind);
 
     const patch = document.createElement('label');
-    patch.className = 'patch-toggle';
+    patch.className = 'toggle-row patch-toggle';
     patch.title = node.sliceMode
         ? `启用${node.sliceMode === 'nine' ? '九宫格' : '三宫格'}切片`
         : node.patchCandidate
@@ -705,16 +778,24 @@ function appendTreeNode(container: HTMLElement, node: TreeNodeDto, depth: number
     patchInput.type = 'checkbox';
     patchInput.dataset.patchFor = node.id;
     patchInput.checked = state.patches.has(node.id);
-    patchInput.disabled = !node.patchCandidate;
+    patchInput.disabled = state.busy || !node.patchCandidate;
     const patchIcon = document.createElement('span');
-    patchIcon.textContent = '▦';
+    patchIcon.textContent = node.patchCandidate
+        ? node.sliceMode === 'nine' ? '启用九宫切片' : node.sliceMode ? '启用三宫切片' : '启用三 / 九宫切片'
+        : '切片 · 非候选节点';
     patch.append(patchInput, patchIcon);
-    row.append(main, action, kind, patch);
-    container.appendChild(row);
-
-    if (!state.collapsed.has(node.id) || state.search) {
-        node.children.forEach((child) => appendTreeNode(container, child, depth + 1));
+    container.appendChild(patch);
+    const summary = strategySummaryForNode(node, state.explicitIds.has(node.id));
+    const note = document.createElement('div');
+    note.className = 'node-inspector-note';
+    for (const text of [summary.strategy, `Figma 原名：${node.name}`, summary.warning]) {
+        if (!text) continue;
+        const paragraph = document.createElement('p');
+        paragraph.textContent = text;
+        if (text === summary.warning) paragraph.className = 'node-warning';
+        note.appendChild(paragraph);
     }
+    container.appendChild(note);
 }
 
 function renderTree(resetScroll = false): void {
@@ -737,6 +818,7 @@ function renderTree(resetScroll = false): void {
         }
         state.document.tree.forEach((node) => appendTreeNode(tree, node, 0));
     }, resetScroll);
+    renderNodeProperties();
 }
 
 function updateSummary(): void {
@@ -750,6 +832,7 @@ function updateSummary(): void {
         || !state.document
         || !selected.length
         || !state.runtimeCompatible;
+    workflow?.render();
 }
 
 async function preview(node: TreeNodeDto): Promise<void> {
@@ -818,6 +901,7 @@ function applyPreset(name: string): void {
 }
 
 async function importToScene(): Promise<void> {
+    if (workflow && workflow.step !== 3) return;
     if (!state.runtimeCompatible) {
         showToast('扩展主进程仍是旧版，请保存项目并完整重启 Cocos Creator。', true);
         return;
@@ -827,6 +911,7 @@ async function importToScene(): Promise<void> {
     }
     const settings = readSettings();
     if (!settings) {
+        workflow?.fail('请检查导入倍率与输出目录，修正后再次导入。');
         return;
     }
     const overrides: ImportOverride[] = flatten(state.document.tree).map((node) => ({
@@ -837,10 +922,11 @@ async function importToScene(): Promise<void> {
         explicit: state.explicitIds.has(node.id),
         ...(state.renamedIds.has(node.id) ? { name: effectiveNodeName(node) } : {}),
     }));
+    workflow?.begin('import');
     setBusy(true);
     updateProgress({ phase: 'assets', value: 0, message: '正在准备导入…' });
     try {
-        const result = await request<{ prefabUrl?: string; warnings?: string[]; review?: ImportReview }>(
+        const result = await request<WorkflowResult>(
             'import-selection',
             { overrides, settings },
         );
@@ -850,41 +936,54 @@ async function importToScene(): Promise<void> {
         showToast(result?.prefabUrl
             ? `导入完成，已创建预制体：${result.prefabUrl}${fallbackNote}`
             : `导入完成，已在场景中选中根节点${fallbackNote}。`);
-        if (result.review) importReviewPanel?.open(result.review);
+        workflow?.complete(result);
+        const review = result.review ?? pendingImportReview;
+        pendingImportReview = null;
+        if (review) importReviewPanel?.open(review);
     } catch (error) {
         const message = errorMessage(error, '导入失败。');
-        updateProgress({ phase: 'error', value: 0, message });
-        showToast(message, true);
+        updateProgress({ phase: workflow?.cancelled ? 'cancelled' : 'error', value: 0, message });
+        showToast(message, !workflow?.cancelled);
     } finally {
+        workflow?.end();
         setBusy(false);
+        updateSummary();
     }
 }
 
+async function openImportReview(tab: 'assets' | 'nodes' | 'source' = 'assets'): Promise<void> {
+    if (state.busy) return;
+    try {
+        const review = await request<ImportReview | null>('get-import-review');
+        if (review) {
+            importReviewPanel?.open(review);
+            const index = ['assets', 'nodes', 'source'].indexOf(tab);
+            if (index > 0) element('#import-review-dialog').querySelectorAll<HTMLButtonElement>('.review-tabs button')[index]?.click();
+        } else showToast('本次插件会话尚无导入检查结果，请先完成一次导入。');
+    } catch (error) { showToast(errorMessage(error, '读取检查结果失败。'), true); }
+}
+
 function bindEvents(): void {
-    element('#open-import-review').addEventListener('click', async () => {
-        if (state.busy) return;
-        try {
-            const review = await request<ImportReview | null>('get-import-review');
-            if (review) importReviewPanel?.open(review);
-            else showToast('本次插件会话尚无导入检查结果，请先完成一次导入。');
-        } catch (error) { showToast(errorMessage(error, '读取检查结果失败。'), true); }
-    });
+    element('#open-import-review').addEventListener('click', () => { void openImportReview(); });
     element('#save-token').addEventListener('click', async () => {
         const input = element<HTMLInputElement>('#token-input');
         if (!input.value.trim()) {
             showToast('请输入 Figma Token。', true);
             return;
         }
+        let saved = false;
         setBusy(true);
         try {
             const vault = await request<any>('set-token', input.value);
             input.value = '';
             setConnection(vault);
+            saved = true;
             showToast(vault.persistent ? 'Token 已由系统加密保存。' : 'Token 已保存到本次会话。');
         } catch (error) {
             showToast(error instanceof Error ? error.message : '保存失败。', true);
         } finally {
             setBusy(false);
+            if (saved) workflow?.closeCredentials();
         }
     });
 
@@ -994,11 +1093,23 @@ function bindEvents(): void {
     element('#roundtrip-cancel').addEventListener('click', () => request('roundtrip-cancel'));
 
     element('#fetch-document').addEventListener('click', async () => {
+        if (state.busy) return;
+        const forceRead = forceDocumentRead;
+        forceDocumentRead = false;
+        if (workflow && !workflow.credentialsReady) {
+            workflow.openCredentials();
+            return;
+        }
+        if (!forceRead && workflow?.sourceUnchanged()) {
+            workflow.navigate(2);
+            return;
+        }
         const source = element<HTMLInputElement>('#source-url').value.trim();
         if (!source) {
             showToast('请输入 Figma 文件或节点链接。', true);
             return;
         }
+        workflow?.begin('fetch');
         setBusy(true);
         updateProgress({ phase: 'fetch', value: 0.05, message: '正在连接 Figma…' });
         try {
@@ -1006,10 +1117,19 @@ function bindEvents(): void {
             state.fontAssets = document.fontAssets ?? state.fontAssets;
             initializeDocument(document);
         } catch (error) {
-            showToast(error instanceof Error ? error.message : '读取失败。', true);
+            const message = error instanceof Error ? error.message : '读取失败。';
+            if (!workflow?.cancelled) workflow?.fail(message);
+            showToast(workflow?.cancelled ? '读取已取消，配置已保留。' : message, !workflow?.cancelled);
         } finally {
+            workflow?.end();
             setBusy(false);
+            updateSummary();
         }
+    });
+    element('#refresh-document').addEventListener('click', () => {
+        if (state.busy) return;
+        forceDocumentRead = true;
+        element<HTMLButtonElement>('#fetch-document').click();
     });
 
     element<HTMLInputElement>('#source-url').addEventListener('keydown', (event) => {
@@ -1106,7 +1226,16 @@ function bindEvents(): void {
         });
     }
     element('#import-button').addEventListener('click', importToScene);
-    element('#cancel-import').addEventListener('click', () => request('cancel-import'));
+    element('#cancel-import').addEventListener('click', async () => {
+        if (!state.busy) return;
+        workflow?.cancelRequested();
+        try { await request('cancel-import'); }
+        catch (error) {
+            const message = errorMessage(error, '取消请求失败，请稍后重试。');
+            workflow?.cancelRequestFailed(message);
+            showToast(message, true);
+        }
+    });
 
     element<HTMLInputElement>('#tree-search').addEventListener('input', (event) => {
         state.search = (event.target as HTMLInputElement).value.trim().toLowerCase();
@@ -1114,6 +1243,7 @@ function bindEvents(): void {
     });
 
     element('#tree').addEventListener('click', (event) => {
+        if (state.busy) return;
         const target = event.target as HTMLElement;
         const collapseId = target.closest<HTMLElement>('[data-collapse]')?.dataset.collapse;
         if (collapseId) {
@@ -1135,8 +1265,10 @@ function bindEvents(): void {
         }
     });
 
-    element('#tree').addEventListener('change', (event) => {
+    root().addEventListener('change', (event) => {
+        if (state.busy) return;
         const target = event.target as HTMLInputElement | HTMLSelectElement;
+        if (!target.dataset.nameFor && !target.dataset.actionFor && !target.dataset.kindFor && !target.dataset.patchFor) return;
         if (target.dataset.nameFor) {
             const node = findNode(target.dataset.nameFor);
             if (!node) return;
@@ -1201,7 +1333,7 @@ function bindEvents(): void {
         updateSummary();
     });
 
-    element('#tree').addEventListener('keydown', (event) => {
+    root().addEventListener('keydown', (event) => {
         const target = event.target as HTMLInputElement;
         const id = target.dataset.nameFor;
         if (!id) return;
@@ -1250,6 +1382,11 @@ module.exports = Editor.Panel.define({
     },
     methods: {
         onImportReviewReady(review: ImportReview) {
+            if (state.busy || workflow?.pending) {
+                pendingImportReview = review;
+                return;
+            }
+            workflow?.complete({ review });
             importReviewPanel?.open(review);
         },
         onProgress(event: ProgressEvent) {
@@ -1259,6 +1396,7 @@ module.exports = Editor.Panel.define({
     async ready() {
         panelHost = this;
         importReviewPanel = new ImportReviewPanel(root(), request, setBusy);
+        workflow = new PanelWorkflow(root(), () => state, (tab) => { void openImportReview(tab); });
         bindEvents();
         try {
             const initial = await request<{
@@ -1285,7 +1423,11 @@ module.exports = Editor.Panel.define({
             } else {
                 // Replay persisted in-memory report if completion preceded panel readiness.
                 const review = await request<ImportReview | null>('get-import-review');
-                if (review && !review.confirmed) importReviewPanel?.open(review);
+                if (review) workflow.rememberReview();
+                if (review && !review.confirmed) {
+                    workflow.complete({ review });
+                    importReviewPanel?.open(review);
+                }
             }
         } catch (error) {
             showToast(error instanceof Error ? error.message : '初始化失败。', true);
@@ -1295,6 +1437,10 @@ module.exports = Editor.Panel.define({
     close() {
         importReviewPanel?.dispose();
         importReviewPanel = null;
+        workflow = null;
+        pendingImportReview = null;
+        if (toastTimer) clearTimeout(toastTimer);
+        if (importButtonResetTimer) clearTimeout(importButtonResetTimer);
         panelHost = null;
     },
 });
