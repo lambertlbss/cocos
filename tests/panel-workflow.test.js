@@ -47,7 +47,7 @@ function deferred() {
     const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
     return { promise, resolve, reject };
 }
-async function flush() { for (let count = 0; count < 12; count++) await Promise.resolve(); }
+async function flush() { for (let count = 0; count < 36; count++) await Promise.resolve(); }
 
 async function panelFixture(t, options = {}) {
     const document = createPanelDocument(fs.readFileSync(path.resolve('static/template/default/index.html'), 'utf8'));
@@ -66,10 +66,15 @@ async function panelFixture(t, options = {}) {
     };
     const request = async (_name, message, ...args) => {
         requests.push({ message, args });
-        if (handlers[message]) return handlers[message](...args);
+        if (handlers[message]) {
+            const result = await handlers[message](...args);
+            return message === 'resolve-batch-source' && result?.tree
+                ? { sourceType: 'node', sourceUrl: result.sourceUrl, items: [], added: 0, duplicates: 0, document: result }
+                : result;
+        }
         if (message === 'get-state') return initial;
         if (message === 'get-import-review') return options.replayReview ?? null;
-        if (message === 'fetch-document') return design();
+        if (message === 'resolve-batch-source') return { sourceType: 'node', sourceUrl: sourceA, items: [], added: 0, duplicates: 0, document: design() };
         if (message === 'get-preview') return { url: 'data:image/png;base64,AA==' };
         if (message === 'set-token' || message === 'clear-token') return initial.vault;
         if (message === 'verify-token') return { handle: 'test user' };
@@ -145,7 +150,7 @@ test('workflow gates future steps and importing until a design is read and setti
     assert.equal(ui.calls('import-selection').length, 0);
 
     await ui.click('#fetch-document');
-    assert.equal(ui.calls('fetch-document').length, 1);
+    assert.equal(ui.calls('resolve-batch-source').length, 1);
     assert.equal(ui.step(), 2);
     assert.equal(ui.get('[data-workflow-panel="1"]').hidden, true);
     assert.equal(ui.get('[data-workflow-panel="2"]').hidden, false);
@@ -162,10 +167,10 @@ test('freshly fetched inspector controls unlock while slice eligibility keeps it
     for (const patchCandidate of [false, true]) {
         const fetched = design();
         Object.assign(fetched.tree[0], { patchCandidate, sliceMode: patchCandidate ? 'nine' : undefined });
-        const ui = await panelFixture(t, { empty: true, handlers: { 'fetch-document': () => fetched } });
+        const ui = await panelFixture(t, { empty: true, handlers: { 'resolve-batch-source': () => fetched } });
         assert.equal(ui.step(), 1);
         await ui.click('#fetch-document');
-        assert.equal(ui.calls('fetch-document').length, 1);
+        assert.equal(ui.calls('resolve-batch-source').length, 1);
         assert.equal(ui.step(), 2);
         for (const attribute of ['name-for', 'action-for', 'kind-for']) {
             assert.equal(ui.get(`[data-${attribute}="1:1"]`).disabled, false,
@@ -236,7 +241,7 @@ test('changed source fetch preserves the old document on failure and saved setti
     assert.equal(ui.get('[data-workflow-step="3"]').disabled, true);
     await ui.get('[data-workflow-step="2"]').emit('click');
     assert.equal(ui.step(), 1);
-    assert.equal(ui.calls('fetch-document').length, 0);
+    assert.equal(ui.calls('resolve-batch-source').length, 0);
     ui.get('#source-url').value = sourceA;
     await ui.get('#source-url').emit('input');
     assert.equal(ui.get('[data-workflow-step="2"]').disabled, false);
@@ -245,14 +250,14 @@ test('changed source fetch preserves the old document on failure and saved setti
     await ui.click('#change-source');
     ui.get('#source-url').value = sourceB;
     await ui.get('#source-url').emit('input');
-    ui.handlers['fetch-document'] = () => { throw new Error('Figma read failed'); };
+    ui.handlers['resolve-batch-source'] = () => { throw new Error('Figma read failed'); };
     await ui.click('#fetch-document');
     assert.equal(ui.step(), 1);
     assert.equal(ui.get('#file-name').textContent, 'First design');
     assert.ok(ui.get('[data-node-id="1:1"]'));
     assert.match(ui.get('#workflow-error-message').textContent, /Figma read failed/);
 
-    ui.handlers['fetch-document'] = () => design({ id: '2:1', sourceUrl: sourceB, fileName: 'Second design' });
+    ui.handlers['resolve-batch-source'] = () => design({ id: '2:1', sourceUrl: sourceB, fileName: 'Second design' });
     await ui.click('#fetch-document');
     assert.equal(ui.step(), 2);
     assert.equal(ui.get('#file-name').textContent, 'Second design');
@@ -269,12 +274,12 @@ test('refresh deliberately rereads an unchanged source while ordinary continue r
     await ui.click('#change-source');
     await ui.click('#fetch-document');
     assert.equal(ui.step(), 2);
-    assert.equal(ui.calls('fetch-document').length, 0);
+    assert.equal(ui.calls('resolve-batch-source').length, 0);
     await ui.click('#change-source');
     await ui.click('#refresh-document');
     await flush();
     assert.equal(ui.step(), 2);
-    assert.equal(ui.calls('fetch-document').length, 1);
+    assert.equal(ui.calls('resolve-batch-source').length, 1);
 });
 
 test('local import stays on confirmation and locked until its request settles, then opens results', async (t) => {
@@ -348,7 +353,7 @@ test('cancellation request and progress do not unlock navigation before import s
 
 test('fetch cancellation reported as backend error stays cancelled and preserves the existing design and settings', async (t) => {
     const operation = deferred();
-    const ui = await panelFixture(t, { handlers: { 'fetch-document': () => operation.promise } });
+    const ui = await panelFixture(t, { handlers: { 'resolve-batch-source': () => operation.promise } });
     await ui.goToConfirm();
     ui.get('#asset-folder').value = 'cancel/images';
     ui.get('#prefab-folder').value = 'cancel/prefabs';
@@ -384,7 +389,7 @@ test('fetch cancellation reported as backend error stays cancelled and preserves
     assert.equal(ui.get('[data-font-family="Inter"]').value, fontAssets[1].url);
     assert.match(ui.get('#toast').textContent, /读取已取消.*配置已保留/);
     assert.equal(ui.get('#toast').classList.contains('error'), false);
-    ui.handlers['fetch-document'] = () => design({ id: '2:1', sourceUrl: sourceB });
+    ui.handlers['resolve-batch-source'] = () => design({ id: '2:1', sourceUrl: sourceB });
     await ui.click('#fetch-document');
     assert.equal(ui.step(), 2);
     assert.equal(ui.get('#workflow-footnote').hidden, true);
@@ -457,4 +462,139 @@ test('confirmed startup review stays closed but remains available from the heade
     assert.equal(ui.step(), 2);
     assert.equal(ui.calls('get-import-review').length, 2);
     assert.equal(ui.calls('import-selection').length, 0);
+});
+
+function frameItem(id, name, extra = {}) {
+    const doc = design({ id, sourceUrl: `https://www.figma.com/design/example?node-id=${id.replace(':', '-')}`, fileName: 'Batch design' });
+    doc.tree[0].name = name;
+    return { id: `example/${id}`, fileKey: 'example', rootId: id, sourceUrl: doc.sourceUrl, name,
+        enabled: true, sectionName: 'Main Section', document: doc, ...extra };
+}
+
+async function batchFixture(t, options = {}) {
+    const items = options.items ?? [frameItem('1:1', 'Home_ui'), frameItem('2:1', 'Bag_ui')];
+    const ui = await panelFixture(t, {
+        empty: true,
+        handlers: {
+            'resolve-batch-source': () => ({ sourceType: 'section', sourceUrl: sourceA, items, added: items.length, duplicates: 0 }),
+            'activate-batch-item': (id) => items.find((item) => item.id === id)?.document,
+            'sync-batch-items': (next) => ({ items: next }),
+            ...options.handlers,
+        },
+        ...options.fixture,
+    });
+    await ui.click('#add-batch-source');
+    await flush();
+    return { ...ui, items, async configure(id = items[0].id) {
+        await ui.click(`[data-batch-configure="${id}"]`); await flush();
+        assert.equal(ui.step(), 2);
+    } };
+}
+
+test('Section source stays on the frame list, appends unique frames and retains unchecked choices', async (t) => {
+    const ui = await batchFixture(t);
+    assert.equal(ui.step(), 1);
+    assert.equal(ui.root.querySelectorAll('[data-batch-configure]').length, 2);
+    assert.equal(ui.get('#batch-selected-count').textContent, '已选 2 / 2');
+    const checked = ui.get(`[data-batch-checked="${ui.items[0].id}"]`);
+    checked.checked = false; await checked.emit('change'); await flush();
+    assert.equal(ui.get('#batch-selected-count').textContent, '已选 1 / 2');
+    const third = frameItem('3:1', 'Shop_ui'); ui.items.push(third);
+    ui.handlers['resolve-batch-source'] = () => ({ sourceType: 'frame', sourceUrl: third.sourceUrl,
+        items: [ui.items[0], third], added: 1, duplicates: 1 });
+    ui.get('#source-url').value = third.sourceUrl;
+    await ui.click('#add-batch-source'); await flush();
+    assert.equal(ui.root.querySelectorAll('[data-batch-configure]').length, 3);
+    assert.equal(ui.get(`[data-batch-checked="${ui.items[0].id}"]`).checked, false);
+    assert.match(ui.get('#toast').textContent, /跳过 1 个重复项/);
+    assert.equal(ui.calls('import-batch').length, 0);
+});
+
+test('frame tabs preserve independent node names, strategy, node selection and search', async (t) => {
+    const ui = await batchFixture(t);
+    await ui.configure();
+    const node = ui.get('[data-node-id="1:1:child"]');
+    await ui.get('#tree').emit('click', { target: node }); await flush();
+    const name = ui.get('[data-name-for="1:1:child"]'); name.value = 'Home_Title';
+    await ui.root.emit('change', { target: name });
+    const action = ui.get('[data-action-for="1:1:child"]'); action.value = 'render';
+    await ui.root.emit('change', { target: action });
+    ui.get('#tree-search').value = 'Home'; await ui.get('#tree-search').emit('input', { target: ui.get('#tree-search') });
+    await ui.click(`[data-batch-frame="${ui.items[1].id}"]`); await flush();
+    assert.equal(ui.get('#tree-search').value, '');
+    assert.equal(ui.get('[data-name-for="2:1"]').value, 'Bag_ui');
+    await ui.click(`[data-batch-frame="${ui.items[0].id}"]`); await flush();
+    assert.equal(ui.get('#tree-search').value, 'home');
+    assert.equal(ui.get('[data-name-for="1:1:child"]').value, 'Home_Title');
+    assert.equal(ui.get('[data-action-for="1:1:child"]').value, 'render');
+    assert.equal(ui.get('[data-node-id="1:1:child"]').classList.contains('is-selected'), true);
+    assert.match(ui.get('#preset-scope').textContent, /当前界面/);
+});
+
+test('confirmation aggregates fonts and blocks filenames that collide after filesystem sanitization', async (t) => {
+    const first = frameItem('1:1', 'Main?');
+    const second = frameItem('2:1', 'main*');
+    second.document.fonts = ['Other'];
+    const ui = await batchFixture(t, { items: [first, second] });
+    await ui.configure(); await ui.goToConfirm();
+    assert.equal(ui.root.querySelectorAll('[data-font-family]').length, 2);
+    assert.equal(ui.get('#batch-conflicts').hidden, false);
+    assert.equal(ui.get('#import-button').disabled, true);
+    const name = ui.get(`[data-batch-name="${second.id}"]`); name.value = 'Bag_ui';
+    await name.emit('change'); await flush();
+    assert.equal(ui.get('#batch-conflicts').hidden, true);
+    assert.equal(ui.get('#import-button').disabled, false);
+    assert.equal(ui.get(`[data-batch-name="${second.id}"]`).value, 'Bag_ui');
+});
+
+test('batch import locks frame switching, stops subsequent tasks and exposes per-item reports and retries', async (t) => {
+    const operation = deferred();
+    const first = frameItem('1:1', 'Home_ui'); const second = frameItem('2:1', 'Bag_ui');
+    const report = review('home-review');
+    const ui = await batchFixture(t, { items: [first, second], handlers: {
+        'import-batch': () => operation.promise,
+        'get-import-review': (id) => id === report.id ? report : null,
+        'stop-import-batch': () => ({ accepted: true }),
+    } });
+    await ui.configure(); await ui.goToConfirm();
+    const importing = ui.click('#import-button'); await flush();
+    assert.equal(ui.calls('import-batch').length, 1);
+    assert.equal(ui.get(`[data-batch-frame="${second.id}"]`).disabled, true);
+    await ui.click('#cancel-import');
+    assert.equal(ui.calls('stop-import-batch').length, 1);
+    assert.equal(ui.calls('cancel-import').length, 0);
+    assert.match(ui.get('#cancel-import').textContent, /当前项完成后停止/);
+    ui.panel.methods.onImportReviewReady(report);
+    assert.equal(ui.reviews.length, 0);
+    operation.resolve({ id: 'batch-1', stopped: true, completed: 1, total: 2, items: [
+        { id: first.id, name: first.name, sourceUrl: first.sourceUrl, status: 'success', created: 2, reviewId: report.id },
+        { id: second.id, name: second.name, sourceUrl: second.sourceUrl, status: 'pending' },
+    ] });
+    await importing;
+    assert.equal(ui.step(), 4);
+    assert.match(ui.get('#result-title').textContent, /已停止/);
+    assert.equal(ui.get('#batch-resume-pending').hidden, false);
+    await ui.click(`[data-batch-review="${first.id}"]`); await flush();
+    assert.equal(ui.reviews.at(-1), report);
+    ui.handlers['import-batch'] = (payload) => ({ id: 'batch-2', stopped: false, completed: 1, total: 1,
+        items: [{ id: payload.items[0].id, name: second.name, sourceUrl: second.sourceUrl, status: 'success', created: 3 }] });
+    await ui.click('#batch-resume-pending'); await flush();
+    assert.equal(ui.calls('import-batch')[1].args[0].items.length, 1);
+    assert.equal(ui.calls('import-batch')[1].args[0].items[0].id, second.id);
+    assert.match(ui.get('#result-summary').textContent, /成功 2 项/);
+    assert.equal(ui.get('#result-created').textContent, '5');
+});
+
+test('removing frames persists the authoritative queue and unchecking every frame prevents import', async (t) => {
+    const ui = await batchFixture(t);
+    await ui.click(`[data-batch-remove="${ui.items[1].id}"]`); await flush();
+    assert.equal(ui.root.querySelectorAll('[data-batch-configure]').length, 1);
+    const synced = ui.calls('sync-batch-items').at(-1).args[0];
+    assert.equal(synced.length, 1);
+    assert.equal(synced[0].id, ui.items[0].id);
+    await ui.click('#batch-toggle-all'); await flush();
+    assert.equal(ui.get('#fetch-document').disabled, true);
+    assert.equal(ui.get('#batch-selected-count').textContent, '已选 0 / 1');
+    await ui.get('#import-button').emit('click');
+    assert.equal(ui.calls('import-batch').length, 0);
 });

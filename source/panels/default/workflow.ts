@@ -10,6 +10,15 @@ interface WorkflowContext {
     busy: boolean;
     runtimeCompatible: boolean;
     settings: ImportSettings;
+    batch?: BatchWorkflowContext;
+}
+export interface BatchWorkflowContext {
+    count: number;
+    total: number;
+    nodes: number;
+    selectedNodes: number;
+    conflicts: boolean;
+    result?: { success: number; failed: number; pending: number; stopped: boolean };
 }
 export interface WorkflowResult {
     created?: number;
@@ -78,6 +87,7 @@ export class PanelWorkflow {
     }
 
     private selectedCount(): number {
+        if (this.context().batch) return this.context().batch!.selectedNodes;
         return this.nodes().filter((node) => this.context().actions.get(node.id) !== 'ignore').length;
     }
 
@@ -88,6 +98,7 @@ export class PanelWorkflow {
     }
 
     sourceUnchanged(): boolean {
+        if (this.context().batch) return this.context().batch!.count > 0;
         return Boolean(this.context().document)
             && this.get<HTMLInputElement>('#source-url').value.trim() === this.context().document!.sourceUrl.trim();
     }
@@ -121,6 +132,14 @@ export class PanelWorkflow {
         this.result = null;
         this.error = '';
         this.step = 2;
+        this.render();
+    }
+
+    batchReady(): void {
+        this.unlocked = 2;
+        this.result = null;
+        this.error = '';
+        this.step = 1;
         this.render();
     }
 
@@ -198,6 +217,7 @@ export class PanelWorkflow {
         const context = this.context();
         const locked = this.locked;
         const hasDocument = Boolean(context.document);
+        const batch = context.batch;
         this.host.dataset.workflowStep = String(this.step);
         this.host.dataset.workflowBusy = String(locked);
         this.host.dataset.workflowOperation = this.pending ?? '';
@@ -228,14 +248,17 @@ export class PanelWorkflow {
         }
         this.get('#workflow-context').hidden = !hasDocument || this.step === 1;
         this.get('#workflow-file-name').textContent = context.document
-            ? `${context.document.fileName} / ${this.prefabTarget() ? 'Frame' : '文件'} / ${this.nodes().length} 个节点`
+            ? batch ? `本批 ${batch.count} 个界面 / 独立 Prefab / 修改自动保留`
+                : `${context.document.fileName} / ${this.prefabTarget() ? 'Frame' : '文件'} / ${this.nodes().length} 个节点`
             : '先读取设计，再逐步配置';
+        this.get('#change-source').textContent = batch ? '界面列表' : '更换设计';
         this.get<HTMLButtonElement>('#change-source').disabled = locked;
         this.get<HTMLButtonElement>('#reopen-import-review').hidden = !this.reviewAvailable || this.step === 4;
         this.get<HTMLButtonElement>('#reopen-import-review').disabled = locked;
         this.get('#workflow-error').hidden = !this.error;
         this.get('#workflow-error-message').textContent = this.error;
         this.get('#source-status').textContent = this.pending === 'fetch' ? '正在读取设计，请稍候…'
+            : batch ? `已添加 ${batch.total} 个界面，已选 ${batch.count} 个。继续粘贴链接可追加，同一 Frame 只保留一份。`
             : this.sourceUnchanged() ? '当前设计已读取，可以直接继续。修改链接后重新读取，成功后替换当前设计。'
                 : this.hasToken ? '凭据已保存。读取成功后自动进入节点配置，沿用项目的目录与字体设置。'
                     : '首次使用请先配置 Figma 凭据，保存后再读取设计。';
@@ -245,7 +268,9 @@ export class PanelWorkflow {
         const fetch = this.get<HTMLButtonElement>('#fetch-document');
         fetch.hidden = this.step !== 1;
         fetch.disabled = locked;
-        fetch.textContent = this.pending === 'fetch' ? '正在读取…' : !this.hasToken ? '配置连接 →' : this.sourceUnchanged() ? '返回节点配置 →' : '读取设计，下一步 →';
+        fetch.textContent = this.pending === 'fetch' ? '正在读取…' : !this.hasToken ? '配置连接 →'
+            : batch ? '调整所选界面 →' : this.sourceUnchanged() ? '返回节点配置 →' : '读取设计，下一步 →';
+        if (batch && !batch.count) fetch.disabled = true;
         const next = this.get<HTMLButtonElement>('#workflow-next');
         next.hidden = this.step !== 2;
         next.disabled = locked || this.selectedCount() === 0;
@@ -255,22 +280,23 @@ export class PanelWorkflow {
         back.textContent = this.step === 4 ? '返回节点配置' : '上一步';
         const importing = this.get<HTMLButtonElement>('#import-button');
         importing.hidden = this.step !== 3;
-        importing.disabled = locked || !hasDocument || !context.runtimeCompatible || this.selectedCount() === 0;
+        importing.disabled = locked || !hasDocument || !context.runtimeCompatible || this.selectedCount() === 0 || Boolean(batch?.conflicts);
         const cancel = this.get<HTMLButtonElement>('#cancel-import');
         const cancellable = locked && this.pending !== null;
         cancel.hidden = !cancellable;
         cancel.classList.toggle('is-hidden', !cancellable);
         cancel.disabled = this.cancelling;
-        cancel.textContent = this.cancelling ? '正在取消…' : this.pending === 'fetch' ? '取消读取' : '取消导入';
+        cancel.textContent = this.cancelling ? batch && this.pending === 'import' ? '将在当前项完成后停止' : '正在取消…'
+            : this.pending === 'fetch' ? '取消读取' : batch ? '停止后续任务' : '取消导入';
         const review = this.get<HTMLButtonElement>('#open-import-review');
-        review.hidden = this.step !== 4;
+        review.hidden = this.step !== 4 || Boolean(batch);
         review.disabled = locked;
         review.textContent = '查看导入检查 →';
         this.get('#progress-region').hidden = this.step !== 3 || (this.pending !== 'import' && !this.error && !this.cancelled && !context.busy);
-        const prefab = this.prefabTarget();
-        this.get('#confirmation-target').textContent = prefab ? '创建或更新独立预制体' : '导入当前场景 Canvas';
+        const prefab = Boolean(batch) || this.prefabTarget();
+        this.get('#confirmation-target').textContent = batch ? `导入 ${batch.count} 个独立 Prefab` : prefab ? '创建或更新独立预制体' : '导入当前场景 Canvas';
         const folder = this.get<HTMLInputElement>('#prefab-folder').value.trim();
-        this.get('#confirmation-path').textContent = prefab ? `assets/${folder}/ · 按 Frame 节点名保存 .prefab` : '当前场景的 Canvas 根节点下';
+        this.get('#confirmation-path').textContent = prefab ? `assets/${folder}/ · 每个 Frame 分别保存 .prefab` : '当前场景的 Canvas 根节点下';
         for (const id of ['#update-existing', '#auto-save']) {
             const input = this.get<HTMLInputElement>(id);
             input.disabled = locked || prefab;
@@ -278,7 +304,7 @@ export class PanelWorkflow {
             input.title = prefab ? '仅场景导入生效；Frame 链接自动同步并保存预制体' : '';
         }
         const confirmation = this.host.querySelector('#confirmation-summary');
-        if (confirmation) confirmation.textContent = `${this.selectedCount()} 个节点 · ${this.get<HTMLInputElement>('#scale').value}× · 项目目录与字体设置已保留`;
+        if (confirmation) confirmation.textContent = `${batch ? `${batch.count} 个界面 · ` : ''}${this.selectedCount()} 个节点 · ${this.get<HTMLInputElement>('#scale').value}× · 项目目录与字体设置已保留`;
         const advanced = this.host.querySelector('#advanced-summary');
         if (advanced) {
             const folders = [0, 1, 2].filter((index) => this.get<HTMLInputElement>(`#local-resource-folder-${index}`).value.trim()).length;
@@ -287,8 +313,9 @@ export class PanelWorkflow {
         }
         this.get('#action-note').textContent = !context.runtimeCompatible ? '主进程与面板版本不一致，请保存项目并完整重启 Cocos Creator。'
             : this.step === 1 ? '成功读取后进入第 2 步，已有项目设置会继续保留。'
-                : this.step === 2 ? '可以沿用当前策略；下一步核对输出位置。'
+                : this.step === 2 ? batch ? '点击上方标签切换界面，当前界面的修改会自动保留。' : '可以沿用当前策略；下一步核对输出位置。'
                     : this.step === 3 ? this.cancelling ? '等待后台任务结束后，可以再次调整设置。'
+                        : batch?.conflicts ? '存在重复的 Prefab 名称，请在导入清单中改名。'
                         : prefab ? '预制体自动写入所选目录并打开；同名资源按现有规则复用。' : '导入到当前场景 Canvas 根节点下。'
                         : '结果检查不会重新执行导入。';
         const footnote = this.host.querySelector('#workflow-footnote');
@@ -296,10 +323,18 @@ export class PanelWorkflow {
             footnote.textContent = this.cancelled ? '操作已取消，配置已保留。' : '';
             (footnote as HTMLElement).hidden = !this.cancelled;
         }
-        if (this.step === 1) this.get('#selection-summary').textContent = this.sourceUnchanged() ? '当前设计已读取' : '粘贴链接，开始读取设计';
+        if (this.step === 1) this.get('#selection-summary').textContent = batch ? `已选 ${batch.count} / ${batch.total} 个界面` : this.sourceUnchanged() ? '当前设计已读取' : '粘贴链接，开始读取设计';
         else if (this.step === 4) this.get('#selection-summary').textContent = '导入完成，可按需检查结果';
-        else this.get('#selection-summary').textContent = `${this.selectedCount()} / ${this.nodes().length} 个节点将参与导入`;
+        else this.get('#selection-summary').textContent = batch ? `${batch.count} 个界面 · ${this.selectedCount()} / ${batch.nodes} 个节点将参与导入`
+            : `${this.selectedCount()} / ${this.nodes().length} 个节点将参与导入`;
         if (this.result) this.renderResult(this.result);
+        if (batch?.result && this.step === 4) {
+            const result = batch.result;
+            this.get('#result-title').textContent = result.stopped ? '本批导入已停止' : result.failed ? '本批导入结束，部分失败' : '本批导入完成';
+            this.get('#result-summary').textContent = `成功 ${result.success} 项 · 失败 ${result.failed} 项 · 未完成 ${result.pending} 项。每个界面的检查报告可单独打开。`;
+            this.get('#result-target').textContent = `assets/${folder}/`;
+            this.get('#selection-summary').textContent = `成功 ${result.success} · 失败 ${result.failed} · 未完成 ${result.pending}`;
+        }
     }
 
     private renderResult(result: WorkflowResult): void {

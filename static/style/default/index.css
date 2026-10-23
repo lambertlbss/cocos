@@ -105,6 +105,57 @@ input[type=checkbox] { accent-color: var(--accent); }
 .source-card .field-hint { margin-top: 8px; }
 .source-status-line { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 17px; }
 .source-status { margin: 11px 0 22px; color: var(--muted-2); font-size: 11px; }
+.source-card .input-action { align-items: center; }
+.source-card .input-action input { margin-top: 0; }
+.source-card .input-action .button { min-height: 42px; }
+.batch-source-region { margin-bottom: 22px; }
+.batch-list-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 18px 0 9px; }
+.batch-list-heading h3 { color: var(--text); font-size: 12px; font-weight: 550; }
+.batch-list-heading h3 span { margin-left: 5px; color: var(--muted); font-size: 10px; font-weight: 400; }
+.batch-source-list, .batch-target-list, .batch-result-list { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.batch-item { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 12px 10px; border-bottom: 1px solid var(--border-soft); }
+.batch-item:last-child { border-bottom: 0; }
+.batch-item.is-disabled .batch-item-copy { opacity: .5; }
+.batch-item > input[type=checkbox] { flex: none; width: 16px; min-height: 16px; height: 16px; margin: 0; padding: 0; }
+.batch-item-copy { flex: 1; min-width: 0; }
+.batch-item-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; color: var(--text); font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.batch-item-meta { margin-top: 4px; color: var(--muted-2); font-size: 10px; overflow-wrap: anywhere; }
+.batch-item-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+.batch-item-actions .text-button { color: var(--accent); }
+.batch-item-actions .icon-button { width: 23px; height: 26px; font-size: 17px; }
+.batch-help { margin-top: 10px; color: var(--muted-2); font-size: 10px; line-height: 1.7; }
+.batch-frame-heading, .batch-active-context { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
+.batch-frame-heading { margin: 5px 0 8px; }
+.batch-frame-tabs { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: thin; }
+.batch-frame-tab { flex: 1 0 115px; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--surface); text-align: left; }
+.batch-frame-tab[aria-selected=true] { color: var(--accent); border-color: var(--accent); background: #27331d; }
+.batch-frame-tab strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
+.batch-frame-tab small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+.batch-active-context { margin: 2px 0 12px; }
+.batch-active-context strong { min-width: 0; overflow-wrap: anywhere; color: var(--text); font-size: 11px; font-weight: 500; }
+.batch-active-context > span { flex: none; }
+.batch-target-region { margin-bottom: 17px; }
+.batch-target-row { display: grid; grid-template-columns: minmax(80px, .7fr) minmax(0, 1.3fr); align-items: center; gap: 12px; padding: 10px; border-bottom: 1px solid var(--border-soft); font-size: 11px; }
+.batch-target-row:last-child { border-bottom: 0; }
+.batch-target-row > span { color: var(--muted); overflow-wrap: anywhere; }
+.batch-target-row input { min-height: 31px; padding: 5px 8px; font-size: 11px; }
+.batch-target-row.is-conflict { background: #362326; }
+.batch-target-row.is-conflict input { border-color: var(--danger); }
+.batch-conflicts { margin-top: 9px; padding: 10px; border-radius: 6px; color: var(--danger); background: #362326; font-size: 11px; }
+.batch-status-success { color: var(--accent); }
+.batch-status-failed { color: var(--danger); }
+.batch-status-pending, .batch-status-running { color: var(--amber); }
+.batch-result-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.batch-result-region { margin: 18px 0; }
+@media (max-width: 480px) {
+    .batch-item { gap: 7px; padding: 10px 8px; }
+    .batch-item-actions { gap: 6px; }
+    .batch-item-actions .text-button { font-size: 10px; }
+    .batch-frame-tab { flex-basis: 105px; }
+    .source-card .input-action { flex-wrap: wrap; }
+    .source-card .input-action input { flex-basis: 100%; }
+    .source-card .input-action .button { width: 100%; min-height: 34px; }
+}
 .setup-card { display: flex; align-items: center; gap: 11px; padding: 15px 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface); }
 .setup-symbol { display: grid; place-items: center; flex: none; width: 31px; height: 31px; border-radius: 7px; color: var(--accent); background: #2a341e; font-size: 21px; }
 .setup-card > div { flex: 1; min-width: 0; }

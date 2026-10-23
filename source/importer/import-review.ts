@@ -102,18 +102,39 @@ export function buildReviewSourceTree(
 }
 
 export class ImportReviewService {
-    private review?: ImportReview;
-    private recorder?: ImportReviewRecorder;
-    private document?: DocumentSession;
-    private previewCache = new Map<string, string>();
+    private readonly history = new Map<string, {
+        review: ImportReview;
+        recorder: ImportReviewRecorder;
+        document: DocumentSession;
+        previewCache: Map<string, string>;
+    }>();
+    private currentId?: string;
     private applying = false;
     constructor(
         private assetRequest: Request = (method, ...args) => Editor.Message.request('asset-db', method, ...args),
         private sceneRequest: Request = (method, ...args) => Editor.Message.request('scene', method, ...args),
     ) {}
 
-    get(): ImportReview | null { return this.review ?? null; }
-    invalidate(): void { this.review = undefined; this.recorder = undefined; this.document = undefined; this.previewCache.clear(); }
+    get(id?: string): ImportReview | null {
+        const entry = this.history.get(id ?? this.currentId ?? '');
+        if (!entry) return null;
+        if (entry.review.id === this.currentId) return entry.review;
+        // Historical targets have no live cleanup session. Do not expose stale
+        // deletion permissions, even when the original import allowed cleanup.
+        const review: ImportReview = JSON.parse(JSON.stringify(entry.review));
+        review.readOnlyReason = review.readOnlyReason ?? '该历史结果仅供查看；重新导入当前目标可生成可修改报告。';
+        for (const asset of review.assets) {
+            asset.canRemove = false;
+            asset.reason = `本次结果仅供查看：${review.readOnlyReason}`;
+        }
+        return review;
+    }
+
+    /** A normal single import expires everything; batch tasks retain earlier snapshots explicitly. */
+    invalidate(options: { preserveHistory?: boolean } = {}): void {
+        this.currentId = undefined;
+        if (!options.preserveHistory) this.history.clear();
+    }
 
     async complete(recorder: ImportReviewRecorder, document: DocumentSession,
         before: ReviewScene, after: ReviewScene, targetUrl?: string, warnings: string[] = [], readOnlyReason?: string): Promise<ImportReview> {
@@ -163,48 +184,53 @@ export class ImportReviewService {
             };
             document.roots.forEach((node) => visit(node, 0));
         } else sourceTree.push(...buildReviewSourceTree(document.roots, recorder, after));
-        this.previewCache.clear();
-        this.recorder = recorder;
-        this.document = document;
-        this.review = { id: recorder.id, createdAt: new Date().toISOString(), fileName: document.fileName,
+        const review: ImportReview = { id: recorder.id, createdAt: new Date().toISOString(), fileName: document.fileName,
             targetUrl, assets: [...assets.values()].sort((a, b) => Number(b.state === 'new') - Number(a.state === 'new')),
             before, after, sourceTree, changes: diffReviewNodes(before.nodes, after.nodes), warnings,
             decisions: recorder.decisions ?? [], confirmed: false, readOnlyReason };
-        return this.review;
+        // Replacing a recorder's fallback/full report must refresh its ordering
+        // as well as its state. Bound documents, previews and recorded bytes too.
+        this.history.delete(recorder.id);
+        this.history.set(recorder.id, { review, recorder, document, previewCache: new Map() });
+        this.currentId = recorder.id;
+        while (this.history.size > 32) this.history.delete(this.history.keys().next().value!);
+        return review;
     }
 
-    private requireReview(id: string): ImportReview {
-        if (!this.review || id !== this.review.id || !this.recorder) throw new Error('检查结果已过期，请重新导入。');
-        return this.review;
+    private requireEntry(id: string) {
+        const entry = this.history.get(id);
+        if (!entry) throw new Error('检查结果已过期或已超出最近 32 份结果的保留上限，请重新导入。');
+        return entry;
     }
 
     source(id: string, assetId: string, nodeId: string): { fileKey: string; node: FigmaNode } {
-        const asset = this.requireReview(id).assets.find((item) => item.id === assetId);
-        const node = this.document?.nodeById.get(nodeId);
+        const { review, document } = this.requireEntry(id);
+        const asset = review.assets.find((item) => item.id === assetId);
+        const node = document.nodeById.get(nodeId);
         if (!asset?.figmaIds.includes(nodeId) || !node) throw new Error('Figma 节点不属于本次资源。');
-        return { fileKey: this.document!.fileKey, node };
+        return { fileKey: document.fileKey, node };
     }
 
     async preview(id: string, assetId: string): Promise<{ before?: string; after?: string }> {
-        const review = this.requireReview(id);
+        const { review, recorder, previewCache } = this.requireEntry(id);
         const asset = review.assets.find((item) => item.id === assetId);
         if (!asset) throw new Error('资源不属于本次导入。');
-        let after = this.previewCache.get(assetId);
+        let after = previewCache.get(assetId);
         if (!after && asset.state !== 'deleted') {
             const path = await assetPath(asset.url);
             if ((await stat(path)).size > 32 * 1024 * 1024) throw new Error('图片超过 32 MB，请在资源面板查看。');
             after = thumbnail(await readFile(path));
-            if (after) this.previewCache.set(assetId, after);
+            if (after) previewCache.set(assetId, after);
         }
-        return { before: this.recorder!.records.get(asset.url)?.before, after };
+        return { before: recorder.records.get(asset.url)?.before, after };
     }
 
     private script(method: string, payload: any): Promise<any> {
         return this.sceneRequest('execute-scene-script', { name: 'figma-importer-cocos', method, args: [payload] });
     }
 
-    private async assertUsers(asset: ReviewAsset, targetUuid?: string): Promise<void> {
-        const record = this.recorder!.records.get(asset.url)!;
+    private async assertUsers(recorder: ImportReviewRecorder, asset: ReviewAsset, targetUuid?: string): Promise<void> {
+        const record = recorder.records.get(asset.url)!;
         for (const uuid of new Set(record.relatedUuids ?? [asset.uuid, record.imageUuid!])) {
             const users = await this.assetRequest('query-asset-users', uuid, 'all');
             if (!Array.isArray(users)) throw new Error(`无法检查资源引用：${asset.name}`);
@@ -220,7 +246,8 @@ export class ImportReviewService {
     }
 
     async apply(id: string, selectedIds: unknown): Promise<ImportReview> {
-        const review = this.requireReview(id);
+        const { review, recorder, previewCache } = this.requireEntry(id);
+        if (id !== this.currentId) throw new Error('该历史结果仅供查看；重新导入当前目标可生成可修改报告。');
         if (this.applying) throw new Error('正在执行确认修改，请稍候。');
         const selected = validateRemovalSelection(review, selectedIds);
         if (!selected.length) { review.confirmed = true; return review; }
@@ -229,20 +256,20 @@ export class ImportReviewService {
         let saved = false;
         try {
             const payload = { id, uuids: [...new Set(selected.flatMap((asset) =>
-                this.recorder!.records.get(asset.url)?.relatedUuids ?? [asset.uuid]))] };
+                recorder.records.get(asset.url)?.relatedUuids ?? [asset.uuid]))] };
             await this.script('prepareReviewRemoval', payload);
             const target = await this.assetRequest('query-asset-info', review.after.targetUuid);
             if (!target?.url || !/\.(prefab|scene)$/.test(target.url)) throw new Error('目标场景/预制体尚未保存，无法安全删除资源。');
             const backupFolder = join(Editor.Project.path, 'temp', 'figma-importer', 'review-backups', id);
             const staged: Array<{ asset: ReviewAsset; data: Buffer; meta: Buffer }> = [];
             for (const asset of selected) {
-                const record = this.recorder!.records.get(asset.url)!;
+                const record = recorder.records.get(asset.url)!;
                 const path = await assetPath(asset.url);
                 const [data, meta, info] = await Promise.all([readFile(path), readFile(`${path}.meta`),
                     this.assetRequest('query-asset-info', asset.url)]);
                 if (path !== record.path || digest(data) !== record.hash || digest(meta) !== record.metaHash
                     || info?.uuid !== record.imageUuid) throw new Error(`“${asset.name}”已被修改或替换，请重新导入后再处理。`);
-                await this.assertUsers(asset, review.after.targetUuid);
+                await this.assertUsers(recorder, asset, review.after.targetUuid);
                 staged.push({ asset, data, meta });
             }
             // Persist the complete pre-cleanup scene (including a non-auto-saved import)
@@ -281,7 +308,7 @@ export class ImportReviewService {
                 await new Promise((resolve) => setTimeout(resolve, 100));
             }
             if (!verified) throw new Error('保存后的文件仍引用待删除图片，已停止删除并恢复引用。');
-            for (const asset of selected) await this.assertUsers(asset, target.uuid);
+            for (const asset of selected) await this.assertUsers(recorder, asset, target.uuid);
             saved = true;
             review.after = await this.script('finishReviewRemoval', { id });
             detached = false;
@@ -289,19 +316,19 @@ export class ImportReviewService {
             for (const asset of selected) {
                 try {
                     await this.script('prepareReviewRemoval', payload);
-                    const record = this.recorder!.records.get(asset.url)!;
+                    const record = recorder.records.get(asset.url)!;
                     const path = await assetPath(asset.url);
                     if (digest(await readFile(path)) !== record.hash || digest(await readFile(`${path}.meta`)) !== record.metaHash) {
                         throw new Error('文件在确认过程中发生变化');
                     }
                     if (containsReference(JSON.parse((await readFile(targetPath)).toString('utf8')))) throw new Error('目标文件重新引用了待删除资源');
-                    await this.assertUsers(asset, target.uuid);
+                    await this.assertUsers(recorder, asset, target.uuid);
                     await this.assetRequest('delete-asset', asset.url);
                     if (await this.assetRequest('query-asset-info', asset.url)) throw new Error('资源仍存在');
                     asset.state = 'deleted';
                     asset.nodeNames = [];
                     asset.canRemove = false;
-                    this.previewCache.delete(asset.id);
+                    previewCache.delete(asset.id);
                 } catch (error) {
                     review.warnings.push(`“${asset.name}”已解除节点引用，但文件删除失败并保留：${(error as Error).message}`);
                 }

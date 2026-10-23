@@ -2,7 +2,7 @@
   "package_version": 2,
   "name": "figma-importer-cocos",
   "title": "Figma Importer",
-  "version": "1.0.58",
+  "version": "1.0.59",
   "description": "Figma UI importer for Cocos Creator 3.8.7",
   "main": "./dist/main.js",
   "author": "Figma Importer contributors",
@@ -57,6 +57,12 @@
       "script": "./dist/scene.js"
     },
     "messages": {
+      "resolve-batch-source": { "methods": ["resolveBatchSource"] },
+      "activate-batch-item": { "methods": ["activateBatchItem"] },
+      "sync-batch-items": { "methods": ["syncBatchItems"] },
+      "get-batch-state": { "methods": ["getBatchState"] },
+      "import-batch": { "methods": ["importBatch"] },
+      "stop-import-batch": { "methods": ["stopImportBatch"] },
       "get-import-review": { "methods": ["getImportReview"] },
       "import-review-ready": { "methods": ["default.onImportReviewReady"] },
       "get-import-review-preview": { "methods": ["getImportReviewPreview"] },

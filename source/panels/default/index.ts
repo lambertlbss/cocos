@@ -2,7 +2,9 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import packageJSON from '../../../package.json';
 import { ImportReviewPanel } from './import-review';
-import { PanelWorkflow, type WorkflowResult } from './workflow';
+import { PanelWorkflow, type BatchWorkflowContext, type WorkflowResult } from './workflow';
+import type { BatchFrameItem, BatchImportItemResult, BatchImportResult, BatchProgress, BatchSourceResult, BatchState } from '../../batch-types';
+import { sanitizeAssetName } from '../../importer/assets';
 import type { ImportReview } from '../../import-review-model';
 import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import { normalizeImportAction } from '../../import-actions';
@@ -94,6 +96,19 @@ let importButtonResetTimer: ReturnType<typeof setTimeout> | null = null;
 let nodeOverrideSaveTask: Promise<void> = Promise.resolve();
 let roundtripPreviewToken: string | undefined;
 let roundtripPairToken: string | undefined;
+type FrameEditorState = Pick<PanelState, 'document' | 'preferredActions' | 'actions' | 'kinds' | 'patches' | 'explicitIds' | 'names' | 'renamedIds' | 'defaults' | 'collapsed' | 'suppressed' | 'selectedId' | 'search'> & { treeScroll: number; preset?: string };
+interface FrameEditorItem { item: BatchFrameItem; editor?: FrameEditorState; configured: boolean }
+let batchItems: FrameEditorItem[] = [];
+let activeBatchId: string | undefined;
+let batchResult: BatchImportResult | undefined;
+let batchProgress: BatchProgress | undefined;
+let batchSyncTask: Promise<void> = Promise.resolve();
+let batchSyncError: unknown;
+let batchImportPending = false;
+let batchStopRequested = false;
+let previewRevision = 0;
+let previewReadTask: Promise<unknown> = Promise.resolve();
+let batchRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
 const state: PanelState = {
     document: null,
@@ -124,6 +139,293 @@ const state: PanelState = {
     runtimeCompatible: true,
     fontAssets: [],
 };
+
+function selectedFrames(): FrameEditorItem[] { return batchItems.filter(({ item }) => item.enabled); }
+
+function editorSnapshot(): FrameEditorState {
+    return {
+        document: state.document,
+        preferredActions: new Map(state.preferredActions), actions: new Map(state.actions),
+        kinds: new Map(state.kinds), patches: new Set(state.patches), explicitIds: new Set(state.explicitIds),
+        names: new Map(state.names), renamedIds: new Set(state.renamedIds), defaults: new Map(state.defaults),
+        collapsed: new Set(state.collapsed), suppressed: new Set(state.suppressed),
+        selectedId: state.selectedId, search: state.search, treeScroll: element('#tree').scrollTop,
+        preset: Array.from(root().querySelectorAll<HTMLElement>('[data-preset]')).find((button) => button.classList.contains('active'))?.dataset.preset,
+    };
+}
+
+function initialFrameEditor(document: DocumentDto): FrameEditorState {
+    const editor: FrameEditorState = {
+        document, preferredActions: new Map(), actions: new Map(), kinds: new Map(),
+        patches: defaultNineSliceIds(document.tree), explicitIds: new Set(), names: new Map(), renamedIds: new Set(),
+        defaults: new Map(), collapsed: new Set(), suppressed: new Set(), selectedId: document.tree[0]?.id,
+        search: '', treeScroll: 0, preset: 'smart',
+    };
+    for (const node of flatten(document.tree)) {
+        const action = smartActionForNode(node);
+        editor.preferredActions.set(node.id, action); editor.kinds.set(node.id, node.kind);
+        editor.defaults.set(node.id, { action, kind: node.kind }); editor.names.set(node.id, node.name);
+    }
+    for (const override of document.nodeOverrides ?? []) {
+        const node = findNode(override.id, document.tree); if (!node) continue;
+        const name = sanitizeNodeName(override.name);
+        if (name && name !== node.name) { editor.names.set(node.id, name); editor.renamedIds.add(node.id); }
+        if (override.explicit) {
+            editor.preferredActions.set(node.id, safeAction(node, override.action)); editor.kinds.set(node.id, override.kind);
+            if (override.nineSlice && node.patchCandidate) editor.patches.add(node.id); else editor.patches.delete(node.id);
+            editor.explicitIds.add(node.id); editor.preset = undefined;
+        }
+    }
+    const effective = resolveEffectiveActions(document.tree, editor.preferredActions, editor.patches, editor.explicitIds, editor.renamedIds);
+    editor.actions = effective.actions; editor.suppressed = effective.suppressed;
+    return editor;
+}
+
+function rememberActiveFrame(): void {
+    const active = batchItems.find(({ item }) => item.id === activeBatchId);
+    if (active) active.editor = editorSnapshot();
+}
+
+function frameName(entry: FrameEditorItem): string {
+    const editor = entry.item.id === activeBatchId ? state : entry.editor;
+    return editor?.names.get(entry.item.rootId) ?? entry.item.document.nodeOverrides?.find((override) => override.id === entry.item.rootId)?.name ?? entry.item.name;
+}
+
+function batchConflicts(): Set<string> {
+    const names = new Map<string, string[]>();
+    for (const entry of selectedFrames()) {
+        const key = sanitizeAssetName(frameName(entry)).toLocaleLowerCase();
+        names.set(key, [...(names.get(key) ?? []), entry.item.id]);
+    }
+    return new Set(Array.from(names.values()).filter((ids) => ids.length > 1).flat());
+}
+
+function batchContext(): BatchWorkflowContext | undefined {
+    if (!batchItems.length) return undefined;
+    let nodes = 0;
+    let selectedNodes = 0;
+    for (const entry of selectedFrames()) {
+        const editor = entry.item.id === activeBatchId ? state : entry.editor;
+        const all = flatten(entry.item.document.tree);
+        nodes += all.length;
+        selectedNodes += all.filter((node) => (editor?.actions.get(node.id) ?? node.action) !== 'ignore').length;
+    }
+    return {
+        count: selectedFrames().length, total: batchItems.length, nodes, selectedNodes,
+        conflicts: batchConflicts().size > 0,
+        ...(batchResult ? { result: {
+            success: batchResult.items.filter((item) => item.status === 'success').length,
+            failed: batchResult.items.filter((item) => item.status === 'failed').length,
+            pending: batchResult.items.filter((item) => item.status === 'pending').length,
+            stopped: batchResult.stopped,
+        } } : {}),
+    };
+}
+
+function batchFonts(): string[] {
+    return batchItems.length ? Array.from(new Set(selectedFrames().flatMap(({ item }) => item.document.fonts))) : state.document?.fonts ?? [];
+}
+
+function syncBatchItems(): void {
+    const items = batchItems.map(({ item }) => ({ id: item.id, enabled: item.enabled }));
+    const precedingPreview = previewReadTask;
+    batchSyncTask = batchSyncTask.catch(() => undefined).then(async () => {
+        await precedingPreview.catch(() => undefined);
+        await request('sync-batch-items', items);
+        batchSyncError = undefined;
+    }).catch((error) => {
+        batchSyncError = error;
+        showToast(errorMessage(error, '界面列表保存失败，请重试。'), true);
+    });
+}
+
+function batchElement<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] {
+    const value = document.createElement(tag);
+    value.textContent = text;
+    value.className = className;
+    return value;
+}
+
+function batchButton(text: string, action: () => void, className = 'text-button'): HTMLButtonElement {
+    const button = batchElement('button', text, className);
+    button.type = 'button';
+    button.disabled = state.busy;
+    button.onclick = action;
+    return button;
+}
+
+function renderBatch(): void {
+    const enabled = batchItems.length > 0;
+    element('#batch-source-region').hidden = !enabled;
+    element('#batch-frame-region').hidden = !enabled;
+    element('#batch-target-region').hidden = !enabled;
+    element('#batch-result-region').hidden = !enabled || (!batchResult && !batchProgress);
+    const genericReview = root().querySelector<HTMLElement>('.result-review');
+    if (genericReview) genericReview.hidden = enabled;
+    element('#preset-scope').textContent = enabled ? '仅作用于当前界面' : '作用于全部节点';
+    element('#batch-selected-count').textContent = `已选 ${selectedFrames().length} / ${batchItems.length}`;
+    element<HTMLButtonElement>('#batch-toggle-all').textContent = selectedFrames().length === batchItems.length ? '取消全选' : '全选';
+    const list = element('#batch-source-list');
+    const tabs = element('#batch-frame-tabs');
+    const targets = element('#batch-target-list');
+    list.replaceChildren(); tabs.replaceChildren(); targets.replaceChildren();
+    const conflicts = batchConflicts();
+    for (const entry of batchItems) {
+        const { item } = entry;
+        const row = batchElement('div', '', `batch-item${item.enabled ? '' : ' is-disabled'}`);
+        const checked = batchElement('input');
+        checked.type = 'checkbox'; checked.checked = item.enabled; checked.disabled = state.busy;
+        checked.dataset.batchChecked = item.id;
+        checked.setAttribute('aria-label', `导入 ${frameName(entry)}`);
+        checked.onchange = () => {
+            if (state.busy) return;
+            item.enabled = checked.checked;
+            syncBatchItems();
+            renderBatch(); renderFontMap(); workflow?.render();
+            if (activeBatchId === item.id && !item.enabled && selectedFrames().length) void activateFrame(selectedFrames()[0].item.id);
+        };
+        const copy = batchElement('div', '', 'batch-item-copy');
+        const title = batchElement('div', '', 'batch-item-title');
+        title.append(batchElement('span', frameName(entry)), batchElement('span', entry.configured ? '已配置' : '智能默认', `badge${entry.configured ? '' : ' subtle'}`));
+        if (conflicts.has(item.id)) title.append(batchElement('span', '名称冲突', 'batch-status-failed'));
+        copy.append(title, batchElement('div', `${item.sectionName ? `${item.sectionName} / ` : ''}${item.document.fileName} · ${flatten(item.document.tree).length} 节点`, 'batch-item-meta'));
+        const actions = batchElement('div', '', 'batch-item-actions');
+        const configure = batchButton('调整节点', () => {
+            if (!item.enabled) { item.enabled = true; syncBatchItems(); }
+            void activateFrame(item.id, true);
+        });
+        configure.dataset.batchConfigure = item.id;
+        const remove = batchButton('×', () => {
+            if (state.busy) return;
+            rememberActiveFrame();
+            batchItems = batchItems.filter((candidate) => candidate.item.id !== item.id);
+            if (activeBatchId === item.id) {
+                activeBatchId = undefined;
+                if (selectedFrames().length) void activateFrame(selectedFrames()[0].item.id);
+                else if (batchItems.length) void activateFrame(batchItems[0].item.id);
+                else { state.document = null; renderTree(); workflow?.batchReady(); }
+            }
+            syncBatchItems(); renderBatch(); renderFontMap(); workflow?.render();
+        }, 'icon-button');
+        remove.dataset.batchRemove = item.id; remove.setAttribute('aria-label', `移除 ${frameName(entry)}`);
+        actions.append(configure, remove); row.append(checked, copy, actions); list.append(row);
+        if (!item.enabled) continue;
+        const tab = batchButton('', () => { void activateFrame(item.id); }, 'batch-frame-tab');
+        tab.dataset.batchFrame = item.id; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(activeBatchId === item.id));
+        tab.append(batchElement('strong', frameName(entry)), batchElement('small', entry.configured ? '已配置 · 自动保留' : '智能默认'));
+        tabs.append(tab);
+        const target = batchElement('label', '', `batch-target-row${conflicts.has(item.id) ? ' is-conflict' : ''}`);
+        target.append(batchElement('span', item.name));
+        const name = batchElement('input');
+        name.type = 'text'; name.value = frameName(entry); name.disabled = state.busy; name.dataset.batchName = item.id;
+        name.setAttribute('aria-label', `${item.name} 的 Prefab 名称`);
+        name.title = `assets/${element<HTMLInputElement>('#prefab-folder').value}/${sanitizeAssetName(frameName(entry))}.prefab`;
+        name.onchange = () => { void renameFrame(entry, name.value); };
+        target.append(name); targets.append(target);
+    }
+    const active = batchItems.find(({ item }) => item.id === activeBatchId);
+    element('#batch-active-name').textContent = active ? `正在调整：${frameName(active)}` : '选择一个界面开始调整';
+    element('#batch-active-status').textContent = active?.configured ? '修改已保留' : '沿用智能默认';
+    element('#batch-conflicts').hidden = conflicts.size === 0;
+    element('#batch-conflicts').textContent = `有 ${conflicts.size} 个界面的 Prefab 文件名重复（忽略大小写）。请改名后开始导入。`;
+    renderBatchResults();
+}
+
+function renderBatchResults(): void {
+    const rows = batchProgress?.items ?? batchResult?.items ?? [];
+    const list = element('#batch-result-list'); list.replaceChildren();
+    for (const item of rows) {
+        const row = batchElement('div', '', 'batch-item');
+        const copy = batchElement('div', '', 'batch-item-copy');
+        copy.append(batchElement('div', item.name, 'batch-item-title'), batchElement('div', item.error ?? item.prefabUrl ?? item.warnings?.join('；') ?? (item.status === 'pending' ? '等待继续导入' : ''), 'batch-item-meta'));
+        const status = { pending: '未完成', running: '正在导入', success: '已完成', failed: '失败' }[item.status];
+        const actions = batchElement('div', '', 'batch-item-actions');
+        actions.append(batchElement('span', status, `batch-status-${item.status}`));
+        if (item.reviewId || item.review) {
+            const review = batchButton('检查结果', () => { void openBatchReview(item); });
+            review.dataset.batchReview = item.id; actions.append(review);
+        }
+        row.append(copy, actions); list.append(row);
+    }
+    const success = rows.filter((item) => item.status === 'success').length;
+    const failed = rows.filter((item) => item.status === 'failed').length;
+    const pending = rows.filter((item) => item.status === 'pending').length;
+    element('#batch-result-count').textContent = `${success} / ${rows.length} 已完成`;
+    element<HTMLButtonElement>('#batch-retry-failed').hidden = !failed || state.busy;
+    element<HTMLButtonElement>('#batch-resume-pending').hidden = !pending || state.busy;
+    element('#batch-result-note').textContent = rows.some((item) => item.requiresAttention)
+        ? '部分项的保存状态需要检查。请先在 Cocos 确认当前目标与保存状态，再重试或继续。'
+        : '点击每一项的“检查结果”查看对应报告；重试和继续会跳过已完成项。';
+}
+
+async function openBatchReview(item: BatchImportItemResult): Promise<void> {
+    if (state.busy) return;
+    try {
+        const reviewId = item.reviewId ?? item.review?.id;
+        const review = reviewId ? await request<ImportReview | null>('get-import-review', reviewId) : null;
+        if (!review) throw new Error('该项检查报告已过期，请重新导入后查看。');
+        importReviewPanel?.open(review);
+    } catch (error) { showToast(errorMessage(error, '读取检查结果失败。'), true); }
+}
+
+async function activateFrame(id: string, navigate = false): Promise<void> {
+    if (state.busy) return;
+    const entry = batchItems.find(({ item }) => item.id === id);
+    if (!entry) return;
+    if (activeBatchId === id && state.document) {
+        if (navigate) workflow?.navigate(2);
+        renderBatch(); workflow?.render();
+        if (navigate && state.selectedId) {
+            const selected = findNode(state.selectedId); if (selected) void preview(selected);
+        }
+        return;
+    }
+    rememberActiveFrame();
+    const oldId = activeBatchId;
+    const oldEditor = editorSnapshot();
+    const settings = readSettings(false); if (settings) state.settings = settings;
+    previewRevision++;
+    setBusy(true);
+    try {
+        await batchSyncTask;
+        await previewReadTask.catch(() => undefined);
+        if (batchSyncError) throw batchSyncError;
+        const loaded = await request<DocumentDto>('activate-batch-item', id);
+        activeBatchId = id;
+        if (entry.editor) Object.assign(state, entry.editor);
+        else initializeDocument(loaded ?? entry.item.document, false);
+        element<HTMLInputElement>('#tree-search').value = state.search;
+        element('#file-name').textContent = state.document?.fileName ?? '';
+        element('#preview-stage').classList.remove('has-image', 'is-loading');
+        element('#preview-image').removeAttribute('src');
+        element('#preview-meta').textContent = '选择节点查看预览';
+        renderTree();
+        element('#tree').scrollTop = entry.editor?.treeScroll ?? 0;
+        root().querySelectorAll<HTMLElement>('[data-preset]').forEach((button) => button.classList.toggle('active', button.dataset.preset === (entry.editor?.preset ?? 'smart')));
+        renderFontMap();
+    } catch (error) {
+        activeBatchId = oldId; Object.assign(state, oldEditor);
+        showToast(errorMessage(error, '切换界面失败，请重试。'), true);
+    } finally {
+        setBusy(false); renderBatch(); updateSummary();
+        if (navigate && activeBatchId === id) workflow?.navigate(2);
+        if (activeBatchId === id && workflow?.step === 2 && state.selectedId) {
+            const selected = findNode(state.selectedId); if (selected) void preview(selected);
+        }
+    }
+}
+
+async function renameFrame(entry: FrameEditorItem, value: string): Promise<void> {
+    if (state.busy) return;
+    const name = sanitizeNodeName(value);
+    if (!name) { showToast('Prefab 名称不能为空。', true); renderBatch(); return; }
+    await activateFrame(entry.item.id);
+    if (activeBatchId !== entry.item.id) return;
+    state.names.set(entry.item.rootId, name);
+    if (name === entry.item.name) state.renamedIds.delete(entry.item.rootId); else state.renamedIds.add(entry.item.rootId);
+    entry.configured = true;
+    persistNodeOverrides(); rememberActiveFrame(); renderTree(); renderBatch(); updateSummary();
+}
 
 function root(): HTMLElement {
     return panelHost.$.app as HTMLElement;
@@ -211,7 +513,7 @@ function findNode(id: string, nodes = state.document?.tree ?? []): TreeNodeDto |
 function renderFontMap(): void {
     const list = element('#font-map-list');
     list.replaceChildren();
-    const families = state.document?.fonts ?? [];
+    const families = batchFonts();
     if (!families.length) {
         const empty = document.createElement('div');
         empty.className = 'font-map-empty';
@@ -257,7 +559,7 @@ function safeAction(_node: TreeNodeDto, action: unknown): ImportAction {
     return normalizeImportAction(action);
 }
 
-function initializeDocument(document: DocumentDto): void {
+function initializeDocument(document: DocumentDto, navigate = true): void {
     state.document = document;
     state.preferredActions.clear();
     state.actions.clear();
@@ -315,7 +617,7 @@ function initializeDocument(document: DocumentDto): void {
     renderFontMap();
     renderTree(true);
     updateSummary();
-    workflow?.documentReady();
+    if (navigate) workflow?.documentReady();
 }
 
 function applySettings(settings: ImportSettings): void {
@@ -344,11 +646,7 @@ function applySettings(settings: ImportSettings): void {
 
 function readSettings(showError = true): ImportSettings | null {
     const fontMap: Record<string, string> = { ...state.settings.fontMap };
-    if (state.document) {
-        for (const family of state.document.fonts) {
-            delete fontMap[family];
-        }
-    }
+    for (const family of batchFonts()) delete fontMap[family];
     root().querySelectorAll<HTMLSelectElement>('[data-font-family]').forEach((select) => {
         const family = select.dataset.fontFamily?.trim();
         if (family && select.value) {
@@ -482,6 +780,17 @@ function importProgress(event: ProgressEvent): number {
 }
 
 function updateProgress(event: ProgressEvent): void {
+    if (event.batch && batchItems.length) {
+        batchProgress = event.batch;
+        const currentRow = event.batch.items.find((item) => item.id === event.batch!.itemId);
+        const current = currentRow?.status === 'running' ? importProgress(event) : 0;
+        event = {
+            ...event,
+            value: Math.min(1, (event.batch.completed + current) / Math.max(1, event.batch.total)),
+            message: `${event.batch.index} / ${event.batch.total} · ${event.batch.name} · ${event.message}`,
+        };
+        renderBatchResults();
+    }
     if (['fetch', 'assets', 'scene'].includes(event.phase)) setBusy(true);
     workflow?.progress(event);
     const region = element('#progress-region');
@@ -499,7 +808,7 @@ function updateProgress(event: ProgressEvent): void {
         importButtonResetTimer = null;
     }
     if (importing) {
-        const progress = importProgress(event);
+        const progress = event.batch ? value : importProgress(event);
         button.classList.add('is-running');
         button.classList.remove('is-success', 'is-error');
         button.setAttribute('aria-busy', 'true');
@@ -531,6 +840,10 @@ function updateProgress(event: ProgressEvent): void {
         pendingImportReview = null;
         workflow?.complete({ review });
         importReviewPanel?.open(review);
+    }
+    if (event.batch?.result && !batchImportPending && batchItems.length) {
+        if (batchRecoveryTimer) clearTimeout(batchRecoveryTimer);
+        workflow?.end(); setBusy(false); completeBatchPresentation(event.batch.result);
     }
 }
 
@@ -583,6 +896,8 @@ function persistNodeOverrides(): void {
         return;
     }
     const fileKey = state.document.fileKey;
+    const active = batchItems.find(({ item }) => item.id === activeBatchId);
+    if (active) { active.configured = true; rememberActiveFrame(); renderBatch(); }
     const overrides = explicitOverrides();
     const scopeIds = flatten(state.document.tree).map((node) => node.id);
     // Serialize writes so a slower earlier request can never overwrite a newer
@@ -822,6 +1137,7 @@ function renderTree(resetScroll = false): void {
 }
 
 function updateSummary(): void {
+    if (batchItems.length) { rememberActiveFrame(); renderBatch(); }
     const nodes = state.document ? flatten(state.document.tree) : [];
     const selected = nodes.filter((node) => state.actions.get(node.id) !== 'ignore');
     element('#node-count').textContent = `${nodes.length} 节点`;
@@ -840,6 +1156,8 @@ async function preview(node: TreeNodeDto): Promise<void> {
         return;
     }
     state.selectedId = node.id;
+    const revision = ++previewRevision;
+    const frameId = activeBatchId;
     renderTree();
     element('#preview-meta').textContent = `${effectiveNodeName(node)} · ${Math.round(node.width)}×${Math.round(node.height)}`;
     const stage = element('#preview-stage');
@@ -848,8 +1166,16 @@ async function preview(node: TreeNodeDto): Promise<void> {
     stage.classList.remove('has-image');
     image.removeAttribute('src');
     try {
-        const result = await request<{ url: string }>('get-preview', node.id);
-        if (state.selectedId !== node.id) {
+        const precedingSync = batchSyncTask;
+        const read = previewReadTask.catch(() => undefined).then(async () => {
+            await precedingSync;
+            if (previewRevision !== revision || frameId !== activeBatchId) return null;
+            return request<{ url: string }>('get-preview', node.id);
+        });
+        previewReadTask = read.catch(() => undefined);
+        const result = await read;
+        if (!result) return;
+        if (state.selectedId !== node.id || previewRevision !== revision || frameId !== activeBatchId) {
             return;
         }
         await new Promise<void>((resolve, reject) => {
@@ -857,11 +1183,11 @@ async function preview(node: TreeNodeDto): Promise<void> {
             image.onerror = () => reject(new Error('预览图片加载失败。'));
             image.src = result.url;
         });
-        stage.classList.add('has-image');
+        if (previewRevision === revision) stage.classList.add('has-image');
     } catch (error) {
-        showToast(error instanceof Error ? error.message : '预览失败。', true);
+        if (previewRevision === revision) showToast(error instanceof Error ? error.message : '预览失败。', true);
     } finally {
-        stage.classList.remove('is-loading');
+        if (previewRevision === revision) stage.classList.remove('is-loading');
     }
 }
 
@@ -914,6 +1240,10 @@ async function importToScene(): Promise<void> {
         workflow?.fail('请检查导入倍率与输出目录，修正后再次导入。');
         return;
     }
+    if (batchItems.length) {
+        await importBatchFrames(settings);
+        return;
+    }
     const overrides: ImportOverride[] = flatten(state.document.tree).map((node) => ({
         id: node.id,
         action: state.actions.get(node.id) ?? node.action,
@@ -949,6 +1279,138 @@ async function importToScene(): Promise<void> {
         setBusy(false);
         updateSummary();
     }
+}
+
+function mergeBatchItems(items: BatchFrameItem[]): void {
+    for (const item of items) {
+        const previous = batchItems.find((entry) => entry.item.id === item.id);
+        if (previous) previous.item = { ...item, enabled: previous.item.enabled };
+        else batchItems.push({ item, editor: initialFrameEditor(item.document), configured: Boolean(item.document.nodeOverrides?.length) });
+    }
+}
+
+async function readBatchSource(): Promise<void> {
+    if (state.busy) return;
+    if (workflow && !workflow.credentialsReady) { workflow.openCredentials(); return; }
+    const source = element<HTMLInputElement>('#source-url').value.trim();
+    if (!source) { showToast('请粘贴 Figma Section 或 Frame 链接。', true); return; }
+    rememberActiveFrame();
+    const settings = readSettings(false); if (settings) state.settings = settings;
+    workflow?.begin('fetch'); setBusy(true);
+    updateProgress({ phase: 'fetch', value: 0.05, message: '正在读取并识别 Figma 界面…' });
+    let activate: string | undefined;
+    try {
+        await batchSyncTask;
+        await previewReadTask.catch(() => undefined);
+        if (batchSyncError) throw batchSyncError;
+        const result = await request<BatchSourceResult>('resolve-batch-source', source);
+        if (result.document && !result.items.length) {
+            batchItems = []; activeBatchId = undefined; batchResult = undefined; batchProgress = undefined;
+            syncBatchItems();
+            state.fontAssets = result.document.fontAssets ?? state.fontAssets;
+            initializeDocument(result.document);
+        } else {
+            mergeBatchItems(result.items);
+            batchResult = undefined; batchProgress = undefined;
+            state.fontAssets = Array.from(new Map(batchItems.flatMap(({ item }) => item.document.fontAssets ?? []).map((font) => [font.url, font])).values());
+            activate = selectedFrames().find(({ item }) => item.id === activeBatchId)?.item.id ?? selectedFrames()[0]?.item.id ?? batchItems[0]?.item.id;
+            activeBatchId = undefined;
+            syncBatchItems();
+            element<HTMLInputElement>('#source-url').value = '';
+            workflow?.batchReady();
+            showToast(`已添加 ${result.added} 个界面${result.duplicates ? `，跳过 ${result.duplicates} 个重复项` : ''}。`);
+        }
+    } catch (error) {
+        const message = errorMessage(error, '读取失败。');
+        if (!workflow?.cancelled) workflow?.fail(message);
+        showToast(workflow?.cancelled ? '读取已取消，配置已保留。' : message, !workflow?.cancelled);
+    } finally {
+        workflow?.end(); setBusy(false);
+        if (activate) await activateFrame(activate);
+        renderBatch(); updateSummary();
+    }
+}
+
+function overridesForFrame(entry: FrameEditorItem): ImportOverride[] {
+    const editor = entry.editor ?? initialFrameEditor(entry.item.document);
+    return flatten(entry.item.document.tree).map((node) => ({
+        id: node.id, action: editor.actions.get(node.id) ?? node.action, kind: editor.kinds.get(node.id) ?? node.kind,
+        nineSlice: editor.patches.has(node.id), explicit: editor.explicitIds.has(node.id),
+        ...(editor.renamedIds.has(node.id) ? { name: editor.names.get(node.id) ?? node.name } : {}),
+    }));
+}
+
+async function importBatchFrames(settings: ImportSettings, ids?: Set<string>): Promise<void> {
+    if (state.busy || batchImportPending) return;
+    rememberActiveFrame();
+    const entries = selectedFrames().filter(({ item }) => !ids || ids.has(item.id));
+    if (!entries.length) { showToast('请先勾选要导入的界面。', true); return; }
+    if (batchConflicts().size) { workflow?.fail('存在重复的 Prefab 文件名，请先在清单中改名。'); return; }
+    batchImportPending = true; batchProgress = undefined; batchStopRequested = false;
+    const previous = batchResult;
+    workflow?.begin('import'); setBusy(true); renderBatch();
+    updateProgress({ phase: 'assets', value: 0, message: `准备导入 ${entries.length} 个界面…` });
+    try {
+        await batchSyncTask;
+        await previewReadTask.catch(() => undefined);
+        if (batchSyncError) throw batchSyncError;
+        await nodeOverrideSaveTask;
+        if (batchStopRequested) {
+            completeBatchPresentation({ id: 'stopped-before-start', stopped: true, completed: 0, total: entries.length,
+                items: entries.map(({ item }) => ({ id: item.id, name: item.name, sourceUrl: item.sourceUrl, status: 'pending' })) });
+            return;
+        }
+        const result = await request<BatchImportResult>('import-batch', {
+            items: entries.map((entry) => ({ id: entry.item.id, overrides: overridesForFrame(entry) })), settings,
+            failurePolicy: 'continue', preserveResults: Boolean(ids),
+        });
+        const merged = ids && previous ? previous.items.map((item) => result.items.find((next) => next.id === item.id) ?? item) : result.items;
+        batchResult = { ...result, items: merged, total: merged.length, completed: merged.filter((item) => item.status === 'success' || item.status === 'failed').length };
+        batchProgress = undefined; pendingImportReview = null;
+        const created = merged.reduce((sum, item) => sum + (item.created ?? 0), 0);
+        const updated = merged.reduce((sum, item) => sum + (item.updated ?? 0), 0);
+        workflow?.complete({ created, updated, warnings: merged.flatMap((item) => item.warnings ?? []) });
+        showToast(`本批完成：成功 ${merged.filter((item) => item.status === 'success').length} 项，失败 ${merged.filter((item) => item.status === 'failed').length} 项。`);
+    } catch (error) {
+        const message = errorMessage(error, '批量导入失败。');
+        workflow?.fail(message); showToast(message, true);
+    } finally {
+        batchImportPending = false; workflow?.end(); setBusy(false); renderBatch(); updateSummary();
+    }
+}
+
+async function retryBatch(status: 'failed' | 'pending'): Promise<void> {
+    if (state.busy || !batchResult) return;
+    const settings = readSettings(); if (!settings) return;
+    const ids = new Set(batchResult.items.filter((item) => item.status === status).map((item) => item.id));
+    await importBatchFrames(settings, ids);
+}
+
+function completeBatchPresentation(result: BatchImportResult): void {
+    batchResult = result; batchProgress = undefined;
+    workflow?.complete({
+        created: result.items.reduce((sum, item) => sum + (item.created ?? 0), 0),
+        updated: result.items.reduce((sum, item) => sum + (item.updated ?? 0), 0),
+        warnings: result.items.flatMap((item) => item.warnings ?? []),
+    });
+    renderBatch();
+}
+
+function watchRestoredBatch(): void {
+    batchRecoveryTimer = setTimeout(async () => {
+        if (!panelHost) return;
+        try {
+            const recovered = await request<BatchState>('get-batch-state');
+            if (recovered.running) {
+                batchProgress = recovered.running; renderBatchResults(); watchRestoredBatch(); return;
+            }
+            workflow?.end(); setBusy(false);
+            if (recovered.lastResult) completeBatchPresentation(recovered.lastResult);
+            else workflow?.fail('后台批量任务已经结束，请检查 Cocos 中的导入结果。');
+        } catch (error) {
+            workflow?.end(); setBusy(false); workflow?.fail(errorMessage(error, '读取后台批量任务失败。'));
+        }
+    }, 800);
 }
 
 async function openImportReview(tab: 'assets' | 'nodes' | 'source' = 'assets'): Promise<void> {
@@ -1100,32 +1562,32 @@ function bindEvents(): void {
             workflow.openCredentials();
             return;
         }
+        if (batchItems.length && !forceRead) {
+            const selected = selectedFrames();
+            if (!selected.length) return;
+            await activateFrame(selected.some(({ item }) => item.id === activeBatchId) ? activeBatchId! : selected[0].item.id, true);
+            return;
+        }
+        if (forceRead && batchItems.length) {
+            const active = batchItems.find(({ item }) => item.id === activeBatchId);
+            if (active) element<HTMLInputElement>('#source-url').value = active.item.sourceUrl;
+        }
         if (!forceRead && workflow?.sourceUnchanged()) {
             workflow.navigate(2);
             return;
         }
-        const source = element<HTMLInputElement>('#source-url').value.trim();
-        if (!source) {
-            showToast('请输入 Figma 文件或节点链接。', true);
-            return;
-        }
-        workflow?.begin('fetch');
-        setBusy(true);
-        updateProgress({ phase: 'fetch', value: 0.05, message: '正在连接 Figma…' });
-        try {
-            const document = await request<DocumentDto>('fetch-document', source);
-            state.fontAssets = document.fontAssets ?? state.fontAssets;
-            initializeDocument(document);
-        } catch (error) {
-            const message = error instanceof Error ? error.message : '读取失败。';
-            if (!workflow?.cancelled) workflow?.fail(message);
-            showToast(workflow?.cancelled ? '读取已取消，配置已保留。' : message, !workflow?.cancelled);
-        } finally {
-            workflow?.end();
-            setBusy(false);
-            updateSummary();
-        }
+        await readBatchSource();
     });
+    element('#add-batch-source').addEventListener('click', readBatchSource);
+    element('#batch-edit-list').addEventListener('click', () => workflow?.navigate(1));
+    element('#batch-toggle-all').addEventListener('click', () => {
+        if (state.busy) return;
+        const enabled = selectedFrames().length !== batchItems.length;
+        batchItems.forEach(({ item }) => { item.enabled = enabled; });
+        syncBatchItems(); renderBatch(); renderFontMap(); workflow?.render();
+    });
+    element('#batch-retry-failed').addEventListener('click', () => retryBatch('failed'));
+    element('#batch-resume-pending').addEventListener('click', () => retryBatch('pending'));
     element('#refresh-document').addEventListener('click', () => {
         if (state.busy) return;
         forceDocumentRead = true;
@@ -1134,7 +1596,7 @@ function bindEvents(): void {
 
     element<HTMLInputElement>('#source-url').addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
-            element<HTMLButtonElement>('#fetch-document').click();
+            element<HTMLButtonElement>('#add-batch-source').click();
         }
     });
     element<HTMLInputElement>('#source-url').addEventListener('input', resetRoundtripTokens);
@@ -1228,8 +1690,9 @@ function bindEvents(): void {
     element('#import-button').addEventListener('click', importToScene);
     element('#cancel-import').addEventListener('click', async () => {
         if (!state.busy) return;
+        if (batchImportPending) batchStopRequested = true;
         workflow?.cancelRequested();
-        try { await request('cancel-import'); }
+        try { await request(batchImportPending ? 'stop-import-batch' : 'cancel-import'); }
         catch (error) {
             const message = errorMessage(error, '取消请求失败，请稍后重试。');
             workflow?.cancelRequestFailed(message);
@@ -1382,6 +1845,7 @@ module.exports = Editor.Panel.define({
     },
     methods: {
         onImportReviewReady(review: ImportReview) {
+            if (batchItems.length) { workflow?.rememberReview(); return; }
             if (state.busy || workflow?.pending) {
                 pendingImportReview = review;
                 return;
@@ -1396,7 +1860,7 @@ module.exports = Editor.Panel.define({
     async ready() {
         panelHost = this;
         importReviewPanel = new ImportReviewPanel(root(), request, setBusy);
-        workflow = new PanelWorkflow(root(), () => state, (tab) => { void openImportReview(tab); });
+        workflow = new PanelWorkflow(root(), () => ({ ...state, batch: batchContext() }), (tab) => { void openImportReview(tab); });
         bindEvents();
         try {
             const initial = await request<{
@@ -1413,6 +1877,23 @@ module.exports = Editor.Panel.define({
             if (initial.document) {
                 initializeDocument(initial.document);
             }
+            const batch = await request<BatchState | undefined>('get-batch-state');
+            if (batch?.items.length) {
+                mergeBatchItems(batch.items);
+                state.fontAssets = Array.from(new Map(batch.items.flatMap((item) => item.document.fontAssets ?? []).map((font) => [font.url, font])).values());
+                workflow.batchReady();
+                const active = selectedFrames()[0] ?? batchItems[0];
+                if (batch.running) {
+                    activeBatchId = active.item.id;
+                    Object.assign(state, active.editor);
+                    renderTree(); renderFontMap();
+                } else await activateFrame(active.item.id);
+                renderBatch();
+                if (batch.lastResult) completeBatchPresentation(batch.lastResult);
+                if (batch.running) {
+                    batchProgress = batch.running; workflow.begin('import'); setBusy(true); watchRestoredBatch();
+                }
+            }
             if (!state.runtimeCompatible) {
                 updateSummary();
                 const button = element<HTMLButtonElement>('#import-button');
@@ -1424,7 +1905,7 @@ module.exports = Editor.Panel.define({
                 // Replay persisted in-memory report if completion preceded panel readiness.
                 const review = await request<ImportReview | null>('get-import-review');
                 if (review) workflow.rememberReview();
-                if (review && !review.confirmed) {
+                if (review && !review.confirmed && !batchItems.length) {
                     workflow.complete({ review });
                     importReviewPanel?.open(review);
                 }
@@ -1441,6 +1922,10 @@ module.exports = Editor.Panel.define({
         pendingImportReview = null;
         if (toastTimer) clearTimeout(toastTimer);
         if (importButtonResetTimer) clearTimeout(importButtonResetTimer);
+        if (batchRecoveryTimer) clearTimeout(batchRecoveryTimer);
+        batchItems = []; activeBatchId = undefined; batchResult = undefined; batchProgress = undefined;
+        batchImportPending = false; batchSyncError = undefined; batchSyncTask = Promise.resolve(); previewRevision++;
+        previewReadTask = Promise.resolve();
         panelHost = null;
     },
 });

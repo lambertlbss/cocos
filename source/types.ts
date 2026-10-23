@@ -1,3 +1,5 @@
+import type { BatchProgress } from './batch-types';
+
 export type ImportAction = 'ignore' | 'generate' | 'render' | 'transform';
 
 /** 仅用于兼容旧面板热加载期间可能发来的动作值。 */
@@ -363,6 +365,7 @@ export interface PrefabEditingState {
 }
 
 export interface ProgressEvent {
+    batch?: BatchProgress;
     phase: 'idle' | 'fetch' | 'assets' | 'scene' | 'done' | 'error' | 'cancelled';
     value: number;
     message: string;

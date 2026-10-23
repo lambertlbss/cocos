@@ -89,6 +89,11 @@ import { sanitizeNodeName } from './node-name';
 import { ImportReviewRecorder, ImportReviewService } from './importer/import-review';
 import { finalizeImportReview } from './importer/import-review-finalize';
 import type { ImportReview, ReviewScene } from './import-review-model';
+import { assertBatchTargets, collectSectionFrames, frameDocument } from './batch-import';
+import type {
+    BatchDocumentDto, BatchFrameItem, BatchImportItemResult, BatchImportRequest,
+    BatchImportResult, BatchProgress, BatchSourceResult, BatchState,
+} from './batch-types';
 
 const vault = new TokenVault(packageJSON.name);
 const importReviews = new ImportReviewService();
@@ -105,6 +110,16 @@ let mcpApi: FigmaImporterMcpApi | null = null;
 const pluginInstanceId = randomBytes(18).toString('base64url');
 let nodeOverrideWriteQueue: Promise<void> = Promise.resolve();
 let settingsWriteQueue: Promise<void> = Promise.resolve();
+const MAX_BATCH_ITEMS = 100;
+const batchDocuments = new Map<string, { item: BatchFrameItem; document: DocumentSession }>();
+interface BatchRun {
+    id: string;
+    items: BatchImportItemResult[];
+    index: number;
+    stopRequested: boolean;
+}
+let activeBatch: BatchRun | null = null;
+let lastBatchResult: BatchImportResult | undefined;
 
 type Decision = ImportDecision;
 
@@ -211,7 +226,21 @@ async function listFontAssets(): Promise<FontAssetOption[]> {
 }
 
 function emitProgress(progress: ProgressEvent): void {
-    Editor.Message.send(packageJSON.name, 'progress', progress);
+    Editor.Message.send(packageJSON.name, 'progress', {
+        ...progress,
+        ...(activeBatch && !progress.batch ? { batch: batchProgress(activeBatch) } : {}),
+    });
+}
+
+function batchProgress(run: BatchRun): BatchProgress {
+    const current = run.items[Math.min(run.index, run.items.length - 1)];
+    return {
+        batchId: run.id, itemId: current?.id ?? '', name: current?.name ?? '',
+        index: Math.min(run.index + 1, run.items.length), total: run.items.length,
+        completed: run.items.filter((item) => item.status === 'success' || item.status === 'failed').length,
+        stopRequested: run.stopRequested,
+        items: run.items.map((item) => ({ ...item })),
+    };
 }
 
 function defaultCacheFolder(): string {
@@ -313,6 +342,7 @@ async function roundtripService(signal?: AbortSignal): Promise<RoundtripService>
 }
 
 function beginRoundtripOperation(): AbortController {
+    if (activeBatch || activeController || applyingImportReview) throw new Error('导入或结果调整正在执行，请等待完成后再操作 Round-trip。');
     roundtripController?.abort();
     const controller = new AbortController();
     roundtripController = controller;
@@ -325,6 +355,8 @@ function finishRoundtripOperation(controller: AbortController): void {
 
 function beginOperation(owner: string | null = null): AbortController {
     if (applyingImportReview) throw new Error('正在确认导入后的资源调整，请稍候。');
+    if (roundtripController) throw new Error('Round-trip 操作正在执行，请等待完成或先取消。');
+    if (activeBatch && owner !== activeBatch.id) throw new Error('批量导入正在执行，请等待完成或停止后续任务。');
     if (activeController) {
         throw new Error('当前已有 Figma 操作正在执行，请等待完成或先取消。');
     }
@@ -2169,14 +2201,20 @@ async function importLinkedFramePrefab(args: {
         return result;
     } catch (error) {
         if (snapshotStarted && !saveAttempted) {
-            await Editor.Message.request('scene', 'snapshot-abort').catch(() => undefined);
+            try { await Editor.Message.request('scene', 'snapshot-abort'); }
+            catch {
+                if (error instanceof Error) (error as Error & { requiresAttention?: boolean }).requiresAttention = true;
+            }
         }
+        if (saveAttempted && error instanceof Error) (error as Error & { requiresAttention?: boolean }).requiresAttention = true;
         throw error;
     }
 }
 
-async function performImport(request: ImportRequest, operationOwner: string | null = null): Promise<SceneImportResult> {
-    const document = activeDocument;
+async function performImport(request: ImportRequest, operationOwner: string | null = null, options: {
+    document?: DocumentSession; preserveReviews?: boolean; silentReview?: boolean;
+} = {}): Promise<SceneImportResult> {
+    const document = options.document ?? activeDocument;
     if (!document) {
         throw new Error('请先读取 Figma 文件。');
     }
@@ -2188,7 +2226,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
         const decisions = decisionMap(request.overrides, document.tree);
         const reviewDocument = document;
-        importReviews.invalidate();
+        importReviews.invalidate(options.preserveReviews ? { preserveHistory: true } : undefined);
         const reviewRecorder = new ImportReviewRecorder();
         const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings, reviewRecorder));
         const { assets, warnings } = builtAssets;
@@ -2201,6 +2239,11 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
                 }) as ReviewScene);
             // Also cover manual imports whose panel was closed while importing.
             try {
+                if (options.silentReview) {
+                    delete result.reviewBefore;
+                    delete result.reviewAfter;
+                    return;
+                }
                 await Editor.Panel.open(packageJSON.name);
                 Editor.Message.send(packageJSON.name, 'import-review-ready', result.review);
             } catch (error) {
@@ -2412,6 +2455,226 @@ async function fetchFigmaDocument(sourceUrl: string) {
     }
 }
 
+async function batchDocumentDto(document: DocumentSession, fontAssets?: FontAssetOption[]): Promise<BatchDocumentDto> {
+    return {
+        fileKey: document.fileKey, fileName: document.fileName, sourceUrl: document.sourceUrl,
+        tree: document.tree, fonts: document.fonts,
+        fontAssets: fontAssets ?? await listFontAssets(),
+        nodeOverrides: (await nodeOverridesFor(document.fileKey)).filter((item) => document.nodeById.has(item.id)),
+    };
+}
+
+async function resolveBatchSource(sourceUrl: string): Promise<BatchSourceResult> {
+    const parsed = parseFigmaSource(sourceUrl);
+    if (!parsed.nodeId) {
+        if (batchDocuments.size) throw new Error('整份文件请单独导入；请先移除批量界面列表，或使用 Section / Frame 链接。');
+        const document = await fetchFigmaDocument(sourceUrl);
+        return { sourceType: 'file', sourceUrl, items: [], added: 0, duplicates: 0, document };
+    }
+    const controller = beginOperation();
+    try {
+        emitProgress({ phase: 'fetch', value: 0.15, message: '正在读取并识别 Section / Frame…' });
+        const api = await client(controller.signal);
+        const parsedDocument = parseDocument(await api.getNode(parsed.fileKey, parsed.nodeId),
+            sourceUrl, parsed.fileKey, parsed.nodeId);
+        const root = parsedDocument.roots[0];
+        const fontAssets = await listFontAssets();
+        if (root.type !== 'SECTION' && root.type !== 'FRAME') {
+            if (batchDocuments.size) throw new Error('批量列表只接受 Section 或 Frame；其他节点请清空列表后单独导入。');
+            const document = annotateDocumentPlan(parsedDocument);
+            activeDocument = document;
+            documentRevision += 1;
+            await patchSettings({ sourceUrl });
+            return { sourceType: 'node', sourceUrl, items: [], added: 0, duplicates: 0,
+                document: await batchDocumentDto(document, fontAssets) };
+        }
+        const frames = collectSectionFrames(root);
+        if (!frames.length) throw new Error('这个 Section 下没有可独立导入的外层 Frame。');
+        const prepared: Array<{ item: BatchFrameItem; document: DocumentSession }> = [];
+        let duplicates = 0;
+        for (const frame of frames) {
+            const id = figmaFrameSourceHash(parsed.fileKey, frame.id);
+            const existing = batchDocuments.get(id);
+            if (existing) {
+                duplicates += 1;
+                prepared.push({ ...existing, item: { ...existing.item,
+                    document: await batchDocumentDto(existing.document, fontAssets) } });
+                continue;
+            }
+            const document = annotateDocumentPlan(frameDocument(parsedDocument, frame));
+            const item: BatchFrameItem = {
+                id, fileKey: document.fileKey, rootId: frame.id, sourceUrl: document.sourceUrl,
+                name: frame.name, enabled: true,
+                ...(root.type === 'SECTION' ? { sectionName: root.name } : {}),
+                document: await batchDocumentDto(document, fontAssets),
+            };
+            prepared.push({ item, document });
+        }
+        const added = prepared.length - duplicates;
+        if (batchDocuments.size + added > MAX_BATCH_ITEMS) throw new Error('本批最多添加 ' + MAX_BATCH_ITEMS + ' 个界面，请分批导入。');
+        if (controller.signal.aborted) throw new CancelledError();
+        for (const entry of prepared) batchDocuments.set(entry.item.id, entry);
+        await patchSettings({ sourceUrl });
+        emitProgress({ phase: 'idle', value: 1, message: '已添加 ' + added + ' 个界面'
+            + (duplicates ? '，' + duplicates + ' 个已在列表' : '') + '。' });
+        return { sourceType: root.type === 'SECTION' ? 'section' : 'frame', sourceUrl,
+            items: prepared.map((entry) => entry.item), added, duplicates };
+    } catch (error) {
+        emitProgress({ phase: controller.signal.aborted ? 'cancelled' : 'error', value: 0,
+            message: error instanceof Error ? error.message : '读取失败。' });
+        throw error;
+    } finally { finishOperation(controller); }
+}
+
+async function activateBatchItem(id: string): Promise<BatchDocumentDto> {
+    const controller = beginOperation();
+    try {
+        const entry = batchDocuments.get(id);
+        if (!entry) throw new Error('该界面已失效，请重新添加链接。');
+        const document = await batchDocumentDto(entry.document);
+        activeDocument = entry.document;
+        documentRevision += 1;
+        entry.item.document = document;
+        return document;
+    } finally { finishOperation(controller); }
+}
+
+function syncBatchItems(items: Array<{ id: string; enabled: boolean }>): { items: BatchFrameItem[] } {
+    if (activeBatch || activeController) throw new Error('请等待当前任务完成后再修改界面列表。');
+    if (!Array.isArray(items) || items.length > MAX_BATCH_ITEMS) throw new Error('批量界面列表无效。');
+    const next = new Map<string, { item: BatchFrameItem; document: DocumentSession }>();
+    for (const item of items) {
+        const entry = item && batchDocuments.get(item.id);
+        if (!entry || typeof item.enabled !== 'boolean' || next.has(item.id)) throw new Error('界面列表已过期或包含重复项，请重新读取。');
+        next.set(item.id, { ...entry, item: { ...entry.item, enabled: item.enabled } });
+    }
+    batchDocuments.clear();
+    for (const [id, entry] of next) batchDocuments.set(id, entry);
+    return { items: [...batchDocuments.values()].map((entry) => entry.item) };
+}
+
+async function getBatchState(): Promise<BatchState> {
+    if (activeBatch) return {
+        items: [...batchDocuments.values()].map((entry) => entry.item),
+        lastResult: lastBatchResult, running: batchProgress(activeBatch),
+    };
+    const fonts = await listFontAssets();
+    const items: BatchFrameItem[] = [];
+    for (const entry of batchDocuments.values()) {
+        items.push({ ...entry.item, document: await batchDocumentDto(entry.document, fonts) });
+    }
+    return { items, lastResult: lastBatchResult, ...(activeBatch ? { running: batchProgress(activeBatch) } : {}) };
+}
+
+async function importBatch(request: BatchImportRequest): Promise<BatchImportResult> {
+    if (activeBatch || activeController || applyingImportReview || roundtripController) throw new Error('当前已有操作正在执行，请等待完成。');
+    if (!request || !Array.isArray(request.items) || !request.items.length || request.items.length > MAX_BATCH_ITEMS) {
+        throw new Error('请至少选择一个有效的待导入界面。');
+    }
+    const settings = safeSettings(request.settings);
+    const entries = request.items.map((item) => {
+        const entry = item && batchDocuments.get(item.id);
+        if (!entry || !entry.item.enabled || !Array.isArray(item.overrides)) throw new Error('待导入界面已失效或未勾选，请重新读取。');
+        const overrides = item.overrides.map((override) => ({ ...override }));
+        const root = entry.document.roots[0];
+        const decisions = decisionMap(overrides, entry.document.tree);
+        if (decisions.get(root.id)?.action === 'ignore') throw new Error('“' + entry.item.name + '”根节点已忽略，请取消该界面勾选或恢复根节点策略。');
+        const name = decisions.get(root.id)?.name || root.name;
+        return { ...entry, overrides, name };
+    });
+    assertBatchTargets(entries.map((entry) => ({ id: entry.item.id, name: entry.name })));
+    const run: BatchRun = {
+        id: randomBytes(18).toString('hex'), index: 0, stopRequested: false,
+        items: entries.map((entry) => ({ id: entry.item.id, name: entry.name,
+            sourceUrl: entry.item.sourceUrl, status: 'pending' })),
+    };
+    activeBatch = run;
+    for (const entry of entries) entry.item.document.nodeOverrides = entry.overrides;
+    const previousDocument = activeDocument;
+    const previousResult = request.preserveResults ? lastBatchResult : undefined;
+    const completedResult = (): BatchImportResult => {
+        const merged = new Map<string, BatchImportItemResult>();
+        for (const item of previousResult?.items ?? []) {
+            if (batchDocuments.has(item.id)) merged.set(item.id, { ...item });
+        }
+        for (const item of run.items) merged.set(item.id, { ...item });
+        const items = [...merged.values()];
+        return { id: run.id, items, stopped: run.stopRequested,
+            completed: items.filter((item) => item.status === 'success' || item.status === 'failed').length,
+            total: items.length };
+    };
+    try {
+        // Check every destination before the first image/prefab write.
+        const folder = new AssetWriter(settings.prefabFolder).folder;
+        const bindings = await getPrefabBindings();
+        for (const entry of entries) {
+            const url = 'db://assets/' + folder + '/' + sanitizeAssetName(entry.name) + '.prefab';
+            const info = await queryPrefabAsset(url);
+            if (!info) continue;
+            const record = readPrefabSyncRecord(await queryPrefabMeta(info.uuid));
+            if (!record || record.sourceHash !== entry.item.id
+                || (bindings[entry.item.id] && bindings[entry.item.id] !== info.uuid)) {
+                throw new Error('“' + entry.name + '”的 Prefab 路径已被其他来源占用，请改名或调整输出目录。');
+            }
+        }
+        if (run.stopRequested) {
+            const result = completedResult();
+            lastBatchResult = result;
+            emitProgress({ phase: 'cancelled', value: 0, message: '已停止，尚未开始任何界面。', batch: { ...batchProgress(run), result } });
+            return result;
+        }
+        importReviews.invalidate(request.preserveResults ? { preserveHistory: true } : undefined);
+        for (let index = 0; index < entries.length; index++) {
+            if (run.stopRequested) break;
+            run.index = index;
+            const entry = entries[index];
+            const row = run.items[index];
+            row.status = 'running';
+            activeDocument = entry.document;
+            documentRevision += 1;
+            emitProgress({ phase: 'assets', value: 0, message: '正在导入 ' + (index + 1) + '/' + entries.length + '：' + entry.name });
+            try {
+                const result = await performImport({ overrides: entry.overrides,
+                    settings: { ...settings, sourceUrl: entry.item.sourceUrl } }, run.id,
+                { document: entry.document, preserveReviews: true, silentReview: true });
+                Object.assign(row, { status: 'success', prefabUrl: result.prefabUrl,
+                    created: result.created, updated: result.updated, warnings: result.warnings,
+                    reviewId: result.review?.id });
+                row.status = 'success';
+            } catch (error) {
+                let unsafe = Boolean((error as { requiresAttention?: boolean })?.requiresAttention);
+                try { if (await Editor.Message.request('scene', 'query-dirty')) unsafe = true; }
+                catch { unsafe = true; }
+                row.status = 'failed';
+                row.error = error instanceof Error ? error.message : '导入失败。';
+                if (unsafe) {
+                    row.requiresAttention = true;
+                    row.error += ' 当前编辑或保存状态需要检查，已暂停后续界面；确认目标和保存状态后再重试。';
+                }
+                if (unsafe || request.failurePolicy === 'stop') run.stopRequested = true;
+            }
+            emitProgress({ phase: 'scene', value: 1,
+                message: entry.name + '：' + (row.status === 'success' ? '已保存' : '失败') });
+        }
+        const result = completedResult();
+        lastBatchResult = result;
+        emitProgress({ phase: 'done', value: 1, message: result.stopped ? '本批已停止，已完成项保留。' : '本批导入结束。',
+            batch: { ...batchProgress(run), result } });
+        return result;
+    } finally {
+        if (activeBatch === run) activeBatch = null;
+        activeDocument = previousDocument;
+        documentRevision += 1;
+    }
+}
+
+function stopImportBatch(): { accepted: boolean } {
+    if (!activeBatch) return { accepted: false };
+    activeBatch.stopRequested = true;
+    emitProgress({ phase: 'scene', value: 0, message: '当前界面完成保存后停止，后续界面不会开始。' });
+    return { accepted: true };
+}
+
 async function getNodePreview(nodeId: string): Promise<{ url: string }> {
     const document = activeDocument;
     const node = document?.nodeById.get(nodeId);
@@ -2437,7 +2700,13 @@ async function getNodePreview(nodeId: string): Promise<{ url: string }> {
 }
 
 export const methods: Record<string, (...args: any[]) => any> = {
-    getImportReview() { return importReviews.get(); },
+    getImportReview(id?: string) { return importReviews.get(id); },
+    resolveBatchSource,
+    activateBatchItem,
+    syncBatchItems,
+    getBatchState,
+    importBatch,
+    stopImportBatch,
     async getImportReviewPreview(id: string, assetId: string) { return importReviews.preview(id, assetId); },
     async applyImportReview(id: string, removedIds: unknown) {
         if (activeController) throw new Error('请等待当前导入或 Figma 预览完成。');
@@ -2570,6 +2839,7 @@ export const methods: Record<string, (...args: any[]) => any> = {
     },
 
     cancelImport() {
+        if (activeBatch) return stopImportBatch();
         activeController?.abort();
     },
 };
@@ -2585,7 +2855,7 @@ async function startMcpBridge(): Promise<void> {
         projectPath: Editor.Project.path,
         creatorVersion,
         getDocumentRevision: () => documentRevision,
-        isImportBusy: () => activeController !== null,
+        isImportBusy: () => activeBatch !== null || activeController !== null || roundtripController !== null,
         getState: getMcpPluginState,
         fetchDocument: fetchFigmaDocument,
         getPreview: getNodePreview,
@@ -2632,6 +2902,10 @@ export async function load(): Promise<void> {
 }
 
 export function unload(): void {
+    if (activeBatch) activeBatch.stopRequested = true;
+    batchDocuments.clear();
+    lastBatchResult = undefined;
+    importReviews.invalidate();
     activeController?.abort();
     activeController = null;
     activeOperationOwner = null;

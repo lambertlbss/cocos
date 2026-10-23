@@ -191,6 +191,92 @@ test('changed bytes and stale review ids cannot authorize deletion', async (t) =
     await assert.rejects(f.service.apply(f.report.id, [f.url]), /已被修改/);
     assert.equal(f.isDetached(), false);
 });
+test('batch retains each report by id and historical reports cannot authorize any confirmation', async (t) => {
+    const f = await fixture(t);
+    const original = f.report;
+    f.service.invalidate({ preserveHistory: true });
+    assert.equal(f.service.get(), null);
+    assert.match(f.service.get(original.id).readOnlyReason, /历史结果仅供查看/);
+    const recorder = new ImportReviewRecorder();
+    const latest = await f.service.complete(recorder, { fileName: 'Second', roots: [], nodeById: new Map() },
+        original.before, original.after);
+    assert.equal(f.service.get(), latest);
+    assert.equal(f.service.get(latest.id), latest);
+    assert.equal(latest.readOnlyReason, undefined);
+    const historic = f.service.get(original.id);
+    assert.equal(historic.id, original.id);
+    assert.equal(historic.assets[0].canRemove, false);
+    assert.match(historic.assets[0].reason, /仅供查看/);
+    historic.warnings.push('client mutation');
+    assert.equal(original.assets[0].canRemove, true);
+    assert.deepEqual(original.warnings, []);
+    f.calls.length = 0;
+    await assert.rejects(f.service.apply(original.id, []), /历史结果仅供查看/);
+    await assert.rejects(f.service.apply(original.id, [f.url]), /历史结果仅供查看/);
+    assert.equal(f.calls.length, 0);
+    assert.equal(await fs.readFile(f.path, 'utf8'), 'new-image');
+});
+test('retained reports resolve their own source document, recorder and preview cache', async (t) => {
+    const f = await fixture(t);
+    const Module = require('node:module');
+    const load = Module._load;
+    Module._load = function(request, ...args) {
+        if (request === 'electron') return { nativeImage: { createFromBuffer(data) {
+            return { isEmpty: () => false, getSize: () => ({ width: 10 }), resize() { return this; },
+                toDataURL: () => `data:image/png;base64,${data.toString('base64')}` };
+        } } };
+        return load.call(this, request, ...args);
+    };
+    t.after(() => { Module._load = load; });
+    f.recorder.records.get(f.url).before = 'first-before';
+    const firstPreview = await f.service.preview(f.report.id, f.url);
+    f.service.invalidate({ preserveHistory: true });
+    await fs.writeFile(f.path, 'second-image');
+    const source = { id: 'second-figma', name: 'Second Source', type: 'RECTANGLE', visible: true, children: [] };
+    const recorder = new ImportReviewRecorder();
+    recorder.records.set(f.url, { existed: true, before: 'second-before' });
+    recorder.bind(source, { uuid: 'sprite', url: f.url }, 'reused');
+    const latest = await f.service.complete(recorder,
+        { fileName: 'Second', fileKey: 'second-file', roots: [source], nodeById: new Map([[source.id, source]]) },
+        f.report.before, f.report.after);
+    assert.equal(f.service.source(f.report.id, f.url, 'figma').fileKey, 'file');
+    assert.equal(f.service.source(latest.id, f.url, source.id).fileKey, 'second-file');
+    assert.throws(() => f.service.source(f.report.id, f.url, source.id), /不属于本次资源/);
+    assert.throws(() => f.service.source(latest.id, f.url, 'figma'), /不属于本次资源/);
+    const latestPreview = await f.service.preview(latest.id, f.url);
+    assert.equal(firstPreview.before, 'first-before');
+    assert.equal(latestPreview.before, 'second-before');
+    assert.notEqual(firstPreview.after, latestPreview.after);
+    assert.deepEqual(await f.service.preview(f.report.id, f.url), firstPreview);
+    await assert.rejects(f.service.preview(f.report.id, 'forged-asset'), /不属于本次导入/);
+});
+test('normal invalidation expires all retained reports and their source/preview permissions', async (t) => {
+    const f = await fixture(t);
+    f.service.invalidate({ preserveHistory: true });
+    assert.ok(f.service.get(f.report.id));
+    f.service.invalidate();
+    assert.equal(f.service.get(), null);
+    assert.equal(f.service.get(f.report.id), null);
+    assert.throws(() => f.service.source(f.report.id, f.url, 'figma'), /已过期/);
+    await assert.rejects(f.service.preview(f.report.id, f.url), /已过期/);
+    await assert.rejects(f.service.apply(f.report.id, []), /已过期/);
+});
+test('retained reports evict oldest entries after 32 completions with explicit expiry errors', async () => {
+    const service = new ImportReviewService();
+    const empty = { rootUuid: '', targetUuid: '', mode: 'prefab', nodes: [] };
+    const reports = [];
+    for (let i = 0; i < 34; i++) {
+        service.invalidate({ preserveHistory: true });
+        reports.push(await service.complete(new ImportReviewRecorder(),
+            { fileName: `Frame ${i}`, roots: [], nodeById: new Map() }, empty, empty));
+    }
+    assert.equal(service.get(reports[0].id), null);
+    assert.equal(service.get(reports[1].id), null);
+    assert.ok(service.get(reports[2].id));
+    assert.equal(service.get(), reports[33]);
+    await assert.rejects(service.preview(reports[0].id, 'unused'), /最近 32 份结果/);
+    await assert.rejects(service.apply(reports[1].id, []), /最近 32 份结果/);
+});
 test('failed target save restores references and keeps files', async (t) => {
     const f = await fixture(t, { failSave: true });
     await assert.rejects(f.service.apply(f.report.id, [f.url]), /save failed/);
