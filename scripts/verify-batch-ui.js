@@ -28,6 +28,8 @@ async function main() {
         const shadow=document.querySelector('#host').attachShadow({mode:'open'});
         shadow.innerHTML='<style>'+css+'</style>'+template;
         window.q=(s)=>shadow.querySelector(s); window.calls=[];window.stopRequested=false;window.importCount=0;
+        window.activationInFlight=false;window.syncWhileActive=0;window.activationGate=null;
+        window.holdNextActivation=()=>{window.activationGate=new Promise(resolve=>{window.releaseActivation=resolve;});};
         const preview='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200"><rect width="300" height="200" fill="#20272c"/><rect x="16" y="16" width="268" height="40" rx="8" fill="#d8ff52"/><text x="32" y="43" font-size="20" fill="#182000">Frame Preview</text><rect x="16" y="73" width="123" height="105" rx="8" fill="#385559"/><rect x="155" y="73" width="129" height="105" rx="8" fill="#385559"/></svg>');
         const fonts=[{name:'Inter',url:'db://assets/fonts/Inter.ttf',relativePath:'fonts/Inter.ttf'}];
         const makeNode=(id,name,type,children=[])=>({id,name,type,width:300,height:200,visible:true,action:'generate',kind:type==='TEXT'?'label':'node',patchCandidate:type==='RECTANGLE',children});
@@ -45,8 +47,15 @@ async function main() {
             if(message==='get-batch-state')return{items:queue,lastResult};
             if(message==='get-import-review')return args[0]?reports.get(args[0]):null;
             if(message==='resolve-batch-source'){queue=frames;return{sourceType:'section',sourceUrl:settings.sourceUrl,items:frames,added:3,duplicates:0};}
-            if(message==='activate-batch-item')return frames.find(f=>f.id===args[0]).document;
-            if(message==='sync-batch-items'){queue=args[0].map(x=>({...frames.find(f=>f.id===x.id),enabled:x.enabled}));return{items:queue};}
+            if(message==='activate-batch-item'){
+                const gate=window.activationGate;window.activationGate=null;window.activationInFlight=true;
+                try{if(gate)await gate;return frames.find(f=>f.id===args[0]).document;}
+                finally{window.activationInFlight=false;}
+            }
+            if(message==='sync-batch-items'){
+                if(window.activationInFlight){window.syncWhileActive++;throw new Error('请等待当前任务完成后再修改界面列表。');}
+                queue=args[0].map(x=>({...frames.find(f=>f.id===x.id),enabled:x.enabled}));return{items:queue};
+            }
             if(message==='save-node-overrides')return args[1];
             if(message==='get-preview')return{url:preview};
             if(message==='stop-import-batch'){stopRequested=true;return{accepted:true};}
@@ -139,8 +148,52 @@ async function main() {
         await page.waitForFunction(() => q('#result-summary').textContent.includes('成功 2 项'));
         await page.locator('#batch-retry-failed').click();
         await page.waitForFunction(() => q('#result-summary').textContent.includes('成功 3 项'));
+
+        // Keep activation pending to expose the real main-process lock: removing
+        // the active frame must sync the smaller list before switching frames.
+        await page.locator('[data-workflow-step="1"]').click();
+        await page.waitForFunction(() => q('#app').dataset.workflowStep === '1' && q('#app').dataset.workflowBusy === 'false');
+        assert.equal(await page.locator('[data-batch-frame="frame-0"]').getAttribute('aria-selected'), 'true');
+        await page.evaluate(() => { window.removalCallStart = calls.length; window.holdNextActivation(); });
+        await page.locator('[data-batch-remove="frame-0"]').click();
+        await page.waitForFunction(() => window.activationInFlight);
+        const removal = await page.evaluate(() => ({
+            calls: calls.slice(window.removalCallStart),
+            syncWhileActive: window.syncWhileActive,
+            rows: q('#batch-source-list').children.length,
+        }));
+        const syncIndex = removal.calls.findIndex(([message]) => message === 'sync-batch-items');
+        const activateIndex = removal.calls.findIndex(([message]) => message === 'activate-batch-item');
+        assert.ok(syncIndex >= 0 && activateIndex > syncIndex, 'removal sync must finish before the next frame activation starts');
+        assert.deepEqual(removal.calls[syncIndex][1].map(item => item.id), ['frame-1', 'frame-2']);
+        assert.equal(removal.calls[activateIndex][1], 'frame-1');
+        assert.equal(removal.syncWhileActive, 0, 'the deferred activation must not race a list sync');
+        assert.equal(removal.rows, 2);
+        assert.equal(await page.locator('#workflow-error').isHidden(), true);
+        assert.equal(await page.locator('#toast').evaluate(node => node.classList.contains('error')), false);
+        await page.evaluate(() => window.releaseActivation());
+        await page.waitForFunction(() => q('#app').dataset.workflowBusy === 'false'
+            && q('[data-batch-frame="frame-1"]')?.getAttribute('aria-selected') === 'true');
+        await page.locator('[data-batch-configure="frame-1"]').click();
+        await page.waitForFunction(() => q('#app').dataset.workflowStep === '2' && q('#app').dataset.workflowBusy === 'false');
+        await page.locator('[data-node-id="2:1:title"]').click();
+        await page.locator('[data-name-for="2:1:title"]').fill('Bag_Title_After_Removal');
+        await page.locator('[data-name-for="2:1:title"]').press('Tab');
+        await page.locator('#workflow-next').click();
+        await page.waitForFunction(() => q('#app').dataset.workflowStep === '3');
+        await page.locator('#workflow-back').click();
+        assert.equal(await page.locator('[data-name-for="2:1:title"]').inputValue(), 'Bag_Title_After_Removal');
+        await page.locator('#workflow-next').click();
+        await page.locator('#import-button').click();
+        await page.waitForFunction(() => window.importCount === 4 && q('#app').dataset.workflowStep === '4'
+            && q('#app').dataset.workflowBusy === 'false' && q('#result-summary').textContent.includes('成功 2 项'));
+        const afterRemoval = await page.evaluate(() => calls.filter(([message]) => message === 'import-batch').at(-1)[1]);
+        assert.deepEqual(afterRemoval.items.map(item => item.id), ['frame-1', 'frame-2']);
+        assert.equal(afterRemoval.items[0].overrides.find(node => node.id === '2:1:title').name, 'Bag_Title_After_Removal');
+        assert.equal(await page.evaluate(() => window.syncWhileActive), 0);
+        assert.equal(await page.locator('#workflow-error').isHidden(), true);
         assert.deepEqual(errors, []);
-        console.log(`Compiled batch panel browser checks passed: Figma slice priority/ignore, Section list, Frame tabs, independent edits, full node controls, shared settings, stop/resume/retry, per-item reports, and 650/420px layout. Screenshots: ${temp}`);
+        console.log(`Compiled batch panel browser checks passed: Figma slice priority/ignore, Section list, Frame tabs, independent edits, full node controls, shared settings, stop/resume/retry, per-item reports, deferred removal/switch ordering and reimport, and 650/420px layout. Screenshots: ${temp}`);
     } finally { await browser.close(); server.close(); }
 }
 

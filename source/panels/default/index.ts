@@ -227,9 +227,8 @@ function batchFonts(): string[] {
     return batchItems.length ? Array.from(new Set(selectedFrames().flatMap(({ item }) => item.document.fonts))) : state.document?.fonts ?? [];
 }
 
-function syncBatchItems(): void {
+function syncBatchItems(precedingPreview: Promise<unknown> = previewReadTask): Promise<void> {
     const items = batchItems.map(({ item }) => ({ id: item.id, enabled: item.enabled }));
-    const precedingPreview = previewReadTask;
     batchSyncTask = batchSyncTask.catch(() => undefined).then(async () => {
         await precedingPreview.catch(() => undefined);
         await request('sync-batch-items', items);
@@ -238,6 +237,25 @@ function syncBatchItems(): void {
         batchSyncError = error;
         showToast(errorMessage(error, '界面列表保存失败，请重试。'), true);
     });
+    return batchSyncTask;
+}
+
+async function waitForBatchListReady(): Promise<void> {
+    // Snapshot both dependencies before waiting. Later previews may themselves
+    // wait for a newly queued sync, so never make that sync depend on them.
+    const precedingSync = batchSyncTask;
+    const precedingPreview = previewReadTask;
+    await precedingSync;
+    await precedingPreview.catch(() => undefined);
+    if (batchSyncError) {
+        const previousMessage = errorMessage(batchSyncError, '界面列表保存失败，请重试。');
+        // A failed save leaves the optimistic list unconfirmed. Retry its latest
+        // contents once; only a successful backend acknowledgement clears it.
+        await syncBatchItems(precedingPreview);
+        if (batchSyncError) throw batchSyncError;
+        if (element('#workflow-error-message').textContent === previousMessage) workflow?.clearError();
+        if (element('#toast').textContent === previousMessage) showToast('界面列表已同步，可以继续。');
+    }
 }
 
 function batchElement<K extends keyof HTMLElementTagNameMap>(tag: K, text = '', className = ''): HTMLElementTagNameMap[K] {
@@ -300,13 +318,16 @@ function renderBatch(): void {
             if (state.busy) return;
             rememberActiveFrame();
             batchItems = batchItems.filter((candidate) => candidate.item.id !== item.id);
+            let nextId: string | undefined;
             if (activeBatchId === item.id) {
                 activeBatchId = undefined;
-                if (selectedFrames().length) void activateFrame(selectedFrames()[0].item.id);
-                else if (batchItems.length) void activateFrame(batchItems[0].item.id);
+                if (selectedFrames().length) nextId = selectedFrames()[0].item.id;
+                else if (batchItems.length) nextId = batchItems[0].item.id;
                 else { state.document = null; renderTree(); workflow?.batchReady(); }
             }
-            syncBatchItems(); renderBatch(); renderFontMap(); workflow?.render();
+            syncBatchItems();
+            if (nextId) void activateFrame(nextId);
+            renderBatch(); renderFontMap(); workflow?.render();
         }, 'icon-button');
         remove.dataset.batchRemove = item.id; remove.setAttribute('aria-label', `移除 ${frameName(entry)}`);
         actions.append(configure, remove); row.append(checked, copy, actions); list.append(row);
@@ -373,14 +394,7 @@ async function activateFrame(id: string, navigate = false): Promise<void> {
     if (state.busy) return;
     const entry = batchItems.find(({ item }) => item.id === id);
     if (!entry) return;
-    if (activeBatchId === id && state.document) {
-        if (navigate) workflow?.navigate(2);
-        renderBatch(); workflow?.render();
-        if (navigate && state.selectedId) {
-            const selected = findNode(state.selectedId); if (selected) void preview(selected);
-        }
-        return;
-    }
+    const alreadyActive = activeBatchId === id && state.document;
     rememberActiveFrame();
     const oldId = activeBatchId;
     const oldEditor = editorSnapshot();
@@ -388,10 +402,8 @@ async function activateFrame(id: string, navigate = false): Promise<void> {
     previewRevision++;
     setBusy(true);
     try {
-        await batchSyncTask;
-        await previewReadTask.catch(() => undefined);
-        if (batchSyncError) throw batchSyncError;
-        const loaded = await request<DocumentDto>('activate-batch-item', id);
+        await waitForBatchListReady();
+        const loaded = alreadyActive ? state.document : await request<DocumentDto>('activate-batch-item', id);
         activeBatchId = id;
         if (entry.editor) Object.assign(state, entry.editor);
         else initializeDocument(loaded ?? entry.item.document, false);
@@ -1300,9 +1312,7 @@ async function readBatchSource(): Promise<void> {
     updateProgress({ phase: 'fetch', value: 0.05, message: '正在读取并识别 Figma 界面…' });
     let activate: string | undefined;
     try {
-        await batchSyncTask;
-        await previewReadTask.catch(() => undefined);
-        if (batchSyncError) throw batchSyncError;
+        await waitForBatchListReady();
         const result = await request<BatchSourceResult>('resolve-batch-source', source);
         if (result.document && !result.items.length) {
             batchItems = []; activeBatchId = undefined; batchResult = undefined; batchProgress = undefined;
@@ -1351,9 +1361,7 @@ async function importBatchFrames(settings: ImportSettings, ids?: Set<string>): P
     workflow?.begin('import'); setBusy(true); renderBatch();
     updateProgress({ phase: 'assets', value: 0, message: `准备导入 ${entries.length} 个界面…` });
     try {
-        await batchSyncTask;
-        await previewReadTask.catch(() => undefined);
-        if (batchSyncError) throw batchSyncError;
+        await waitForBatchListReady();
         await nodeOverrideSaveTask;
         if (batchStopRequested) {
             completeBatchPresentation({ id: 'stopped-before-start', stopped: true, completed: 0, total: entries.length,

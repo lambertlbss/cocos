@@ -662,3 +662,169 @@ test('removing frames persists the authoritative queue and unchecking every fram
     await ui.get('#import-button').emit('click');
     assert.equal(ui.calls('import-batch').length, 0);
 });
+
+test('removing the active frame saves its list before starting a slow next-frame activation', async (t) => {
+    const first = frameItem('1:1', 'Home_ui'), second = frameItem('2:1', 'Bag_ui');
+    const items = [first, second];
+    const release = deferred();
+    const trace = [];
+    let activationBusy = false;
+    const ui = await batchFixture(t, { items, handlers: {
+        'activate-batch-item': async (id) => {
+            trace.push(`activate:${id}`);
+            if (id === second.id) {
+                activationBusy = true;
+                try { await release.promise; } finally { activationBusy = false; }
+            }
+            return items.find((item) => item.id === id).document;
+        },
+        'sync-batch-items': (next) => {
+            trace.push(`sync:${next.map((item) => item.id).join(',')}`);
+            if (activationBusy) throw new Error('请等待当前任务完成后再修改界面列表。');
+            return { items: next };
+        },
+    } });
+    await ui.configure(first.id); trace.length = 0;
+    try {
+        await ui.click(`[data-batch-remove="${first.id}"]`); await flush();
+        assert.deepEqual(trace, [`sync:${second.id}`, `activate:${second.id}`]);
+        assert.equal(activationBusy, true);
+        assert.doesNotMatch(ui.get('#toast').textContent, /请等待当前任务完成/);
+    } finally { release.resolve(); await flush(); }
+    await ui.click(`[data-batch-configure="${second.id}"]`); await flush();
+    assert.equal(ui.get('[data-name-for="2:1"]').value, second.name);
+    assert.doesNotMatch(ui.get('#toast').textContent, /请等待当前任务完成/);
+});
+
+for (const consumer of ['configure', 'read-source', 'import']) {
+    test(`${consumer} retries the latest list once after an earlier busy rejection has ended`, async (t) => {
+        let taskBusy = false;
+        const ui = await batchFixture(t, { handlers: {
+            'sync-batch-items': (next) => {
+                if (taskBusy) throw new Error('请等待当前任务完成后再修改界面列表。');
+                return { items: next };
+            },
+            'import-batch': (request) => ({ id: 'recovered', stopped: false, completed: request.items.length,
+                total: request.items.length, items: request.items.map((item) => ({ id: item.id, name: 'Home_ui',
+                    sourceUrl: sourceA, status: 'success', created: 1 })) }),
+        } });
+        await ui.configure();
+        taskBusy = true;
+        const checked = ui.get(`[data-batch-checked="${ui.items[1].id}"]`);
+        checked.checked = false; await checked.emit('change'); await flush();
+        assert.match(ui.get('#toast').textContent, /请等待当前任务完成/);
+        const failedSaveCount = ui.calls('sync-batch-items').length;
+        taskBusy = false;
+        if (consumer === 'configure') {
+            await ui.click(`[data-batch-configure="${ui.items[0].id}"]`); await flush();
+            assert.equal(ui.step(), 2);
+        } else if (consumer === 'read-source') {
+            const third = frameItem('3:1', 'Shop_ui');
+            ui.handlers['resolve-batch-source'] = () => ({ sourceType: 'frame', sourceUrl: third.sourceUrl,
+                items: [third], added: 1, duplicates: 0 });
+            ui.handlers['activate-batch-item'] = (id) => [...ui.items, third].find((item) => item.id === id).document;
+            ui.get('#source-url').value = third.sourceUrl;
+            await ui.click('#add-batch-source'); await flush();
+            assert.equal(ui.root.querySelectorAll('[data-batch-configure]').length, 3);
+        } else {
+            await ui.goToConfirm(); await ui.click('#import-button'); await flush();
+            assert.equal(ui.calls('import-batch').length, 1);
+            assert.equal(ui.calls('import-batch')[0].args[0].items.length, 1);
+        }
+        const retry = ui.calls('sync-batch-items')[failedSaveCount];
+        assert.ok(retry, 'consuming the list must actually retry its failed save');
+        assert.deepEqual(Array.from(retry.args[0], ({ id, enabled }) => ({ id, enabled })), [
+            { id: ui.items[0].id, enabled: true }, { id: ui.items[1].id, enabled: false },
+        ]);
+        if (consumer !== 'read-source') assert.equal(ui.calls('sync-batch-items').length, failedSaveCount + 1);
+        assert.doesNotMatch(ui.get('#toast').textContent, /请等待当前任务完成/);
+    });
+}
+
+test('a failed retry still blocks import, then successful configuration clears only the recovered sync error', async (t) => {
+    const busyMessage = '请等待当前任务完成后再修改界面列表。';
+    let taskBusy = false;
+    const ui = await batchFixture(t, { handlers: {
+        'sync-batch-items': (next) => {
+            if (taskBusy) throw new Error(busyMessage);
+            return { items: next };
+        },
+    } });
+    await ui.configure(); taskBusy = true;
+    const checked = ui.get(`[data-batch-checked="${ui.items[1].id}"]`);
+    checked.checked = false; await checked.emit('change'); await flush();
+    const failedSaveCount = ui.calls('sync-batch-items').length;
+    await ui.goToConfirm(); await ui.click('#import-button'); await flush();
+    assert.equal(ui.calls('sync-batch-items').length, failedSaveCount + 1, 'only one retry per consuming operation');
+    assert.equal(ui.calls('import-batch').length, 0);
+    assert.equal(ui.get('#workflow-error').hidden, false);
+    assert.equal(ui.get('#workflow-error-message').textContent, busyMessage);
+    await flush();
+    assert.equal(ui.calls('sync-batch-items').length, failedSaveCount + 1, 'no unbounded background retry loop');
+    taskBusy = false;
+    await ui.click(`[data-batch-configure="${ui.items[0].id}"]`); await flush();
+    assert.equal(ui.calls('sync-batch-items').length, failedSaveCount + 2);
+    assert.equal(ui.get('#workflow-error').hidden, true);
+    assert.doesNotMatch(ui.get('#toast').textContent, /请等待当前任务完成/);
+
+    ui.panel.methods.onProgress({ phase: 'error', value: 0, message: '另一项真实导入错误' });
+    await ui.click(`[data-batch-configure="${ui.items[0].id}"]`); await flush();
+    assert.equal(ui.get('#workflow-error-message').textContent, '另一项真实导入错误');
+    assert.equal(ui.get('#workflow-error').hidden, false, 'a healthy sync must not erase unrelated errors');
+});
+
+test('previews and rapid list changes remain serial before import without a dependency cycle', async (t) => {
+    const release = deferred();
+    const trace = [];
+    let previewCount = 0, activePreviews = 0, maximumPreviews = 0;
+    const ui = await batchFixture(t, { handlers: {
+        'get-preview': async () => {
+            const index = ++previewCount;
+            activePreviews++; maximumPreviews = Math.max(maximumPreviews, activePreviews);
+            trace.push(`preview:${index}:start`);
+            try { if (index === 1) await release.promise; }
+            finally { activePreviews--; trace.push(`preview:${index}:end`); }
+            return { url: 'data:image/png;base64,AA==' };
+        },
+        'sync-batch-items': (next) => {
+            assert.equal(activePreviews, 0, 'list saves wait for earlier backend previews');
+            trace.push(`sync:${next[1].enabled}`); return { items: next };
+        },
+        'import-batch': () => {
+            assert.equal(activePreviews, 0);
+            trace.push('import'); return { id: 'serial', stopped: false, completed: 0, total: 2, items: [] };
+        },
+    } });
+    trace.length = 0;
+    await ui.configure(); assert.equal(previewCount, 1);
+    let checked = ui.get(`[data-batch-checked="${ui.items[1].id}"]`);
+    checked.checked = false; await checked.emit('change');
+    await ui.get('#tree').emit('click', { target: ui.get('[data-node-id="1:1:child"]') });
+    checked = ui.get(`[data-batch-checked="${ui.items[1].id}"]`);
+    checked.checked = true; await checked.emit('change');
+    await ui.goToConfirm();
+    const importing = ui.click('#import-button'); await flush();
+    assert.equal(ui.calls('import-batch').length, 0);
+    assert.deepEqual(trace, ['preview:1:start']);
+    release.resolve(); await importing; await flush();
+    assert.equal(maximumPreviews, 1);
+    assert.deepEqual(trace, ['preview:1:start', 'preview:1:end', 'sync:false',
+        'preview:2:start', 'preview:2:end', 'sync:true', 'import']);
+    assert.equal(ui.calls('import-batch').length, 1);
+});
+
+test('rapid nonactive selection changes and removing every frame preserve the final authoritative list', async (t) => {
+    const ui = await batchFixture(t);
+    const start = ui.calls('sync-batch-items').length;
+    for (const enabled of [false, true, false]) {
+        const checked = ui.get(`[data-batch-checked="${ui.items[1].id}"]`);
+        checked.checked = enabled; await checked.emit('change');
+    }
+    await flush();
+    assert.deepEqual(ui.calls('sync-batch-items').slice(start).map((call) => call.args[0][1].enabled), [false, true, false]);
+    await ui.click(`[data-batch-remove="${ui.items[1].id}"]`); await flush();
+    await ui.click(`[data-batch-remove="${ui.items[0].id}"]`); await flush();
+    assert.equal(ui.root.querySelectorAll('[data-batch-configure]').length, 0);
+    assert.deepEqual(Array.from(ui.calls('sync-batch-items').at(-1).args[0]), []);
+    assert.equal(ui.calls('import-batch').length, 0);
+});
