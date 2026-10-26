@@ -30858,7 +30858,7 @@ function registerFigmaImporterTools(server, bridge) {
 
 // mcp/src/server.ts
 var MCP_SERVER_NAME = "figma-importer-cocos-mcp-server";
-var MCP_SERVER_VERSION = "1.0.62";
+var MCP_SERVER_VERSION = "1.0.63";
 function createBridgeClient(options = {}) {
   return new McpBridgeClient(options);
 }

@@ -14,6 +14,7 @@ const { LocalResourceLibrary } = require('../dist/importer/local-resources');
 const { LocalAssetCache } = require('../dist/importer/cache');
 const { TokenVault } = require('../dist/security/token-vault');
 const { DEFAULT_SETTINGS } = require('../dist/types');
+const realAssetWrite = AssetWriter.prototype.write;
 
 function sliceNode(mode = 'nine', id = 'panel') {
     const rows = mode === 'horizontal' ? 1 : 3;
@@ -233,12 +234,92 @@ test('conflicting same-name slices retain the first valid Figma definition and e
     assert.match(result.warnings.join(';'), /同名三\/九宫定义不同.*首个有效/);
 });
 
-test('a Figma slice never writes into a designated source library even when output overlaps it', async (t) => {
+test('Figma slices write the selected output even when it is also the second local search directory', async (t) => {
     const f = setup(t);
-    await assert.rejects(f.run({ assetFolder: 'shared' }), /位于指定本地素材库.*调整输出目录/);
-    assert.equal(f.writes.length, 0);
+    const sourceMeta = Buffer.from('{"uuid":"shared-original","artistSetting":true}');
+    writeFileSync(`${f.localPath}.meta`, sourceMeta);
+    writeFileSync(join(f.outputFolder, 'Panel.png'), Buffer.from('previous unminimized output'));
+    await f.run({ localResourceFolders: [f.folder, f.outputFolder] });
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes[0].url, 'db://assets/figma-importer/Panel.png');
+    assert.deepEqual(f.writes[0].borders, { left: 20, right: 20, top: 20, bottom: 20 });
+    const generated = PNG.sync.read(f.writes[0].bytes);
+    assert.deepEqual([generated.width, generated.height], [44, 44]);
+    assert.deepEqual(f.lookups, [], 'the source library cannot supply stale slice borders');
     assert.equal(f.exports.length, 0);
     assert.deepEqual(readFileSync(f.localPath), f.localBytes);
+    assert.deepEqual(readFileSync(`${f.localPath}.meta`), sourceMeta);
+});
+
+test('a parent assets search directory does not block its output child or redirect writes to sibling materials', async (t) => {
+    const f = setup(t);
+    const sourceMeta = Buffer.from('{"uuid":"sibling-material","keepOriginal":true}');
+    writeFileSync(`${f.localPath}.meta`, sourceMeta);
+    await f.run({ localResourceFolders: [join(f.project, 'assets')] });
+    assert.equal(f.writes.length, 1);
+    for (const write of f.writes) {
+        const destination = resolve(f.project, write.url.slice('db://'.length));
+        const suffix = relative(f.outputFolder, destination);
+        assert.ok(suffix && suffix !== '..' && !suffix.startsWith('..\\') && !suffix.startsWith('../') && !isAbsolute(suffix));
+        assert.equal(write.url, 'db://assets/figma-importer/Panel.png');
+        assert.deepEqual(write.borders, { left: 20, right: 20, top: 20, bottom: 20 });
+    }
+    assert.deepEqual(f.lookups, []);
+    assert.deepEqual(readFileSync(f.localPath), f.localBytes);
+    assert.deepEqual(readFileSync(`${f.localPath}.meta`), sourceMeta);
+});
+
+test('an explicitly selected search directory refreshes only its output PNG and retains its real writer UUID', async (t) => {
+    const f = setup(t);
+    const url = 'db://assets/shared/Panel.png';
+    const imageUuid = 'existing-image-uuid';
+    const info = { uuid: imageUuid, url, imported: true, invalid: false, importer: 'image', type: 'cc.ImageAsset',
+        subAssets: { frame: { uuid: f.asset.uuid, importer: 'sprite-frame', type: 'cc.SpriteFrame' } } };
+    let meta = { uuid: imageUuid, importer: 'image', userData: { type: 'sprite-frame', custom: 'keep-me' },
+        subMetas: { frame: { uuid: f.asset.uuid, importer: 'sprite-frame', userData: {
+            trimType: 'auto', borderLeft: 1, borderRight: 1, borderTop: 1, borderBottom: 1,
+        } } } };
+    writeFileSync(`${f.localPath}.meta`, JSON.stringify(meta));
+    const sibling = join(f.outputFolder, 'Other.png');
+    const siblingBytes = Buffer.from('outside the explicitly selected output');
+    const siblingMeta = Buffer.from('{"uuid":"untouched-material","artistSetting":true}');
+    writeFileSync(sibling, siblingBytes); writeFileSync(`${sibling}.meta`, siblingMeta);
+    const mutations = [];
+    // Exercise AssetWriter.write itself: an existing registered PNG must update
+    // in place and keep its SpriteFrame identity while replacing old insets.
+    t.mock.method(AssetWriter.prototype, 'write', realAssetWrite);
+    global.Editor.Message.request = async (channel, method, ...args) => {
+        assert.equal(channel, 'asset-db');
+        if (method === 'query-asset-info') return args[0] === url || args[0] === imageUuid ? info : null;
+        if (method === 'query-asset-meta') {
+            assert.equal(args[0], imageUuid); return JSON.parse(JSON.stringify(meta));
+        }
+        if (method === 'save-asset') {
+            assert.equal(args[0], url, 'only the explicitly selected output image may be written');
+            mutations.push({ method, url: args[0] }); writeFileSync(f.localPath, args[1]); return;
+        }
+        if (method === 'save-asset-meta') {
+            assert.equal(args[0], imageUuid);
+            mutations.push({ method, uuid: args[0] }); meta = JSON.parse(args[1]);
+            writeFileSync(`${f.localPath}.meta`, JSON.stringify(meta)); return;
+        }
+        if (method === 'reimport-asset') { assert.equal(args[0], imageUuid); return; }
+        assert.fail(`unexpected write outside the existing output: ${method}`);
+    };
+    const result = await f.run({ assetFolder: 'shared', localResourceFolders: [f.folder] });
+    assert.equal(result.assets.get('panel').url, url);
+    assert.equal(result.assets.get('panel').uuid, f.asset.uuid);
+    assert.equal(result.assets.get('panel').sliced, true);
+    const written = PNG.sync.read(readFileSync(f.localPath));
+    assert.deepEqual([written.width, written.height], [44, 44]);
+    assert.deepEqual(meta.subMetas.frame.userData, { trimType: 'none', borderLeft: 20,
+        borderRight: 20, borderTop: 20, borderBottom: 20 });
+    assert.equal(meta.userData.custom, 'keep-me');
+    assert.equal(meta.uuid, imageUuid);
+    assert.equal(meta.subMetas.frame.uuid, f.asset.uuid);
+    assert.equal(mutations.filter((item) => item.method === 'save-asset').length, 1);
+    assert.deepEqual(readFileSync(sibling), siblingBytes);
+    assert.deepEqual(readFileSync(`${sibling}.meta`), siblingMeta);
 });
 
 test('ordinary same-name local files retain root-before-nested priority', async (t) => {

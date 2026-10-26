@@ -1216,12 +1216,8 @@ export async function buildAssets(
                     warnings.add(reason);
                     note('merged', node.name, reason, url);
                 }
-                const destination = resolve(Editor.Project.path, url.slice('db://'.length));
-                if (localResources.some((library) => {
-                    const suffix = relative(library.root, destination);
-                    return !suffix || (!isAbsolute(suffix) && suffix !== '..'
-                        && !suffix.startsWith(`..\\`) && !suffix.startsWith('../'));
-                })) throw new Error('Figma 三/九宫需要写入输出目录，但该目录位于指定本地素材库中；请调整输出目录，避免修改素材库。');
+                // The explicitly selected output stays writable even when it
+                // is also indexed as a local source. Slice writes use this URL.
                 note('merged', node.name,
                     'Figma 三/九宫定义优先：使用 Figma 原始画布与边距生成输出资源，不沿用同名素材的旧边距', url);
             }
