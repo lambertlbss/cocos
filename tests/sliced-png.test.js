@@ -30,6 +30,27 @@ function fixture(analysis = nine, scale = 1, width = 30, height = 20) {
         return [vx * 10, vy * 10, 99, 200 + ((vx + vy) % 40)];
     });
 }
+/** Synthetic soft edge pixels just inside the original slice boundaries. The
+ * remaining middle columns/rows are exactly equal, with no color tolerance.
+ * Guards are physical pixels; slice analysis remains in Figma logical units.
+ */
+function boundaryFixture(guards, analysis = nine, scale = 1) {
+    const width = 30 * scale, height = 20 * scale;
+    const borders = Object.fromEntries(Object.entries(analysis.borders)
+        .map(([side, value]) => [side, Math.round(value * scale)]));
+    const sample = (position, length, before, after, leading = 0, trailing = 0, middle) => {
+        if (position < before) return middle - 20 + position;
+        if (position < before + leading) return middle - leading + position - before;
+        if (position >= length - after) return middle + 20 + position - (length - after);
+        if (position >= length - after - trailing) return middle + 1 + position - (length - after - trailing);
+        return middle;
+    };
+    return encode(width, height, (x, y) => [
+        sample(x, width, borders.left, borders.right, guards.left, guards.right, 100),
+        sample(y, height, borders.top, borders.bottom, guards.top, guards.bottom, 120),
+        90, 200,
+    ]);
+}
 function pixel(image, x, y) { return image.data.subarray((y * image.width + x) * 4, (y * image.width + x + 1) * 4); }
 function restoreAxis(value, full, small, start, end) {
     if (full === small || value < start) return value;
@@ -122,6 +143,99 @@ test('a gradient on one axis still permits safe compaction on the other', () => 
     const contents = encode(30, 20, (_x, y) => [50, y * 5, 90, 255]);
     const result = compactSlicePng(contents, node(), nine, 1);
     assert.deepEqual([result.optimization.width, result.optimization.height], [9, 20]);
+    assertReconstructs(contents, result);
+});
+
+test('thin boundary transitions become fixed insets while the remaining center shrinks losslessly', () => {
+    const contents = boundaryFixture({ left: 1, right: 2, top: 2, bottom: 1 });
+    const before = Buffer.from(contents);
+    const originalAnalysis = structuredClone(nine);
+    const result = compactSlicePng(contents, node(), nine, 1);
+    assert.equal(result.optimization.status, 'compacted');
+    assert.deepEqual(result.borders, { left: 4, right: 6, top: 4, bottom: 4 });
+    assert.deepEqual([result.optimization.width, result.optimization.height], [12, 10]);
+    assertReconstructs(contents, result);
+    assert.deepEqual(contents, before, 'the full source and its cache must remain unchanged');
+    assert.deepEqual(nine, originalAnalysis, 'analysis cannot acquire the compact texture insets');
+});
+
+for (const mode of ['horizontal', 'vertical']) {
+    test(`${mode} three-slice preserves thin edge transitions only on its stretch axis`, () => {
+        const horizontal = mode === 'horizontal';
+        const analysis = { mode, borders: horizontal
+            ? { left: 3, right: 4, top: 0, bottom: 0 }
+            : { left: 0, right: 0, top: 2, bottom: 3 } };
+        const guards = horizontal ? { left: 2, right: 1, top: 0, bottom: 0 }
+            : { left: 0, right: 0, top: 1, bottom: 2 };
+        const contents = boundaryFixture(guards, analysis);
+        const result = compactSlicePng(contents, node(), analysis, 1);
+        assert.equal(result.optimization.status, 'compacted');
+        assert.deepEqual(result.borders, horizontal
+            ? { left: 5, right: 5, top: 0, bottom: 0 }
+            : { left: 0, right: 0, top: 3, bottom: 5 });
+        assert.deepEqual([result.optimization.width, result.optimization.height], horizontal ? [12, 20] : [30, 10]);
+        assertReconstructs(contents, result);
+    });
+}
+
+test('2x boundary transition budget and expanded insets use physical pixels once', () => {
+    const contents = boundaryFixture({ left: 4, right: 2, top: 3, bottom: 4 }, nine, 2);
+    const result = compactSlicePng(contents, node(), nine, 2);
+    assert.equal(result.optimization.status, 'compacted');
+    assert.deepEqual(result.borders, { left: 10, right: 10, top: 7, bottom: 10 });
+    assert.deepEqual([result.optimization.width, result.optimization.height], [24, 21]);
+    assertReconstructs(contents, result);
+});
+
+for (const side of ['left', 'right', 'top', 'bottom']) {
+    test(`a ${side} transition exceeding the edge budget blocks only that stretch axis`, () => {
+        const guards = { left: 1, right: 1, top: 1, bottom: 1, [side]: 3 };
+        const contents = boundaryFixture(guards);
+        const result = compactSlicePng(contents, node(), nine, 1);
+        const horizontalBlocked = side === 'left' || side === 'right';
+        assert.equal(result.optimization.status, 'compacted');
+        assert.deepEqual(result.borders, horizontalBlocked
+            ? { left: 3, right: 4, top: 3, bottom: 4 }
+            : { left: 4, right: 5, top: 2, bottom: 3 });
+        assert.deepEqual([result.optimization.width, result.optimization.height], horizontalBlocked ? [30, 9] : [11, 20]);
+        assertReconstructs(contents, result);
+    });
+}
+
+for (const axis of ['horizontal', 'vertical']) {
+    test(`thin inset transitions do not permit cropping a ${axis} center gradient`, () => {
+        const image = PNG.sync.read(boundaryFixture({ left: 1, right: 1, top: 1, bottom: 1 }));
+        for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+            // Keep the other axis fully repeatable after its thin transition.
+            const offset = (y * image.width + x) * 4;
+            image.data[offset + (axis === 'horizontal' ? 0 : 1)] = (axis === 'horizontal' ? x : y) * 5;
+        }
+        const contents = PNG.sync.write(image);
+        const result = compactSlicePng(contents, node(), nine, 1);
+        assert.deepEqual([result.optimization.width, result.optimization.height], axis === 'horizontal' ? [30, 9] : [11, 20]);
+        assert.deepEqual(result.borders, axis === 'horizontal'
+            ? { left: 3, right: 4, top: 3, bottom: 4 }
+            : { left: 4, right: 5, top: 2, bottom: 3 });
+        assertReconstructs(contents, result);
+    });
+}
+
+test('thin boundary transitions cannot hide a single different alpha pixel in the center', () => {
+    const image = PNG.sync.read(boundaryFixture({ left: 1, right: 1, top: 1, bottom: 1 }));
+    image.data[(10 * image.width + 12) * 4 + 3]--;
+    const contents = PNG.sync.write(image);
+    const result = compactSlicePng(contents, node(), nine, 1);
+    assert.equal(result.optimization.status, 'unchanged');
+    assert.equal(result.contents, contents);
+    assert.deepEqual(result.borders, nine.borders);
+});
+
+test('a one-level alpha fringe inside the inset is preserved as fixed edge pixels', () => {
+    const contents = encode(30, 20, (x) => [50, 60, 70, x === nine.borders.left + 1 ? 199 : 200]);
+    const result = compactSlicePng(contents, node(), nine, 1);
+    assert.equal(result.optimization.status, 'compacted');
+    assert.deepEqual(result.borders, { left: 5, right: 4, top: 2, bottom: 3 });
+    assert.deepEqual([result.optimization.width, result.optimization.height], [11, 7]);
     assertReconstructs(contents, result);
 });
 
@@ -284,6 +398,38 @@ for (const retrySucceeds of [false, true]) {
         assert.equal(result.optimization.bytes, contents.length);
     });
 }
+
+test('expanded inset metadata failure restores the full image with its original insets', async () => {
+    const contents = boundaryFixture({ left: 2, right: 2, top: 2, bottom: 2 });
+    const calls = [];
+    const result = await writeSlicedPng({ async write(url, data, borders) {
+        calls.push({ data, borders: { ...borders } });
+        return { uuid: 'same-frame', url, sliced: calls.length > 1,
+            ...(calls.length === 1 ? { sliceFallback: 'cannot verify expanded insets' } : {}) };
+    } }, 'db://assets/panel.png', contents, node(), nine, 1);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0].borders, { left: 5, right: 6, top: 4, bottom: 5 });
+    assert.notEqual(calls[0].data, contents);
+    assert.equal(calls[1].data, contents);
+    assert.deepEqual(calls[1].borders, nine.borders);
+    assert.equal(result.optimization.status, 'restored');
+    assert.deepEqual([result.optimization.width, result.optimization.height], [30, 20]);
+    assert.equal(result.asset.sliced, true);
+});
+
+test('expanded inset write failure restores original pixels and insets before propagating the error', async () => {
+    const contents = boundaryFixture({ left: 2, right: 2, top: 2, bottom: 2 });
+    const calls = [];
+    await assert.rejects(writeSlicedPng({ async write(url, data, borders) {
+        calls.push({ data, borders: { ...borders } });
+        if (calls.length === 1) throw new Error('metadata readiness timeout');
+        return { uuid: 'same-frame', url, sliced: true };
+    } }, 'db://assets/panel.png', contents, node(), nine, 1), /metadata readiness timeout/);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0].borders, { left: 5, right: 6, top: 4, bottom: 5 });
+    assert.equal(calls[1].data, contents);
+    assert.deepEqual(calls[1].borders, nine.borders);
+});
 
 test('writer failures are not reported as a successful import', async () => {
     await assert.rejects(writeSlicedPng({ write: async () => { throw new Error('disk failure'); } },
