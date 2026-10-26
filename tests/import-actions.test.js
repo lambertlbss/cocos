@@ -173,6 +173,39 @@ test('hidden nodes keep their normal smart actions and do not suppress generated
     assert.equal(effective.suppressed.size, 0);
 });
 
+test('excluding hidden layers overrides explicit strategies and Figma slices for the full hidden subtree', () => {
+    const leaf = treeNode({ id: 'visibility:leaf', visible: true, action: 'render' });
+    const hiddenSlice = treeNode({ id: 'visibility:slice', visible: false, patchCandidate: true,
+        sliceMode: 'nine', children: [leaf] });
+    const sibling = treeNode({ id: 'visibility:sibling', visible: true, action: 'generate' });
+    const root = treeNode({ id: 'visibility:root', children: [hiddenSlice, sibling] });
+    const preferred = new Map([[hiddenSlice.id, 'render'], [leaf.id, 'generate'], [sibling.id, 'generate']]);
+    const forced = new Set([hiddenSlice.id]);
+    const explicit = new Set([hiddenSlice.id, leaf.id]);
+    const before = [...preferred];
+    const effective = resolveEffectiveActions([root], preferred, forced, explicit, new Set(), false);
+    assert.equal(effective.actions.get(hiddenSlice.id), 'ignore');
+    assert.equal(effective.actions.get(leaf.id), 'ignore');
+    assert.equal(effective.actions.get(sibling.id), 'generate');
+    assert.deepEqual([...effective.suppressed], [hiddenSlice.id, leaf.id]);
+    assert.deepEqual([...preferred], before, 'the setting must not overwrite saved per-node choices');
+});
+
+test('re-enabling hidden imports restores previous choices while explicit ignore still applies', () => {
+    const visibleChild = treeNode({ id: 'visibility:visible-child', visible: true, action: 'generate' });
+    const hidden = treeNode({ id: 'visibility:parent', visible: false, children: [visibleChild] });
+    const ignored = treeNode({ id: 'visibility:ignored', visible: false, children: [] });
+    const preferred = new Map([[hidden.id, 'generate'], [visibleChild.id, 'generate'], [ignored.id, 'ignore']]);
+    const off = resolveEffectiveActions([hidden, ignored], preferred, new Set(), new Set(), new Set(), false);
+    assert.equal(off.actions.get(hidden.id), 'ignore');
+    assert.equal(off.actions.get(visibleChild.id), 'ignore');
+    const on = resolveEffectiveActions([hidden, ignored], preferred, new Set(), new Set(), new Set(), true);
+    assert.equal(on.actions.get(hidden.id), 'generate');
+    assert.equal(on.actions.get(visibleChild.id), 'generate');
+    assert.equal(on.actions.get(ignored.id), 'ignore');
+    assert.equal(on.suppressed.size, 0);
+});
+
 test('panel exposes PNG whole-layer without a duplicate merge-subtree option', () => {
     const containerOptions = actionOptionsForNode(treeNode());
     assert.deepEqual(containerOptions.map(([value]) => value), [

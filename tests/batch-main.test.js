@@ -205,6 +205,48 @@ test('main rejects stale items and conflicting effective root names before impor
     assert.equal((await f.methods.getBatchState()).running, undefined);
 });
 
+test('batch hidden-layer filtering imports only visible roots while retaining the original source list', async (t) => {
+    const f = fixture(t);
+    f.nodes.get('20:2').visible = false;
+    await f.methods.resolveBatchSource(link('10:1'));
+    const items = (await f.methods.getBatchState()).items;
+    assert.equal(items.length, 3);
+    const request = f.request(items);
+    request.settings.importHiddenLayers = false;
+    const result = await f.methods.importBatch(request);
+    assert.deepEqual(f.imports.map((item) => item.sourceNodeId), ['20:1', '20:3']);
+    assert.equal(result.total, 2);
+    assert.equal(result.completed, 2);
+    assert.equal((await f.methods.getBatchState()).items.length, 3, 'filtering must not remove source entries');
+    assert.equal(f.nodes.get('20:2').visible, false);
+});
+
+test('an all-hidden batch is rejected before any prefab import when hidden layers are disabled', async (t) => {
+    const f = fixture(t);
+    for (const id of ['20:1', '20:2', '20:3']) f.nodes.get(id).visible = false;
+    await f.methods.resolveBatchSource(link('10:1'));
+    const request = f.request((await f.methods.getBatchState()).items);
+    request.settings.importHiddenLayers = false;
+    await assert.rejects(f.methods.importBatch(request), /均已隐藏|没有.*可见/);
+    assert.equal(f.imports.length, 0);
+    assert.equal((await f.methods.getBatchState()).running, undefined);
+});
+
+for (const importHiddenLayers of [true, undefined]) {
+    test(`a batch keeps hidden prefab roots when hidden import is ${importHiddenLayers ?? 'missing from legacy settings'}`, async (t) => {
+        const f = fixture(t);
+        for (const id of ['20:1', '20:2', '20:3']) f.nodes.get(id).visible = false;
+        await f.methods.resolveBatchSource(link('10:1'));
+        const request = f.request((await f.methods.getBatchState()).items);
+        if (importHiddenLayers === undefined) delete request.settings.importHiddenLayers;
+        else request.settings.importHiddenLayers = importHiddenLayers;
+        const result = await f.methods.importBatch(request);
+        assert.equal(result.total, 3);
+        assert.deepEqual(f.imports.map((item) => item.sourceNodeId), ['20:1', '20:2', '20:3']);
+        assert.ok(f.imports.every((item) => item.roots[0].visible === false));
+    });
+}
+
 test('main imports screens serially, locks changes while running, and retains every completed result', async (t) => {
     const f = fixture(t);
     await f.methods.resolveBatchSource(link('10:1'));

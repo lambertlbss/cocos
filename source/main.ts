@@ -45,6 +45,7 @@ import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
 import { writeSlicedPng } from './importer/sliced-png';
+import { hiddenLayerIds } from './import-visibility';
 import { isPng } from './importer/raster-format';
 import { pixelSizedTileAsset, rasterizeTile, tiledRasterKey } from './importer/tiled-png';
 import { rasterizeImageFill } from './importer/image-fill';
@@ -285,6 +286,7 @@ function safeSettings(value: unknown): ImportSettings {
         scale,
         updateExisting: input.updateExisting !== false,
         refreshAssets: input.refreshAssets === true,
+        importHiddenLayers: input.importHiddenLayers !== false,
         autoSave: input.autoSave === true,
         fontMap,
     };
@@ -792,6 +794,14 @@ export async function buildAssets(
     importSettings: ImportSettings,
     review: ImportReviewRecorder,
 ): Promise<AssetBuildResult> {
+    const hidden = hiddenLayerIds(session.roots, importSettings.importHiddenLayers !== false);
+    const applyVisibility = (node: FigmaNode): void => {
+        if (hidden.has(node.id)) decisions.set(node.id, {
+            ...(decisions.get(node.id) ?? defaultDecision(node)), action: 'ignore', nineSlice: false,
+        });
+        node.children.forEach(applyVisibility);
+    };
+    session.roots.forEach(applyVisibility);
     const resolvedDecisions = resolveAutomaticMergeDecisions(session.roots, decisions);
     decisions.clear();
     resolvedDecisions.forEach((value, key) => decisions.set(key, value));
@@ -992,7 +1002,8 @@ export async function buildAssets(
         interface PendingTile extends TileGroup {
             contents: Buffer | null;
             extension?: RasterImageExtension;
-            sourceType: 'cache' | 'figma';
+            sourceType: 'local' | 'cache' | 'figma';
+            sourceRenderScale?: number;
         }
         const requestedScale = (source: TiledPaintSource) => importSettings.scale * source.scale;
         const renderScale = (source: TiledPaintSource) => source.kind === 'source-node'
@@ -1018,16 +1029,44 @@ export async function buildAssets(
         const completeGroup = (
             groupedNodes: FigmaNode[],
             asset: SpriteAssetSpec,
-            source: 'existing' | 'cache' | 'figma',
+            source: 'existing' | 'local' | 'cache' | 'figma',
         ) => {
             for (const groupedNode of groupedNodes) {
                 completeAsset(groupedNode, asset, source);
             }
         };
         const pending: PendingTile[] = [];
+        const namedLocalTiles = new Map<string, {
+            match: Awaited<ReturnType<typeof findLocal>>;
+            asset: SpriteAssetSpec | null;
+        }>();
         for (const group of groups.values()) {
             if (activeController?.signal.aborted) {
                 throw new CancelledError();
+            }
+            const nameKey = resourceKey(group.node);
+            let local = namedLocalTiles.get(nameKey);
+            if (!local) {
+                const match = await findLocal(group.node.name, false);
+                const localUrl = match ? assetDatabaseUrl(match.path) : null;
+                const asset = localUrl ? await writer.existing(localUrl) : null;
+                if (localUrl && !asset) throw new Error(`同名本地资源尚无可用 SpriteFrame，请先在 Cocos 中完成资源导入后重试，不会另建副本：${localUrl}`);
+                local = { match, asset };
+                namedLocalTiles.set(nameKey, local);
+            }
+            if (local.asset) {
+                // Tiling and its period belong to this node, not the shared
+                // SpriteFrame Meta. Keep the original UUID and pixels intact.
+                completeGroup(group.nodes, { ...local.asset, sliced: false, tiled: true,
+                    tileScale: requestedScale(group.source) }, 'local');
+                continue;
+            }
+            if (local.match) {
+                // An external bitmap has no project UUID. Import it through
+                // the existing generated-tile path, with its unscaled pixels.
+                pending.push({ ...group, contents: local.match.contents,
+                    extension: detectImageExtension(local.match.contents), sourceType: 'local', sourceRenderScale: 1 });
+                continue;
             }
             let existingAsset: SpriteAssetSpec | null = null;
             if (!importSettings.refreshAssets) {
@@ -1135,7 +1174,7 @@ export async function buildAssets(
             }
             const trace = diagnosticStart('平铺资源按实际尺寸生成', { node: item.node.name });
             let raster: ReturnType<typeof rasterizeTile>;
-            try { raster = rasterizeTile(contents, requestedScale(item.source), renderScale(item.source)); }
+            try { raster = rasterizeTile(contents, requestedScale(item.source), item.sourceRenderScale ?? renderScale(item.source)); }
             catch (error) {
                 trace.fail(error);
                 throw new Error(`平铺资源“${item.node.name}”无法按实际尺寸生成：${(error as Error).message}`);
@@ -1206,21 +1245,6 @@ export async function buildAssets(
             const node = selectedSlice?.node ?? groupedNodes[0];
             const decision = decisions.get(node.id) ?? defaultDecision(node);
             const sliceAnalysis = selectedSlice?.analysis ?? (decision.nineSlice ? analyzeSliceGrid(node) : null);
-            if (selectedSlice) {
-                const shape = (entry: typeof selectedSlice) => JSON.stringify({ mode: entry.analysis.mode,
-                    borders: entry.analysis.borders, frame: entry.node.absoluteBoundingBox && {
-                        width: entry.node.absoluteBoundingBox.width, height: entry.node.absoluteBoundingBox.height,
-                    } });
-                if (slicedSources.slice(1).some((entry) => shape(entry) !== shape(selectedSlice))) {
-                    const reason = `同名三/九宫定义不同，沿用首个有效 Figma 切片“${node.name}”的原始画布与边距，仅生成一份资源`;
-                    warnings.add(reason);
-                    note('merged', node.name, reason, url);
-                }
-                // The explicitly selected output stays writable even when it
-                // is also indexed as a local source. Slice writes use this URL.
-                note('merged', node.name,
-                    'Figma 三/九宫定义优先：使用 Figma 原始画布与边距生成输出资源，不沿用同名素材的旧边距', url);
-            }
             const reuseAsset = (asset: SpriteAssetSpec, source: 'local' | 'existing') => {
                 sharedAssets.set(resourceKey(node), asset);
                 if (decision.nineSlice && !asset.sliced) {
@@ -1233,9 +1257,11 @@ export async function buildAssets(
                 reuseAsset(shared, 'existing');
                 continue;
             }
-            const localMatch = sliceAnalysis || analyzeMaskTint(node) ? null : await findLocal(node.name, false);
-            // Without a valid Figma slice, preserve the existing local name
-            // mapping, UUID and slice borders even during an explicit refresh.
+            const localMatch = analyzeMaskTint(node) && !sliceAnalysis ? null : await findLocal(node.name, false);
+            // An explicitly designated local SpriteFrame owns its pixels and
+            // insets. Reuse it read-only, even when Figma defines a slice or
+            // refresh is requested; source insets cannot be applied to an
+            // unknown or already-compacted local canvas.
             const localUrl = localMatch
                 ? assetDatabaseUrl(localMatch.path)
                 : null;
@@ -1253,6 +1279,19 @@ export async function buildAssets(
                 if (!namedAsset) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
                 reuseAsset(namedAsset, 'existing');
                 continue;
+            }
+            if (selectedSlice && !localMatch) {
+                const shape = (entry: typeof selectedSlice) => JSON.stringify({ mode: entry.analysis.mode,
+                    borders: entry.analysis.borders, frame: entry.node.absoluteBoundingBox && {
+                        width: entry.node.absoluteBoundingBox.width, height: entry.node.absoluteBoundingBox.height,
+                    } });
+                if (slicedSources.slice(1).some((entry) => shape(entry) !== shape(selectedSlice))) {
+                    const reason = `同名三/九宫定义不同，沿用首个有效 Figma 切片“${node.name}”的原始画布与边距，仅生成一份资源`;
+                    warnings.add(reason);
+                    note('merged', node.name, reason, url);
+                }
+                note('merged', node.name,
+                    'Figma 三/九宫定义优先：使用 Figma 原始画布与边距生成输出资源，不沿用未指定输出资源的旧边距', url);
             }
             if (decision.nineSlice && !sliceAnalysis) {
                 warnings.add(`三/九宫节点“${node.name}”无法计算连续切片边界，已临时作为 PNG 整层导入`);
@@ -1528,6 +1567,7 @@ export async function buildAssets(
 async function resolveFonts(settings: ImportSettings): Promise<Map<string, string>> {
     const result = new Map<string, string>();
     for (const [family, url] of Object.entries(settings.fontMap)) {
+        if (!url) continue;
         const uuid = await resolveAssetUuid(url);
         if (uuid) {
             result.set(family, uuid);
@@ -2609,7 +2649,10 @@ async function importBatch(request: BatchImportRequest): Promise<BatchImportResu
         throw new Error('请至少选择一个有效的待导入界面。');
     }
     const settings = safeSettings(request.settings);
-    const entries = request.items.map((item) => {
+    const visibleItems = request.items.filter((item) => settings.importHiddenLayers
+        || batchDocuments.get(item?.id)?.document.roots[0]?.visible !== false);
+    if (!visibleItems.length) throw new Error('已关闭隐藏图层导入，所选界面均已隐藏；请选择可见界面或开启导入隐藏图层。');
+    const entries = visibleItems.map((item) => {
         const entry = item && batchDocuments.get(item.id);
         if (!entry || !entry.item.enabled || !Array.isArray(item.overrides)) throw new Error('待导入界面已失效或未勾选，请重新读取。');
         const overrides = item.overrides.map((override) => ({ ...override }));

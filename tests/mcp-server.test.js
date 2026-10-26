@@ -42,6 +42,12 @@ test('bundled stdio server initializes, lists the allowlisted tools, and returns
             'figma_importer_cancel_import',
         ]);
         assert.equal(listed.tools.some((tool) => /round.?trip/i.test(tool.name)), false);
+        for (const name of ['figma_importer_update_settings', 'figma_importer_import']) {
+            const schema = listed.tools.find((tool) => tool.name === name).inputSchema;
+            assert.equal(schema.properties.settings.properties.importHiddenLayers.type, 'boolean');
+        }
+        const statusSchema = listed.tools.find((tool) => tool.name === 'figma_importer_get_status').outputSchema;
+        assert.equal(statusSchema.properties.settings.properties.importHiddenLayers.default, true);
         for (const tool of listed.tools) {
             assert.equal(
                 tool.annotations?.openWorldHint,

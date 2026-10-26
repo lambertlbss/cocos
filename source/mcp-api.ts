@@ -89,6 +89,7 @@ function publicSettings(settings: ImportSettings): Record<string, unknown> {
         updateExisting: settings.updateExisting,
         refreshAssets: settings.refreshAssets,
         autoSave: settings.autoSave,
+        importHiddenLayers: settings.importHiddenLayers !== false,
         fontMap: { ...settings.fontMap },
     };
 }
@@ -181,6 +182,7 @@ function settingsFingerprint(settings: ImportSettings): Record<string, unknown> 
         updateExisting: settings.updateExisting,
         refreshAssets: settings.refreshAssets,
         autoSave: settings.autoSave,
+        importHiddenLayers: settings.importHiddenLayers !== false,
         fontMap: Object.entries(settings.fontMap).sort(([left], [right]) => left.localeCompare(right)),
     };
 }
@@ -238,7 +240,7 @@ function overrideMap(document: PluginDocumentDto): Map<string, ImportOverride> {
     return new Map(document.nodeOverrides.map((item) => [item.id, { ...item }]));
 }
 
-function resolvedImportOverrides(document: PluginDocumentDto): ImportOverride[] {
+function resolvedImportOverrides(document: PluginDocumentDto, settings: ImportSettings): ImportOverride[] {
     const nodes = indexTree(document.tree).map((item) => item.node);
     const saved = overrideMap(document);
     const preferredActions = new Map<string, ImportAction>();
@@ -252,7 +254,8 @@ function resolvedImportOverrides(document: PluginDocumentDto): ImportOverride[] 
         const nineSlice = current?.explicit === true ? current.nineSlice : node.patchCandidate;
         if (nineSlice && node.patchCandidate) forcedRenderIds.add(node.id);
     }
-    const effective = resolveEffectiveActions(document.tree, preferredActions, forcedRenderIds);
+    const effective = resolveEffectiveActions(document.tree, preferredActions, forcedRenderIds,
+        undefined, undefined, settings.importHiddenLayers !== false);
     return nodes.map((node) => {
         const current = saved.get(node.id);
         return {
@@ -395,7 +398,7 @@ export class FigmaImporterMcpApi {
 
     private async listNodes(params: unknown): Promise<unknown> {
         const input = record(params);
-        const { session, document } = await this.currentDocument(input);
+        const { session, document, state } = await this.currentDocument(input);
         const all = indexTree(document.tree);
         const byId = new Map(all.map((item) => [item.node.id, item]));
         const rootNodeId = typeof input.rootNodeId === 'string' && input.rootNodeId.trim()
@@ -427,7 +430,8 @@ export class FigmaImporterMcpApi {
                 forcedRenderIds.add(item.node.id);
             }
         }
-        const effective = resolveEffectiveActions(document.tree, preferredActions, forcedRenderIds);
+        const effective = resolveEffectiveActions(document.tree, preferredActions, forcedRenderIds,
+            undefined, undefined, state.settings.importHiddenLayers !== false);
         const rootDepth = rootItem?.depth ?? 0;
         const descendants = rootItem
             ? new Set(indexTree([rootItem.node]).map((item) => item.node.id))
@@ -458,6 +462,7 @@ export class FigmaImporterMcpApi {
             actions: actions ? [...actions].sort() : null,
             kinds: kinds ? [...kinds].sort() : null,
             warningOnly,
+            importHiddenLayers: state.settings.importHiddenLayers !== false,
             depth: maxDepth,
             limit,
             overrides: [...document.nodeOverrides]
@@ -547,6 +552,7 @@ export class FigmaImporterMcpApi {
             'updateExisting',
             'refreshAssets',
             'autoSave',
+            'importHiddenLayers',
             'fontMap',
         ]);
         const keys = Object.keys(patch);
@@ -573,7 +579,7 @@ export class FigmaImporterMcpApi {
             settings.scale = patch.scale;
             normalized.scale = patch.scale;
         }
-        for (const key of ['updateExisting', 'refreshAssets', 'autoSave'] as const) {
+        for (const key of ['updateExisting', 'refreshAssets', 'autoSave', 'importHiddenLayers'] as const) {
             if (patch[key] !== undefined) {
                 if (typeof patch[key] !== 'boolean') throw new McpBridgeError('INVALID_SETTINGS', `${key} 必须是布尔值。`);
                 settings[key] = patch[key];
@@ -756,7 +762,7 @@ export class FigmaImporterMcpApi {
         const projectedSettings = input.settings === undefined
             ? state.settings
             : this.buildSettings(document, state, input.settings).settings;
-        const projectedOverrides = resolvedImportOverrides(document);
+        const projectedOverrides = resolvedImportOverrides(document, projectedSettings);
         const requestFingerprint = importRequestFingerprint(document, projectedSettings, projectedOverrides);
         const completed = this.completedImports.get(operationId);
         if (completed) {
@@ -813,7 +819,7 @@ export class FigmaImporterMcpApi {
             if (this.host.isImportBusy()) {
                 throw new McpBridgeError('BUSY', 'Cocos 插件在导入准备期间启动了其他操作，请等待后重试同一 operationId。', true);
             }
-            const overrides = resolvedImportOverrides(latest.document);
+            const overrides = resolvedImportOverrides(latest.document, latest.settings);
             const latestFingerprint = importRequestFingerprint(latest.document, latest.settings, overrides);
             if (latestFingerprint !== requestFingerprint) {
                 throw new McpBridgeError(

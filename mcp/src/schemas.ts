@@ -44,6 +44,8 @@ export const SettingsPatchSchema = z.object({
     updateExisting: z.boolean().optional(),
     refreshAssets: z.boolean().optional(),
     autoSave: z.boolean().optional(),
+    importHiddenLayers: z.boolean().optional()
+        .describe('是否导入 Figma 隐藏节点及其子树；默认 true。'),
     fontMap: FontMapSchema.optional()
         .describe('Figma 字体名到 db://assets/... 字体资源的映射。'),
 }).strict().refine(
@@ -138,6 +140,7 @@ export const PublicSettingsSchema = z.object({
     updateExisting: z.boolean(),
     refreshAssets: z.boolean(),
     autoSave: z.boolean(),
+    importHiddenLayers: z.boolean().default(true),
     fontMap: z.record(z.string(), z.string()),
 });
 

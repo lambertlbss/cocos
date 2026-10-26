@@ -7,17 +7,21 @@ import type { DocumentSession, FigmaNode } from './types';
 export function collectSectionFrames(section: FigmaNode): FigmaNode[] {
     const frames: FigmaNode[] = [];
     const visited = new Set<string>();
-    const visit = (node: FigmaNode): void => {
+    const visit = (node: FigmaNode, ancestorHidden: boolean): void => {
         if (visited.has(node.id)) return;
         visited.add(node.id);
+        const hidden = ancestorHidden || node.visible === false;
         if (node.type === 'FRAME') {
-            frames.push(node);
+            // A frame session no longer contains its Section/Group ancestors.
+            // Carry their visibility onto a cloned root without mutating the
+            // original document, changing source identity or copying children.
+            frames.push(hidden && node.visible !== false ? { ...node, visible: false } : node);
             return;
         }
-        if (node.type === 'SECTION' || node.type === 'GROUP') node.children.forEach(visit);
+        if (node.type === 'SECTION' || node.type === 'GROUP') node.children.forEach((child) => visit(child, hidden));
     };
     // A frame passed directly also follows the same screen boundary rule.
-    visit(section);
+    visit(section, false);
     return frames;
 }
 

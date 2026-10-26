@@ -30537,6 +30537,7 @@ var SettingsPatchSchema = external_exports3.object({
   updateExisting: external_exports3.boolean().optional(),
   refreshAssets: external_exports3.boolean().optional(),
   autoSave: external_exports3.boolean().optional(),
+  importHiddenLayers: external_exports3.boolean().optional().describe("是否导入 Figma 隐藏节点及其子树；默认 true。"),
   fontMap: FontMapSchema.optional().describe("Figma 字体名到 db://assets/... 字体资源的映射。")
 }).strict().refine(
   (value) => Object.keys(value).length > 0,
@@ -30608,6 +30609,7 @@ var PublicSettingsSchema = external_exports3.object({
   updateExisting: external_exports3.boolean(),
   refreshAssets: external_exports3.boolean(),
   autoSave: external_exports3.boolean(),
+  importHiddenLayers: external_exports3.boolean().default(true),
   fontMap: external_exports3.record(external_exports3.string(), external_exports3.string())
 });
 var TokenStatusSchema = external_exports3.object({
@@ -30858,7 +30860,7 @@ function registerFigmaImporterTools(server, bridge) {
 
 // mcp/src/server.ts
 var MCP_SERVER_NAME = "figma-importer-cocos-mcp-server";
-var MCP_SERVER_VERSION = "1.0.63";
+var MCP_SERVER_VERSION = "1.0.64";
 function createBridgeClient(options = {}) {
   return new McpBridgeClient(options);
 }

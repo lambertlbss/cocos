@@ -431,6 +431,81 @@ test('imports recompute name-only defaults, return a bounded summary, and dedupl
     assert.equal(importCalls.length, 1);
 });
 
+test('hidden-layer settings default to enabled for legacy profiles and accept only boolean patches', async () => {
+    const { api } = createHostFixture();
+    const sessionId = await fetchSession(api);
+    assert.equal((await api.invoke('getStatus', {})).settings.importHiddenLayers, true);
+    for (const value of ['false', 0, null]) {
+        await rejectsWithCode(api.invoke('updateSettings', {
+            documentSessionId: sessionId, settings: { importHiddenLayers: value },
+        }), 'INVALID_SETTINGS');
+    }
+    const saved = await api.invoke('updateSettings', {
+        documentSessionId: sessionId, settings: { importHiddenLayers: false },
+    });
+    assert.equal(saved.importHiddenLayers, false);
+    assert.equal((await api.invoke('getStatus', {})).settings.importHiddenLayers, false);
+});
+
+test('hidden filtering controls listed effective actions and import parameters without hiding source-tree rows', async () => {
+    const { api, host, importCalls } = createHostFixture();
+    const sessionId = await fetchSession(api);
+    const state = await host.getState();
+    state.document.tree[0].children[0].visible = false;
+    const original = await api.invoke('listNodes', { documentSessionId: sessionId });
+    assert.equal(original.nodes.find((item) => item.nodeId === 'title').action, 'generate');
+    await api.invoke('updateNodes', {
+        documentSessionId: sessionId, updates: [{ nodeId: 'title', action: 'generate' }],
+    });
+    // Import's inline settings must affect both its projected fingerprint and
+    // the final overrides sent to the host, including explicitly enabled children.
+    await api.invoke('importDocument', {
+        documentSessionId: sessionId, operationId: 'hidden-inline-settings', confirm: true,
+        settings: { importHiddenLayers: false },
+    });
+    assert.equal(importCalls.length, 1);
+    assert.equal(importCalls[0].request.settings.importHiddenLayers, false);
+    for (const id of ['panel', 'btn', 'title']) {
+        assert.equal(importCalls[0].request.overrides.find((item) => item.id === id).action, 'ignore');
+    }
+    const listed = await api.invoke('listNodes', { documentSessionId: sessionId });
+    assert.equal(listed.totalCount, 5, 'MCP counts retain their source-tree meaning');
+    assert.equal((await api.invoke('getStatus', {})).document.nodeCount, 5);
+    assert.equal(listed.nodes.find((item) => item.nodeId === 'title').action, 'ignore');
+    assert.equal(listed.nodes.find((item) => item.nodeId === 'title').suppressed, true);
+    const ignored = await api.invoke('listNodes', { documentSessionId: sessionId, actions: ['ignore'] });
+    assert.deepEqual(ignored.nodes.map((item) => item.nodeId), ['panel', 'btn', 'title']);
+    await api.invoke('updateSettings', { documentSessionId: sessionId, settings: { importHiddenLayers: true } });
+    const enabled = await api.invoke('listNodes', { documentSessionId: sessionId });
+    assert.equal(enabled.nodes.find((item) => item.nodeId === 'title').action, 'generate');
+    assert.equal(enabled.nodes.find((item) => item.nodeId === 'title').suppressed, false);
+});
+
+test('changing hidden-layer settings changes operation identity even when the source contains only visible nodes', async () => {
+    const { api, importCalls } = createHostFixture();
+    const sessionId = await fetchSession(api);
+    const input = { documentSessionId: sessionId, operationId: 'hidden-setting-idempotency', confirm: true };
+    const first = await api.invoke('importDocument', input);
+    await api.invoke('updateSettings', { documentSessionId: sessionId, settings: { importHiddenLayers: true } });
+    assert.deepEqual(await api.invoke('importDocument', input), first, 'legacy missing and explicit true are equivalent');
+    assert.equal(importCalls.length, 1);
+    await api.invoke('updateSettings', { documentSessionId: sessionId, settings: { importHiddenLayers: false } });
+    await rejectsWithCode(api.invoke('importDocument', input), 'OPERATION_ID_CONFLICT');
+    assert.equal(importCalls.length, 1);
+});
+
+test('external hidden-layer setting changes invalidate old action-filter pagination cursors', async () => {
+    const { api, host } = createHostFixture();
+    const sessionId = await fetchSession(api);
+    const first = await api.invoke('listNodes', { documentSessionId: sessionId, limit: 2 });
+    assert.ok(first.nextCursor);
+    // Simulate the panel changing settings without advancing the MCP session revision.
+    (await host.getState()).settings.importHiddenLayers = false;
+    await rejectsWithCode(api.invoke('listNodes', {
+        documentSessionId: sessionId, limit: 2, cursor: first.nextCursor,
+    }), 'INVALID_CURSOR');
+});
+
 test('cancel requires the matching MCP document and operation id', async () => {
     const fixture = createHostFixture();
     const sessionId = await fetchSession(fixture.api);

@@ -10,6 +10,7 @@ import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import { normalizeImportAction } from '../../import-actions';
 import { sanitizeNodeName } from '../../node-name';
 import { normalizeFigmaSliceDecision } from '../../figma/import-planner';
+import { hiddenLayerIds } from '../../import-visibility';
 import {
     actionOptionsForNode,
     defaultNineSliceIds,
@@ -123,6 +124,7 @@ const state: PanelState = {
         updateExisting: true,
         refreshAssets: false,
         autoSave: false,
+        importHiddenLayers: true,
         fontMap: {},
     },
     preferredActions: new Map(),
@@ -141,7 +143,13 @@ const state: PanelState = {
     fontAssets: [],
 };
 
-function selectedFrames(): FrameEditorItem[] { return batchItems.filter(({ item }) => item.enabled); }
+function ignoredHiddenFrame(entry: FrameEditorItem): boolean {
+    return state.settings.importHiddenLayers === false && entry.item.document.tree[0]?.visible === false;
+}
+
+function availableFrames(): FrameEditorItem[] { return batchItems.filter((entry) => !ignoredHiddenFrame(entry)); }
+
+function selectedFrames(): FrameEditorItem[] { return availableFrames().filter(({ item }) => item.enabled); }
 
 function editorSnapshot(): FrameEditorState {
     return {
@@ -177,7 +185,8 @@ function initialFrameEditor(document: DocumentDto): FrameEditorState {
             editor.explicitIds.add(node.id); editor.preset = undefined;
         }
     }
-    const effective = resolveEffectiveActions(document.tree, editor.preferredActions, editor.patches, editor.explicitIds, editor.renamedIds);
+    const effective = resolveEffectiveActions(document.tree, editor.preferredActions, editor.patches, editor.explicitIds, editor.renamedIds,
+        state.settings.importHiddenLayers !== false);
     editor.actions = effective.actions; editor.suppressed = effective.suppressed;
     return editor;
 }
@@ -212,7 +221,7 @@ function batchContext(): BatchWorkflowContext | undefined {
         selectedNodes += all.filter((node) => (editor?.actions.get(node.id) ?? node.action) !== 'ignore').length;
     }
     return {
-        count: selectedFrames().length, total: batchItems.length, nodes, selectedNodes,
+        count: selectedFrames().length, total: availableFrames().length, nodes, selectedNodes,
         conflicts: batchConflicts().size > 0,
         ...(batchResult ? { result: {
             success: batchResult.items.filter((item) => item.status === 'success').length,
@@ -224,7 +233,9 @@ function batchContext(): BatchWorkflowContext | undefined {
 }
 
 function batchFonts(): string[] {
-    return batchItems.length ? Array.from(new Set(selectedFrames().flatMap(({ item }) => item.document.fonts))) : state.document?.fonts ?? [];
+    if (batchItems.length) return Array.from(new Set(selectedFrames().flatMap(({ item }) => item.document.fonts)));
+    if (state.settings.importHiddenLayers === false && state.document?.tree.every((node) => node.visible === false)) return [];
+    return state.document?.fonts ?? [];
 }
 
 function syncBatchItems(precedingPreview: Promise<unknown> = previewReadTask): Promise<void> {
@@ -282,8 +293,12 @@ function renderBatch(): void {
     const genericReview = root().querySelector<HTMLElement>('.result-review');
     if (genericReview) genericReview.hidden = enabled;
     element('#preset-scope').textContent = enabled ? '仅作用于当前界面' : '作用于全部节点';
-    element('#batch-selected-count').textContent = `已选 ${selectedFrames().length} / ${batchItems.length}`;
-    element<HTMLButtonElement>('#batch-toggle-all').textContent = selectedFrames().length === batchItems.length ? '取消全选' : '全选';
+    const available = availableFrames();
+    const hiddenCount = batchItems.length - available.length;
+    element('#batch-selected-count').textContent = `已选 ${selectedFrames().length} / ${available.length}`
+        + (hiddenCount ? ` · ${hiddenCount} 个隐藏界面本次忽略` : '');
+    element<HTMLButtonElement>('#batch-toggle-all').textContent = available.length && selectedFrames().length === available.length ? '取消全选' : '全选';
+    element<HTMLButtonElement>('#batch-toggle-all').disabled = state.busy || available.length === 0;
     const list = element('#batch-source-list');
     const tabs = element('#batch-frame-tabs');
     const targets = element('#batch-target-list');
@@ -291,13 +306,14 @@ function renderBatch(): void {
     const conflicts = batchConflicts();
     for (const entry of batchItems) {
         const { item } = entry;
-        const row = batchElement('div', '', `batch-item${item.enabled ? '' : ' is-disabled'}`);
+        const hiddenIgnored = ignoredHiddenFrame(entry);
+        const row = batchElement('div', '', `batch-item${item.enabled && !hiddenIgnored ? '' : ' is-disabled'}`);
         const checked = batchElement('input');
-        checked.type = 'checkbox'; checked.checked = item.enabled; checked.disabled = state.busy;
+        checked.type = 'checkbox'; checked.checked = item.enabled && !hiddenIgnored; checked.disabled = state.busy || hiddenIgnored;
         checked.dataset.batchChecked = item.id;
         checked.setAttribute('aria-label', `导入 ${frameName(entry)}`);
         checked.onchange = () => {
-            if (state.busy) return;
+            if (state.busy || hiddenIgnored) return;
             item.enabled = checked.checked;
             syncBatchItems();
             renderBatch(); renderFontMap(); workflow?.render();
@@ -306,13 +322,16 @@ function renderBatch(): void {
         const copy = batchElement('div', '', 'batch-item-copy');
         const title = batchElement('div', '', 'batch-item-title');
         title.append(batchElement('span', frameName(entry)), batchElement('span', entry.configured ? '已配置' : '智能默认', `badge${entry.configured ? '' : ' subtle'}`));
+        if (hiddenIgnored) title.append(batchElement('span', '隐藏 · 本次忽略', 'badge subtle'));
         if (conflicts.has(item.id)) title.append(batchElement('span', '名称冲突', 'batch-status-failed'));
         copy.append(title, batchElement('div', `${item.sectionName ? `${item.sectionName} / ` : ''}${item.document.fileName} · ${flatten(item.document.tree).length} 节点`, 'batch-item-meta'));
         const actions = batchElement('div', '', 'batch-item-actions');
-        const configure = batchButton('调整节点', () => {
+        const configure = batchButton(hiddenIgnored ? '允许导入隐藏图层' : '调整节点', () => {
+            if (hiddenIgnored) { void setImportHiddenLayers(true); return; }
             if (!item.enabled) { item.enabled = true; syncBatchItems(); }
             void activateFrame(item.id, true);
         });
+        if (hiddenIgnored) configure.title = '仅修改导入选项，不改变 Figma 图层的显隐；已有 Prefab 不会删除';
         configure.dataset.batchConfigure = item.id;
         const remove = batchButton('×', () => {
             if (state.busy) return;
@@ -331,7 +350,7 @@ function renderBatch(): void {
         }, 'icon-button');
         remove.dataset.batchRemove = item.id; remove.setAttribute('aria-label', `移除 ${frameName(entry)}`);
         actions.append(configure, remove); row.append(checked, copy, actions); list.append(row);
-        if (!item.enabled) continue;
+        if (!item.enabled || hiddenIgnored) continue;
         const tab = batchButton('', () => { void activateFrame(item.id); }, 'batch-frame-tab');
         tab.dataset.batchFrame = item.id; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(activeBatchId === item.id));
         tab.append(batchElement('strong', frameName(entry)), batchElement('small', entry.configured ? '已配置 · 自动保留' : '智能默认'));
@@ -347,7 +366,8 @@ function renderBatch(): void {
     }
     const active = batchItems.find(({ item }) => item.id === activeBatchId);
     element('#batch-active-name').textContent = active ? `正在调整：${frameName(active)}` : '选择一个界面开始调整';
-    element('#batch-active-status').textContent = active?.configured ? '修改已保留' : '沿用智能默认';
+    element('#batch-active-status').textContent = active && ignoredHiddenFrame(active) ? '隐藏 · 本次忽略'
+        : active?.configured ? '修改已保留' : '沿用智能默认';
     element('#batch-conflicts').hidden = conflicts.size === 0;
     element('#batch-conflicts').textContent = `有 ${conflicts.size} 个界面的 Prefab 文件名重复（忽略大小写）。请改名后开始导入。`;
     renderBatchResults();
@@ -404,8 +424,12 @@ async function activateFrame(id: string, navigate = false): Promise<void> {
     try {
         await waitForBatchListReady();
         const loaded = alreadyActive ? state.document : await request<DocumentDto>('activate-batch-item', id);
+        if (!alreadyActive && loaded?.fontAssets) {
+            state.fontAssets = loaded.fontAssets;
+            entry.item.document.fontAssets = loaded.fontAssets;
+        }
         activeBatchId = id;
-        if (entry.editor) Object.assign(state, entry.editor);
+        if (entry.editor) { Object.assign(state, entry.editor); reconcileActions(); }
         else initializeDocument(loaded ?? entry.item.document, false);
         element<HTMLInputElement>('#tree-search').value = state.search;
         element('#file-name').textContent = state.document?.fileName ?? '';
@@ -556,7 +580,13 @@ function renderFontMap(): void {
         select.setAttribute('aria-label', `${family} 映射字体`);
         select.appendChild(option('', '不映射（使用默认字体）'));
         const automatic = findFontAsset(family, state.fontAssets);
-        const selected = state.settings.fontMap[family] ?? automatic?.url ?? '';
+        const hasMapping = Object.prototype.hasOwnProperty.call(state.settings.fontMap, family);
+        const selected = hasMapping ? state.settings.fontMap[family] : automatic?.url ?? '';
+        if (selected && !state.fontAssets.some((asset) => asset.url === selected)) {
+            // Assigning an unmatched select.value becomes empty in the real
+            // renderer. Keep the persisted reference while AssetDB is indexing.
+            select.appendChild(option(selected, `已保存（资源暂未就绪） · ${selected}`));
+        }
         for (const asset of state.fontAssets) {
             const item = option(asset.url, `${asset.name} · ${asset.relativePath}`);
             item.selected = asset.url === selected;
@@ -634,7 +664,7 @@ function initializeDocument(document: DocumentDto, navigate = true): void {
 }
 
 function applySettings(settings: ImportSettings): void {
-    state.settings = settings;
+    state.settings = { ...settings, fontMap: { ...settings.fontMap }, importHiddenLayers: settings.importHiddenLayers !== false };
     element<HTMLInputElement>('#source-url').value = settings.sourceUrl;
     element<HTMLInputElement>('#asset-folder').value = settings.assetFolder;
     element<HTMLInputElement>('#prefab-folder').value = settings.prefabFolder;
@@ -652,6 +682,7 @@ function applySettings(settings: ImportSettings): void {
     element<HTMLInputElement>('#update-existing').checked = settings.updateExisting;
     element<HTMLInputElement>('#refresh-assets').checked = settings.refreshAssets;
     element<HTMLInputElement>('#auto-save').checked = settings.autoSave;
+    element<HTMLInputElement>('#import-hidden-layers').checked = state.settings.importHiddenLayers;
     updateTargetHint();
     renderFontMap();
     workflow?.render();
@@ -659,7 +690,6 @@ function applySettings(settings: ImportSettings): void {
 
 function readSettings(showError = true): ImportSettings | null {
     const fontMap: Record<string, string> = { ...state.settings.fontMap };
-    for (const family of batchFonts()) delete fontMap[family];
     root().querySelectorAll<HTMLSelectElement>('[data-font-family]').forEach((select) => {
         const family = select.dataset.fontFamily?.trim();
         if (family && select.value) {
@@ -699,8 +729,14 @@ function readSettings(showError = true): ImportSettings | null {
         updateExisting: element<HTMLInputElement>('#update-existing').checked,
         refreshAssets: element<HTMLInputElement>('#refresh-assets').checked,
         autoSave: element<HTMLInputElement>('#auto-save').checked,
+        importHiddenLayers: element<HTMLInputElement>('#import-hidden-layers').checked,
         fontMap,
     };
+}
+
+async function persistPanelSettings(settings: ImportSettings): Promise<void> {
+    state.settings = { ...settings, fontMap: { ...settings.fontMap } };
+    await request('save-settings', state.settings);
 }
 
 function setBusy(value: boolean): void {
@@ -872,9 +908,36 @@ function reconcileActions(): void {
         state.patches,
         state.explicitIds,
         state.renamedIds,
+        state.settings.importHiddenLayers !== false,
     );
     state.actions = effective.actions;
     state.suppressed = effective.suppressed;
+}
+
+function reconcileBatchVisibility(): void {
+    rememberActiveFrame();
+    for (const entry of batchItems) {
+        if (!entry.editor?.document) continue;
+        const editor = entry.editor;
+        const effective = resolveEffectiveActions(editor.document!.tree, editor.preferredActions,
+            editor.patches, editor.explicitIds, editor.renamedIds, state.settings.importHiddenLayers !== false);
+        editor.actions = effective.actions;
+        editor.suppressed = effective.suppressed;
+    }
+    reconcileActions();
+    rememberActiveFrame();
+}
+
+async function setImportHiddenLayers(enabled: boolean): Promise<void> {
+    if (state.busy) return;
+    element<HTMLInputElement>('#import-hidden-layers').checked = enabled;
+    const settings = readSettings(false) ?? { ...state.settings, importHiddenLayers: enabled };
+    state.settings = settings;
+    reconcileBatchVisibility();
+    renderTree(); renderFontMap(); updateSummary();
+    await persistPanelSettings(settings);
+    const active = batchItems.find(({ item }) => item.id === activeBatchId);
+    if (active && ignoredHiddenFrame(active) && selectedFrames().length) await activateFrame(selectedFrames()[0].item.id);
 }
 
 function setAction(node: TreeNodeDto, action: ImportAction): void {
@@ -1115,7 +1178,9 @@ function renderNodeProperties(): void {
     const summary = strategySummaryForNode(node, state.explicitIds.has(node.id));
     const note = document.createElement('div');
     note.className = 'node-inspector-note';
-    for (const text of [summary.strategy, `Figma 原名：${node.name}`, summary.warning]) {
+    const hiddenIgnored = hiddenLayerIds(state.document?.tree ?? [], state.settings.importHiddenLayers !== false).has(node.id);
+    for (const text of [hiddenIgnored ? '隐藏图层 · 本次忽略（含其子树）；开启“导入隐藏图层”可恢复原策略' : undefined,
+        summary.strategy, `Figma 原名：${node.name}`, summary.warning]) {
         if (!text) continue;
         const paragraph = document.createElement('p');
         paragraph.textContent = text;
@@ -1252,6 +1317,8 @@ async function importToScene(): Promise<void> {
         workflow?.fail('请检查导入倍率与输出目录，修正后再次导入。');
         return;
     }
+    state.settings = settings;
+    reconcileBatchVisibility();
     if (batchItems.length) {
         await importBatchFrames(settings);
         return;
@@ -1352,6 +1419,8 @@ function overridesForFrame(entry: FrameEditorItem): ImportOverride[] {
 
 async function importBatchFrames(settings: ImportSettings, ids?: Set<string>): Promise<void> {
     if (state.busy || batchImportPending) return;
+    state.settings = settings;
+    reconcileBatchVisibility();
     rememberActiveFrame();
     const entries = selectedFrames().filter(({ item }) => !ids || ids.has(item.id));
     if (!entries.length) { showToast('请先勾选要导入的界面。', true); return; }
@@ -1590,8 +1659,9 @@ function bindEvents(): void {
     element('#batch-edit-list').addEventListener('click', () => workflow?.navigate(1));
     element('#batch-toggle-all').addEventListener('click', () => {
         if (state.busy) return;
-        const enabled = selectedFrames().length !== batchItems.length;
-        batchItems.forEach(({ item }) => { item.enabled = enabled; });
+        const available = availableFrames();
+        const enabled = selectedFrames().length !== available.length;
+        available.forEach(({ item }) => { item.enabled = enabled; });
         syncBatchItems(); renderBatch(); renderFontMap(); workflow?.render();
     });
     element('#batch-retry-failed').addEventListener('click', () => retryBatch('failed'));
@@ -1623,7 +1693,7 @@ function bindEvents(): void {
             input.title = result.absolutePath;
             const settings = readSettings(false);
             if (settings) {
-                await request('save-settings', settings);
+                await persistPanelSettings(settings);
             }
             showToast(`资源将写入 assets/${result.folder}`);
         } catch (error) {
@@ -1645,7 +1715,7 @@ function bindEvents(): void {
             input.title = result.absolutePath;
             const settings = readSettings(false);
             if (settings) {
-                await request('save-settings', settings);
+                await persistPanelSettings(settings);
             }
             showToast(`预制体将写入 assets/${result.folder}`);
         } catch (error) {
@@ -1673,7 +1743,7 @@ function bindEvents(): void {
             input.title = result.folder;
             const settings = readSettings(false);
             if (settings) {
-                await request('save-settings', settings);
+                await persistPanelSettings(settings);
             }
             showToast(`已启用本地同名资源目录 ${index + 1}。`);
         } catch (error) {
@@ -1690,7 +1760,7 @@ function bindEvents(): void {
         input.title = '';
         const settings = readSettings(false);
         if (settings) {
-            await request('save-settings', settings);
+            await persistPanelSettings(settings);
         }
         showToast(`已清除本地同名资源目录 ${index + 1}。`);
         });
@@ -1812,22 +1882,29 @@ function bindEvents(): void {
         button.addEventListener('click', () => applyPreset(button.dataset.preset ?? 'smart'));
     });
 
+    element('#import-hidden-layers').addEventListener('change', async () => {
+        await setImportHiddenLayers(element<HTMLInputElement>('#import-hidden-layers').checked);
+    });
+
     root().querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
         '#scale, #asset-folder, #prefab-folder, #local-resource-folder, #update-existing, #refresh-assets, #auto-save',
     ).forEach((control) => {
         control.addEventListener('change', async () => {
             const settings = readSettings(false);
             if (settings) {
-                await request('save-settings', settings);
+                await persistPanelSettings(settings);
             }
         });
     });
-    element('#font-map-list').addEventListener('change', async () => {
-        const settings = readSettings(false);
-        if (settings) {
-            state.settings = settings;
-            await request('save-settings', settings);
-        }
+    element('#font-map-list').addEventListener('change', async (event) => {
+        const select = event.target as HTMLSelectElement;
+        const family = select.dataset.fontFamily?.trim();
+        if (!family) return;
+        // An empty string records an explicit opt-out from automatic matching.
+        // Unrendered families and temporarily unavailable assets stay intact.
+        state.settings = { ...state.settings, fontMap: { ...state.settings.fontMap, [family]: select.value } };
+        const settings = readSettings(false) ?? state.settings;
+        await persistPanelSettings(settings);
     });
 }
 

@@ -14,7 +14,7 @@ const { LocalResourceLibrary } = require('../dist/importer/local-resources');
 const { LocalAssetCache } = require('../dist/importer/cache');
 const { TokenVault } = require('../dist/security/token-vault');
 const { DEFAULT_SETTINGS } = require('../dist/types');
-const realAssetWrite = AssetWriter.prototype.write;
+const realAssetExisting = AssetWriter.prototype.existing;
 
 function sliceNode(mode = 'nine', id = 'panel') {
     const rows = mode === 'horizontal' ? 1 : 3;
@@ -55,9 +55,16 @@ function setup(t, options = {}) {
         rmSync(project, { recursive: true, force: true });
     });
     for (const level of ['log', 'warn', 'error']) t.mock.method(console, level, () => {});
-    const localBytes = Buffer.from('preexisting bitmap: must never be used as the full Figma slice source');
+    const localBytes = bitmap(12, 12);
+    const localMeta = Buffer.from(JSON.stringify({ uuid: 'local-image-uuid', userData: { artistSetting: true },
+        subMetas: { frame: { uuid: asset.uuid, importer: 'sprite-frame', userData: {
+            trimType: 'none', borderLeft: options.sliced === false ? 0 : 1,
+            borderRight: options.sliced === false ? 0 : 2, borderTop: options.sliced === false ? 0 : 3,
+            borderBottom: options.sliced === false ? 0 : 4,
+        } } } }));
     const localPath = join(options.outputOnly ? outputFolder : folder, `Panel.${extension}`);
     writeFileSync(localPath, localBytes);
+    writeFileSync(`${localPath}.meta`, localMeta);
     const bindings = [], lookups = [], writes = [], exports = [], downloads = [], cacheReads = [], cacheWrites = [], notes = [];
     const localAssets = new Map([[asset.url, asset]]);
     const node = sliceNode(options.mode);
@@ -103,11 +110,11 @@ function setup(t, options = {}) {
         }, { bind(...args) { bindings.push(args); }, beforeWrite() {}, note(...args) { notes.push(args); } });
     };
     return { run, node, asset, outputAsset, bindings, lookups, writes, exports, downloads, cacheReads, cacheWrites, cached,
-        notes, fullPng, localBytes, localPath, folder, outputFolder, project, localAssets };
+        notes, fullPng, localBytes, localMeta, localPath, folder, outputFolder, project, localAssets };
 }
 
-for (const extension of ['jpg', 'JPEG']) test(`ordinary local ${extension} retains its UUID despite Cocos rename and refresh`, async (t) => {
-    const f = setup(t, { extension, refresh: true, invalidGrid: true });
+for (const extension of ['jpg', 'JPEG']) test(`a designated local ${extension} retains its UUID despite Figma slicing, rename and refresh`, async (t) => {
+    const f = setup(t, { extension, refresh: true });
     const result = await f.run();
     assert.equal(result.assets.get('panel'), f.asset);
     assert.deepEqual(f.lookups, [f.asset.url]);
@@ -124,9 +131,24 @@ test('without valid Figma geometry, repeated imports still reuse generated JPGs'
 });
 
 for (const mode of ['nine', 'horizontal', 'vertical']) {
-    for (const refresh of [false, true]) test(`${mode} Figma geometry overrides local borders without touching the library (refresh=${refresh})`, async (t) => {
+    for (const refresh of [false, true]) test(`${mode} explicitly selected local SpriteFrame keeps its UUID and original insets (refresh=${refresh})`, async (t) => {
         const f = setup(t, { mode, refresh });
         const result = await f.run();
+        assert.equal(result.assets.get('panel'), f.asset);
+        assert.deepEqual(f.lookups, [f.asset.url]);
+        assert.equal(f.writes.length, 0);
+        assert.equal(f.exports.length, 0);
+        assert.equal(f.downloads.length, 0);
+        assert.equal(f.cacheReads.length, 0);
+        assert.equal(f.bindings.length, 1, 'slice children are not independently imported');
+        assert.equal(f.bindings[0][2], 'local');
+        assert.deepEqual(readFileSync(f.localPath), f.localBytes);
+        assert.deepEqual(readFileSync(`${f.localPath}.meta`), f.localMeta);
+        assert.ok(!f.notes.some((note) => /使用 Figma 原始画布/.test(note[2])), 'a reused library resource is never reported as generated');
+    });
+    for (const refresh of [false, true]) test(`${mode} without a designated local match generates Figma pixels and original insets (refresh=${refresh})`, async (t) => {
+        const f = setup(t, { mode, refresh });
+        const result = await f.run({ localResourceFolders: [] });
         assert.equal(result.assets.get('panel'), f.outputAsset);
         assert.notEqual(result.assets.get('panel').uuid, f.asset.uuid);
         assert.deepEqual(f.lookups, []);
@@ -154,19 +176,21 @@ test('local slice borders remain available when Figma has no valid geometry', as
     assert.deepEqual(result.warnings, []);
 });
 
-test('local resource without borders is reused unchanged only when Figma has no valid slice definition', async (t) => {
-    const f = setup(t, { sliced: false, invalidGrid: true });
+test('an explicitly selected local resource without borders is reused unchanged with a clear warning', async (t) => {
+    const f = setup(t, { sliced: false });
     const result = await f.run();
     assert.equal(result.assets.get('panel'), f.asset);
     assert.equal(f.asset.sliced, false);
     assert.equal(result.warnings.length, 1);
     assert.match(result.warnings[0], /未配置九宫边距/);
+    assert.equal(f.writes.length, 0);
+    assert.deepEqual(readFileSync(`${f.localPath}.meta`), f.localMeta);
 });
 
 for (const sliced of [false, true]) test(`Figma slices replace old output pixels/borders in place (old sliced=${sliced})`, async (t) => {
     const f = setup(t, { outputOnly: true, sliced });
-    await f.run();
-    await f.run();
+    await f.run({ localResourceFolders: [] });
+    await f.run({ localResourceFolders: [] });
     assert.equal(f.writes.length, 2, 'each import reconstructs from the full source rather than trusting old output insets');
     assert.equal(f.exports.length, 0, 'the complete source cache avoids repeated network rendering');
     assert.ok(f.writes.every((item) => item.url === f.asset.url));
@@ -177,7 +201,7 @@ for (const sliced of [false, true]) test(`Figma slices replace old output pixels
 test('an old compact texture in the cache is rejected as a full slice source and re-exported', async (t) => {
     const f = setup(t);
     f.cached.set('panel', bitmap(44, 44));
-    await f.run();
+    await f.run({ localResourceFolders: [] });
     assert.equal(f.exports.length, 1);
     assert.deepEqual(f.exports[0].ids, ['panel']);
     assert.equal(f.exports[0].useAbsoluteBounds, true);
@@ -191,7 +215,7 @@ test('ordinary PNG first, later same-name Figma slice exports and writes only th
     const f = setup(t, { refresh: true });
     const ordinary = parseNode({ id: 'ordinary', name: 'Panel', type: 'RECTANGLE',
         absoluteBoundingBox: { x: 0, y: 0, width: 30, height: 30 }, effects: [{ type: 'DROP_SHADOW' }] });
-    const result = await f.run({}, [ordinary, f.node]);
+    const result = await f.run({ localResourceFolders: [] }, [ordinary, f.node]);
     assert.deepEqual(f.exports.flatMap((item) => item.ids), ['panel']);
     assert.equal(f.downloads.length, 1);
     assert.equal(f.writes.length, 1);
@@ -199,7 +223,7 @@ test('ordinary PNG first, later same-name Figma slice exports and writes only th
     assert.equal(result.assets.get(ordinary.id).sliced, true);
 });
 
-test('same-name IMAGE and generated gradient share the slice even when encountered first', async (t) => {
+test('same-name PNG, IMAGE and gradient share the explicitly selected local slice without a write', async (t) => {
     const f = setup(t);
     const image = parseNode({ id: 'image', name: 'Panel', type: 'RECTANGLE',
         absoluteBoundingBox: { x: 0, y: 0, width: 30, height: 30 },
@@ -217,9 +241,11 @@ test('same-name IMAGE and generated gradient share the slice even when encounter
         ['text', { action: 'generate', kind: 'label', nineSlice: false, explicit: true }],
     ]);
     const result = await f.run({}, [image, gradient, f.node], decisions);
-    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes.length, 0);
     assert.equal(f.exports.length, 0);
-    assert.equal(f.cacheReads.length, 1, 'no IMAGE download or gradient preparation is needed');
+    assert.equal(f.cacheReads.length, 0, 'no download or gradient preparation is needed');
+    assert.equal(f.lookups.length, 1);
+    assert.equal(result.assets.get(f.node.id), f.asset);
     assert.equal(result.assets.get(image.id), result.assets.get(f.node.id));
     assert.equal(result.assets.get(gradient.id), result.assets.get(f.node.id));
 });
@@ -227,49 +253,40 @@ test('same-name IMAGE and generated gradient share the slice even when encounter
 test('conflicting same-name slices retain the first valid Figma definition and explain the choice', async (t) => {
     const f = setup(t);
     const other = sliceNode('horizontal', 'other-panel');
-    const result = await f.run({}, [f.node, other]);
+    const result = await f.run({ localResourceFolders: [] }, [f.node, other]);
     assert.equal(f.writes.length, 1);
     assert.deepEqual(f.writes[0].borders, { left: 20, right: 20, top: 20, bottom: 20 });
     assert.equal(result.assets.get(other.id), result.assets.get(f.node.id));
     assert.match(result.warnings.join(';'), /同名三\/九宫定义不同.*首个有效/);
 });
 
-test('Figma slices write the selected output even when it is also the second local search directory', async (t) => {
+test('the first designated library remains authoritative when the output is another search directory', async (t) => {
     const f = setup(t);
     const sourceMeta = Buffer.from('{"uuid":"shared-original","artistSetting":true}');
     writeFileSync(`${f.localPath}.meta`, sourceMeta);
     writeFileSync(join(f.outputFolder, 'Panel.png'), Buffer.from('previous unminimized output'));
-    await f.run({ localResourceFolders: [f.folder, f.outputFolder] });
-    assert.equal(f.writes.length, 1);
-    assert.equal(f.writes[0].url, 'db://assets/figma-importer/Panel.png');
-    assert.deepEqual(f.writes[0].borders, { left: 20, right: 20, top: 20, bottom: 20 });
-    const generated = PNG.sync.read(f.writes[0].bytes);
-    assert.deepEqual([generated.width, generated.height], [44, 44]);
-    assert.deepEqual(f.lookups, [], 'the source library cannot supply stale slice borders');
+    const result = await f.run({ localResourceFolders: [f.folder, f.outputFolder] });
+    assert.equal(result.assets.get('panel'), f.asset);
+    assert.equal(f.writes.length, 0);
+    assert.deepEqual(f.lookups, [f.asset.url]);
     assert.equal(f.exports.length, 0);
     assert.deepEqual(readFileSync(f.localPath), f.localBytes);
     assert.deepEqual(readFileSync(`${f.localPath}.meta`), sourceMeta);
 });
 
-test('a parent assets search directory does not block its output child or redirect writes to sibling materials', async (t) => {
+test('a parent assets search directory directly reuses a nested local match', async (t) => {
     const f = setup(t);
     const sourceMeta = Buffer.from('{"uuid":"sibling-material","keepOriginal":true}');
     writeFileSync(`${f.localPath}.meta`, sourceMeta);
-    await f.run({ localResourceFolders: [join(f.project, 'assets')] });
-    assert.equal(f.writes.length, 1);
-    for (const write of f.writes) {
-        const destination = resolve(f.project, write.url.slice('db://'.length));
-        const suffix = relative(f.outputFolder, destination);
-        assert.ok(suffix && suffix !== '..' && !suffix.startsWith('..\\') && !suffix.startsWith('../') && !isAbsolute(suffix));
-        assert.equal(write.url, 'db://assets/figma-importer/Panel.png');
-        assert.deepEqual(write.borders, { left: 20, right: 20, top: 20, bottom: 20 });
-    }
-    assert.deepEqual(f.lookups, []);
+    const result = await f.run({ localResourceFolders: [join(f.project, 'assets')] });
+    assert.equal(result.assets.get('panel'), f.asset);
+    assert.equal(f.writes.length, 0);
+    assert.deepEqual(f.lookups, [f.asset.url]);
     assert.deepEqual(readFileSync(f.localPath), f.localBytes);
     assert.deepEqual(readFileSync(`${f.localPath}.meta`), sourceMeta);
 });
 
-test('an explicitly selected search directory refreshes only its output PNG and retains its real writer UUID', async (t) => {
+test('a real SpriteFrame lookup retains local PNG, Meta and UUID even when output points at that library', async (t) => {
     const f = setup(t);
     const url = 'db://assets/shared/Panel.png';
     const imageUuid = 'existing-image-uuid';
@@ -284,40 +301,29 @@ test('an explicitly selected search directory refreshes only its output PNG and 
     const siblingBytes = Buffer.from('outside the explicitly selected output');
     const siblingMeta = Buffer.from('{"uuid":"untouched-material","artistSetting":true}');
     writeFileSync(sibling, siblingBytes); writeFileSync(`${sibling}.meta`, siblingMeta);
-    const mutations = [];
-    // Exercise AssetWriter.write itself: an existing registered PNG must update
-    // in place and keep its SpriteFrame identity while replacing old insets.
-    t.mock.method(AssetWriter.prototype, 'write', realAssetWrite);
+    const originalImage = readFileSync(f.localPath);
+    const originalMeta = readFileSync(`${f.localPath}.meta`);
+    t.mock.method(AssetWriter.prototype, 'existing', realAssetExisting);
     global.Editor.Message.request = async (channel, method, ...args) => {
         assert.equal(channel, 'asset-db');
         if (method === 'query-asset-info') return args[0] === url || args[0] === imageUuid ? info : null;
         if (method === 'query-asset-meta') {
             assert.equal(args[0], imageUuid); return JSON.parse(JSON.stringify(meta));
         }
-        if (method === 'save-asset') {
-            assert.equal(args[0], url, 'only the explicitly selected output image may be written');
-            mutations.push({ method, url: args[0] }); writeFileSync(f.localPath, args[1]); return;
-        }
-        if (method === 'save-asset-meta') {
-            assert.equal(args[0], imageUuid);
-            mutations.push({ method, uuid: args[0] }); meta = JSON.parse(args[1]);
-            writeFileSync(`${f.localPath}.meta`, JSON.stringify(meta)); return;
-        }
-        if (method === 'reimport-asset') { assert.equal(args[0], imageUuid); return; }
-        assert.fail(`unexpected write outside the existing output: ${method}`);
+        assert.fail(`a designated local SpriteFrame must remain read-only: ${method}`);
     };
     const result = await f.run({ assetFolder: 'shared', localResourceFolders: [f.folder] });
     assert.equal(result.assets.get('panel').url, url);
     assert.equal(result.assets.get('panel').uuid, f.asset.uuid);
     assert.equal(result.assets.get('panel').sliced, true);
-    const written = PNG.sync.read(readFileSync(f.localPath));
-    assert.deepEqual([written.width, written.height], [44, 44]);
-    assert.deepEqual(meta.subMetas.frame.userData, { trimType: 'none', borderLeft: 20,
-        borderRight: 20, borderTop: 20, borderBottom: 20 });
+    assert.deepEqual(readFileSync(f.localPath), originalImage);
+    assert.deepEqual(readFileSync(`${f.localPath}.meta`), originalMeta);
+    assert.deepEqual(meta.subMetas.frame.userData, { trimType: 'auto', borderLeft: 1,
+        borderRight: 1, borderTop: 1, borderBottom: 1 });
     assert.equal(meta.userData.custom, 'keep-me');
     assert.equal(meta.uuid, imageUuid);
     assert.equal(meta.subMetas.frame.uuid, f.asset.uuid);
-    assert.equal(mutations.filter((item) => item.method === 'save-asset').length, 1);
+    assert.equal(f.writes.length, 0);
     assert.deepEqual(readFileSync(sibling), siblingBytes);
     assert.deepEqual(readFileSync(`${sibling}.meta`), siblingMeta);
 });
@@ -354,6 +360,88 @@ test('an ordinary unregistered local SpriteFrame still fails without creating a 
     await assert.rejects(f.run(), /尚无可用 SpriteFrame.*不会另建副本/);
     assert.deepEqual(f.bindings, []);
     assert.equal(f.writes.length, 0);
+});
+
+test('a valid Figma slice with an unregistered designated local SpriteFrame does not silently create a replacement', async (t) => {
+    const f = setup(t, { unready: true });
+    await assert.rejects(f.run(), /尚无可用 SpriteFrame.*不会另建副本/);
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.exports.length, 0);
+    assert.equal(f.downloads.length, 0);
+    assert.equal(f.cacheReads.length, 0);
+});
+
+const tiledNode = (id, scale = 0.5, kind = 'IMAGE') => parseNode({ id, name: 'Panel', type: 'RECTANGLE',
+    absoluteBoundingBox: { x: 0, y: 0, width: 40, height: 30 },
+    fills: [kind === 'PATTERN' ? { type: 'PATTERN', sourceNodeId: `source-${id}`, scalingFactor: scale }
+        : { type: 'IMAGE', imageRef: `ref-${id}`, scaleMode: 'TILE', scalingFactor: scale }] });
+
+for (const refresh of [false, true]) test(`Tiled nodes share the designated local UUID with per-instance periods and unchanged PNG/Meta (refresh=${refresh})`, async (t) => {
+    const f = setup(t, { refresh });
+    const first = tiledNode('tile-a', 0.5), second = tiledNode('tile-b', 1.25, 'PATTERN');
+    const result = await f.run({}, [first, second]);
+    const a = result.assets.get(first.id), b = result.assets.get(second.id);
+    assert.equal(a.uuid, f.asset.uuid);
+    assert.equal(b.uuid, f.asset.uuid);
+    assert.equal(a.tiled, true); assert.equal(b.tiled, true);
+    assert.equal(a.sliced, false); assert.equal(b.sliced, false);
+    assert.equal(a.tileScale, 1, 'global 2x multiplied by the first 0.5x paint period');
+    assert.equal(b.tileScale, 2.5, 'the second node retains its own global 2x * 1.25x paint period');
+    assert.equal(f.asset.sliced, true, 'per-instance Tiled flags never alter the shared base descriptor');
+    assert.equal(f.asset.tileScale, undefined);
+    assert.deepEqual(f.lookups, [f.asset.url], 'same-name Tiled sources query the existing frame once');
+    assert.equal(f.writes.length, 0); assert.equal(f.exports.length, 0);
+    assert.equal(f.downloads.length, 0); assert.equal(f.cacheReads.length, 0);
+    assert.ok(f.bindings.every((binding) => binding[2] === 'local'));
+    assert.deepEqual(readFileSync(f.localPath), f.localBytes);
+    assert.deepEqual(readFileSync(`${f.localPath}.meta`), f.localMeta);
+});
+
+test('an unready designated local Tiled SpriteFrame fails without downloads or generated variants', async (t) => {
+    const f = setup(t, { unready: true });
+    await assert.rejects(f.run({}, [tiledNode('unready-tile')]), /尚无可用 SpriteFrame.*不会另建副本/);
+    assert.equal(f.writes.length, 0); assert.equal(f.exports.length, 0); assert.equal(f.downloads.length, 0);
+});
+
+test('an external Tiled bitmap is imported rather than pretending to have a reusable project UUID', async (t) => {
+    const f = setup(t);
+    const externalFolder = join(f.project, 'external-library');
+    mkdirSync(externalFolder);
+    writeFileSync(join(externalFolder, 'Panel.png'), bitmap(8, 6));
+    const generated = [];
+    t.mock.method(AssetWriter.prototype, 'resolve', async (url, bytes, options) => {
+        generated.push({ url, bytes, options });
+        return { uuid: 'external-imported-frame', url, sliced: false, tiled: true };
+    });
+    const tile = tiledNode('external-pattern', 1.25, 'PATTERN');
+    const result = await f.run({ localResourceFolders: [externalFolder] }, [tile]);
+    assert.equal(generated.length, 1);
+    assert.match(generated[0].url, /^db:\/\/assets\/figma-importer\/Panel__tile_/);
+    const png = PNG.sync.read(generated[0].bytes);
+    assert.deepEqual([png.width, png.height], [20, 15], 'unscaled external pixels are multiplied by global 2x * paint 1.25x once');
+    assert.equal(generated[0].options.tiled, true);
+    assert.equal(result.assets.get(tile.id).uuid, 'external-imported-frame');
+    assert.equal(result.assets.get(tile.id).tileScale, 1, 'the imported texture already contains the requested tile period');
+    assert.equal(f.exports.length, 0); assert.equal(f.downloads.length, 0);
+    assert.equal(f.lookups.length, 0, 'an external file cannot claim a project SpriteFrame UUID');
+});
+
+test('Tiled sources without a designated local match keep the generated raster path and unit node period', async (t) => {
+    const f = setup(t);
+    const generated = [];
+    t.mock.method(AssetWriter.prototype, 'existingForSource', async () => null);
+    t.mock.method(FigmaClient.prototype, 'getImageFillUrls', async () => ({ 'ref-generated-tile': 'fixture-tiled-original' }));
+    t.mock.method(AssetWriter.prototype, 'resolve', async (url, bytes, options) => {
+        generated.push({ url, bytes, options });
+        return { uuid: 'figma-generated-tile', url, sliced: false, tiled: true };
+    });
+    const tile = tiledNode('generated-tile', 0.5);
+    const result = await f.run({ localResourceFolders: [] }, [tile]);
+    assert.equal(generated.length, 1);
+    assert.deepEqual(f.downloads, ['fixture-tiled-original']);
+    assert.match(generated[0].url, /Panel__tile_/);
+    assert.equal(generated[0].options.tiled, true);
+    assert.equal(result.assets.get(tile.id).tileScale, 1);
 });
 
 test('cached full PNG follows Figma slicing even without any local or output match', async (t) => {

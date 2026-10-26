@@ -252,6 +252,8 @@ export interface ImportSettings {
     scale: number;
     updateExisting: boolean;
     refreshAssets: boolean;
+    /** 缺省为 true；关闭时忽略隐藏节点及其后代。 */
+    importHiddenLayers: boolean;
     autoSave: boolean;
     fontMap: Record<string, string>;
 }
@@ -380,6 +382,7 @@ export const DEFAULT_SETTINGS: ImportSettings = {
     scale: 1,
     updateExisting: true,
     refreshAssets: false,
+    importHiddenLayers: true,
     autoSave: false,
     fontMap: {},
 };

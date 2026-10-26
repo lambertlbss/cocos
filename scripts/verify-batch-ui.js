@@ -20,7 +20,7 @@ async function main() {
     const modules = {};
     for (const file of ['panels/default/index', 'panels/default/workflow', 'panels/default/model',
         'panels/default/import-review', 'import-actions', 'node-name', 'importer/fonts', 'importer/assets', 'figma/url',
-        'figma/import-planner', 'figma/analyzer', 'figma/slicing', 'diagnostics']) {
+        'figma/import-planner', 'figma/analyzer', 'figma/slicing', 'import-visibility', 'diagnostics']) {
         modules[`/dist/${file}.js`] = (await readFile(join(root, `dist/${file}.js`), 'utf8')).replace(/\/\/# sourceMappingURL=.*$/gm, '');
     }
     const html = `<!doctype html><html><body style="margin:0"><div id="host" style="height:100vh"></div><script>
@@ -36,14 +36,17 @@ async function main() {
         const names=['Home_ui','Bag_ui','Shop_ui'];
         window.frames=names.map((name,i)=>{const rootId=(i+1)+':1';const sourceUrl='https://www.figma.com/design/example?node-id='+(i+1)+'-1';return{
             id:'frame-'+i,fileKey:'example',rootId,name,sourceUrl,enabled:true,sectionName:'Main Section',document:{fileKey:'example',fileName:'Game UI',sourceUrl,fonts:['Inter'],fontAssets:fonts,nodeOverrides:[],tree:[makeNode(rootId,name,'FRAME',[
-                makeNode(rootId+':title','Title','TEXT'),makeNode(rootId+':background','Background','RECTANGLE'),makeNode(rootId+':button','Start_Button','FRAME')])]} };});
+                makeNode(rootId+':title','Title','TEXT'),makeNode(rootId+':background','Background','RECTANGLE'),makeNode(rootId+':button','Start_Button','FRAME'),
+                {...makeNode(rootId+':hidden','Hidden_Notes','TEXT'),visible:false}])]} };});
         const reports=new Map();const scene={rootUuid:'root',targetUuid:'target',mode:'prefab',nodes:[]};
         frames.forEach((frame,i)=>reports.set('review-'+i,{id:'review-'+i,createdAt:new Date().toISOString(),fileName:frame.name,targetUrl:'db://assets/ui/prefabs/'+frame.name+'.prefab',
             assets:[],before:scene,after:scene,sourceTree:[],changes:[],warnings:[],confirmed:false,readOnlyReason:i?'':'历史批量报告，只读查看'}));
         let queue=[],lastResult;
-        const settings={sourceUrl:'https://www.figma.com/design/example?node-id=10-1',assetFolder:'ui/images',prefabFolder:'ui/prefabs',localResourceFolders:[],localResourceFolder:'',scale:1,updateExisting:true,refreshAssets:false,autoSave:false,fontMap:{}};
+        const settings={sourceUrl:'https://www.figma.com/design/example?node-id=10-1',assetFolder:'ui/images',prefabFolder:'ui/prefabs',localResourceFolders:[],localResourceFolder:'',scale:1,updateExisting:true,refreshAssets:false,autoSave:false,fontMap:{Inter:'db://assets/fonts/Saved_Inter_Not_Ready.ttf'}};
+        window.savedSettings=settings;
         const request=async(_name,message,...args)=>{calls.push([message,...args]);
             if(message==='get-state')return{version:pkg.version,vault:{hasToken:true,persistent:true,backend:'browser fixture'},settings,document:null,fontAssets:fonts};
+            if(message==='save-settings'){Object.assign(settings,args[0],{fontMap:{...args[0].fontMap}});return structuredClone(settings);}
             if(message==='get-batch-state')return{items:queue,lastResult};
             if(message==='get-import-review')return args[0]?reports.get(args[0]):null;
             if(message==='resolve-batch-source'){queue=frames;return{sourceType:'section',sourceUrl:settings.sourceUrl,items:frames,added:3,duplicates:0};}
@@ -87,6 +90,12 @@ async function main() {
         await page.waitForLoadState('networkidle'); await page.evaluate(() => window.ready);
         await page.locator('#add-batch-source').click();
         await page.waitForFunction(() => q('#batch-source-list').children.length === 3 && q('#app').dataset.workflowBusy === 'false');
+        const savedFont = 'db://assets/fonts/Saved_Inter_Not_Ready.ttf';
+        const projectFont = 'db://assets/fonts/Inter.ttf';
+        const fontSelect = page.locator('[data-font-family="Inter"]');
+        assert.equal(await fontSelect.inputValue(), savedFont, 'an unavailable saved URL remains selected in the real DOM');
+        assert.match(await fontSelect.locator('option:checked').textContent(), /暂未就绪/);
+        assert.equal(await page.locator('#import-hidden-layers').isChecked(), true, 'old settings keep hidden imports enabled by default');
         const checkLayout = async (label) => {
             assert.equal(await page.evaluate(() => q('#app').scrollWidth <= q('#app').clientWidth), true, `${label}: app width`);
             assert.equal(await page.evaluate(() => q('.workflow-content').scrollWidth <= q('.workflow-content').clientWidth), true, `${label}: content width`);
@@ -107,6 +116,7 @@ async function main() {
         await page.waitForFunction(() => q('#batch-active-name').textContent.includes('Bag_ui') && q('#app').dataset.workflowBusy === 'false');
         await page.locator('[data-batch-frame="frame-0"]').click();
         await page.waitForFunction(() => q('[data-name-for="1:1:title"]')?.value === 'Home_Title' && q('#app').dataset.workflowBusy === 'false');
+        assert.equal(await fontSelect.inputValue(), savedFont, 'switching frames cannot erase the saved font reference');
         assert.equal(await page.locator('[data-action-for="1:1:title"]').inputValue(), 'render');
         assert.equal(await page.locator('[data-kind-for="1:1:title"]').count(), 1);
         assert.equal(await page.locator('[data-patch-for="1:1:title"]').count(), 1);
@@ -115,7 +125,27 @@ async function main() {
             await checkLayout(`nodes ${width}`); await page.screenshot({ path: join(temp, `nodes-${width}.png`) });
         }
         await page.locator('#workflow-next').click();
+        await page.locator('#advanced-settings > summary').click();
+        assert.equal(await fontSelect.inputValue(), savedFont);
+        await fontSelect.selectOption('');
+        await page.waitForFunction(() => Object.prototype.hasOwnProperty.call(window.savedSettings.fontMap, 'Inter')
+            && window.savedSettings.fontMap.Inter === '');
         await page.locator('#workflow-back').click();
+        await page.locator('[data-batch-frame="frame-1"]').click();
+        await page.waitForFunction(() => q('#batch-active-name').textContent.includes('Bag_ui') && q('#app').dataset.workflowBusy === 'false');
+        assert.equal(await fontSelect.inputValue(), '', 'explicitly choosing the default font survives a frame redraw');
+        await page.locator('[data-batch-frame="frame-0"]').click();
+        await page.waitForFunction(() => q('#batch-active-name').textContent.includes('Home_ui') && q('#app').dataset.workflowBusy === 'false');
+        assert.equal(await fontSelect.inputValue(), '', 'an empty saved mapping must not auto-match Inter.ttf');
+        await page.locator('#workflow-next').click();
+        await fontSelect.selectOption(projectFont);
+        await page.waitForFunction(() => window.savedSettings.fontMap.Inter === 'db://assets/fonts/Inter.ttf');
+        await page.getByText('导入隐藏图层', { exact: true }).click();
+        assert.equal(await page.locator('#import-hidden-layers').isChecked(), false);
+        await page.waitForFunction(() => window.savedSettings.importHiddenLayers === false);
+        await page.locator('#workflow-back').click();
+        assert.equal(await page.locator('[data-node-id="1:1:hidden"] .node-action-badge').textContent(), '忽略');
+        assert.equal(await page.locator('[data-node-id="1:1:hidden"]').count(), 1, 'the source node remains inspectable when excluded');
         await page.locator('[data-node-id="1:1:background"]').click();
         assert.equal(await page.locator('[data-patch-for="1:1:background"]').isChecked(), true);
         assert.equal(await page.locator('[data-patch-for="1:1:background"]').isDisabled(), true);
@@ -127,6 +157,14 @@ async function main() {
         assert.equal(await page.locator('[data-batch-name]').count(), 3);
         await page.locator('#import-button').click();
         await page.waitForFunction(() => Boolean(window.finishImport));
+        const initialImport = await page.evaluate(() => calls.find(([message]) => message === 'import-batch')[1]);
+        assert.equal(initialImport.settings.importHiddenLayers, false);
+        assert.equal(initialImport.settings.fontMap.Inter, projectFont);
+        assert.equal(initialImport.items.length, 3);
+        for (const item of initialImport.items) {
+            assert.equal(item.overrides.find(node => node.id.endsWith(':hidden')).action, 'ignore',
+                'the shared hidden setting applies to inactive frame editors too');
+        }
         await page.evaluate(() => panel.methods.onProgress({phase:'assets',value:.4,message:'准备图片资源',batch:{batchId:'batch-1',itemId:'frame-0',name:'Home_ui',index:1,total:3,completed:0,stopRequested:false,items:frames.map((f,i)=>({id:f.id,name:f.name,sourceUrl:f.sourceUrl,status:i?'pending':'running'}))}}));
         for (const width of [650, 420]) {
             await page.setViewportSize({ width, height: 860 }); await page.locator('#progress-region').scrollIntoViewIfNeeded();
@@ -181,8 +219,15 @@ async function main() {
         await page.locator('[data-name-for="2:1:title"]').press('Tab');
         await page.locator('#workflow-next').click();
         await page.waitForFunction(() => q('#app').dataset.workflowStep === '3');
+        assert.equal(await fontSelect.inputValue(), projectFont);
+        assert.equal(await page.locator('#import-hidden-layers').isChecked(), false);
+        await page.getByText('导入隐藏图层', { exact: true }).click();
+        assert.equal(await page.locator('#import-hidden-layers').isChecked(), true);
+        await page.waitForFunction(() => window.savedSettings.importHiddenLayers === true);
         await page.locator('#workflow-back').click();
         assert.equal(await page.locator('[data-name-for="2:1:title"]').inputValue(), 'Bag_Title_After_Removal');
+        assert.equal(await page.locator('[data-node-id="2:1:hidden"] .node-action-badge').textContent(), '生成',
+            're-enabling hidden imports restores the original per-node strategy');
         await page.locator('#workflow-next').click();
         await page.locator('#import-button').click();
         await page.waitForFunction(() => window.importCount === 4 && q('#app').dataset.workflowStep === '4'
@@ -190,10 +235,13 @@ async function main() {
         const afterRemoval = await page.evaluate(() => calls.filter(([message]) => message === 'import-batch').at(-1)[1]);
         assert.deepEqual(afterRemoval.items.map(item => item.id), ['frame-1', 'frame-2']);
         assert.equal(afterRemoval.items[0].overrides.find(node => node.id === '2:1:title').name, 'Bag_Title_After_Removal');
+        assert.equal(afterRemoval.settings.importHiddenLayers, true);
+        assert.equal(afterRemoval.settings.fontMap.Inter, projectFont);
+        for (const item of afterRemoval.items) assert.equal(item.overrides.find(node => node.id.endsWith(':hidden')).action, 'generate');
         assert.equal(await page.evaluate(() => window.syncWhileActive), 0);
         assert.equal(await page.locator('#workflow-error').isHidden(), true);
         assert.deepEqual(errors, []);
-        console.log(`Compiled batch panel browser checks passed: Figma slice priority/ignore, Section list, Frame tabs, independent edits, full node controls, shared settings, stop/resume/retry, per-item reports, deferred removal/switch ordering and reimport, and 650/420px layout. Screenshots: ${temp}`);
+        console.log(`Compiled batch panel browser checks passed: persisted/unavailable/default font mappings, shared hidden-layer filtering and restoration, Figma slice priority/ignore, Section list, Frame tabs, independent edits, full node controls, shared settings, stop/resume/retry, per-item reports, deferred removal/switch ordering and reimport, and 650/420px layout. Screenshots: ${temp}`);
     } finally { await browser.close(); server.close(); }
 }
 

@@ -34,6 +34,45 @@ test('section discovery includes hidden screens and excludes component, instance
     ] });
     assert.deepEqual(collectSectionFrames(section).map((frame) => frame.id), ['2:1', '7:2']);
     assert.equal(collectSectionFrames(section)[0].visible, false);
+    assert.equal(collectSectionFrames(section)[1].visible, false, 'hidden Group visibility survives frame extraction');
+});
+
+test('nested hidden Section and Group ancestors become inactive frame roots without mutating the source', () => {
+    const section = parseNode({ id: 'outer', type: 'SECTION', children: [
+        { id: 'hidden-section', type: 'SECTION', visible: false, children: [
+            { id: 'visible-group', type: 'GROUP', visible: true, children: [
+                rawFrame('nested-frame', 'Nested', [rawFrame('layout', 'Layout')]),
+            ] },
+        ] },
+        rawFrame('visible-frame', 'Visible'),
+    ] });
+    const original = JSON.stringify(section);
+    const originalFrame = section.children[0].children[0].children[0];
+    const extracted = collectSectionFrames(section);
+    assert.deepEqual(extracted.map(frame => [frame.id, frame.visible]), [['nested-frame', false], ['visible-frame', true]]);
+    assert.notEqual(extracted[0], originalFrame, 'inherited visibility belongs to a derived frame root');
+    assert.equal(extracted[0].children, originalFrame.children, 'the original subtree and IDs are retained');
+    assert.equal(extracted[1], section.children[1], 'visible frames need no clone');
+    assert.equal(JSON.stringify(section), original);
+});
+
+test('an extracted hidden-ancestor frame session retains its source identity and inactive tree state', () => {
+    const section = { id: 'hidden-root', type: 'SECTION', visible: false, children: [
+        rawFrame('screen', 'Hidden screen', [{ id: 'title', type: 'TEXT', style: { fontFamily: 'Inter' } }]),
+    ] };
+    const document = parseDocument({ name: 'UI', nodes: { 'hidden-root': { document: section } } },
+        source, 'FileKey123456', 'hidden-root');
+    const original = JSON.stringify({ roots: document.roots, tree: document.tree });
+    const [frame] = collectSectionFrames(document.roots[0]);
+    const session = frameDocument(document, frame);
+    assert.equal(session.sourceNodeId, 'screen');
+    assert.equal(parseFigmaSource(session.sourceUrl).nodeId, 'screen');
+    assert.equal(session.roots[0].visible, false);
+    assert.equal(session.tree[0].visible, false);
+    assert.match(session.tree[0].warning, /隐藏.*Inactive/);
+    assert.deepEqual([...session.nodeById.keys()], ['screen', 'title']);
+    assert.equal(document.nodeById.get('screen').visible, true);
+    assert.equal(JSON.stringify({ roots: document.roots, tree: document.tree }), original);
 });
 
 test('a section screen and a directly linked frame have equivalent source identity', () => {

@@ -828,3 +828,247 @@ test('rapid nonactive selection changes and removing every frame preserve the fi
     assert.deepEqual(Array.from(ui.calls('sync-batch-items').at(-1).args[0]), []);
     assert.equal(ui.calls('import-batch').length, 0);
 });
+
+test('saved font URLs absent from the asset index remain selectable and survive unrelated saves and reopening', async (t) => {
+    const missing = 'db://assets/fonts/CustomFont.ttf';
+    let persisted = { ...settings(), fontMap: { Inter: missing, Other: 'db://assets/fonts/Other.ttf' } };
+    const document = design(); document.fonts = ['Inter', 'Other'];
+    const ui = await panelFixture(t, { initial: { settings: persisted, document, fontAssets: [] }, handlers: {
+        'save-settings': (value) => { persisted = JSON.parse(JSON.stringify(value)); return persisted; },
+    } });
+    const inter = ui.get('[data-font-family="Inter"]');
+    const savedOption = inter.options.find((item) => item.value === missing);
+    assert.ok(savedOption, 'an unavailable saved URL needs an option or the browser resets select.value to empty');
+    assert.match(savedOption.textContent, /已保存.*资源暂未就绪/);
+    assert.equal(inter.value, missing);
+    // Also defend against a stale renderer selection without treating it as a
+    // user clear: only a font change event may record that explicit choice.
+    inter.value = '';
+    ui.get('#scale').value = '2'; await ui.get('#scale').emit('change');
+    assert.deepEqual(persisted.fontMap, { Inter: missing, Other: 'db://assets/fonts/Other.ttf' });
+    const reopened = await panelFixture(t, { initial: { settings: persisted, document, fontAssets: [] } });
+    assert.equal(reopened.get('[data-font-family="Inter"]').value, missing);
+    assert.equal(reopened.get('[data-font-family="Other"]').value, persisted.fontMap.Other);
+});
+
+test('explicit no-font mapping overrides automatic matching across rereads and reopening without clearing other families', async (t) => {
+    let persisted = { ...settings(), fontMap: { Other: 'db://assets/fonts/Other.ttf', Unseen: 'db://assets/fonts/Unseen.otf' } };
+    const ui = await panelFixture(t, { initial: { settings: persisted }, handlers: {
+        'save-settings': (value) => { persisted = JSON.parse(JSON.stringify(value)); return persisted; },
+        'resolve-batch-source': () => design(),
+    } });
+    const inter = ui.get('[data-font-family="Inter"]');
+    assert.equal(inter.value, fontAssets[0].url, 'unconfigured fonts retain automatic name matching');
+    inter.value = ''; await ui.get('#font-map-list').emit('change', { target: inter });
+    assert.deepEqual(persisted.fontMap, { Other: 'db://assets/fonts/Other.ttf', Unseen: 'db://assets/fonts/Unseen.otf', Inter: '' });
+    await ui.click('#refresh-document'); await flush();
+    assert.equal(ui.get('[data-font-family="Inter"]').value, '');
+    const reopened = await panelFixture(t, { initial: { settings: persisted } });
+    assert.equal(reopened.get('[data-font-family="Inter"]').value, '');
+    await reopened.goToConfirm(); await reopened.click('#import-button'); await flush();
+    const imported = reopened.calls('import-selection').at(-1).args[0].settings.fontMap;
+    assert.equal(imported.Inter, '');
+    assert.equal(imported.Other, persisted.fontMap.Other);
+    assert.equal(imported.Unseen, persisted.fontMap.Unseen);
+});
+
+test('changing documents keeps saved mappings for fonts that are no longer rendered', async (t) => {
+    let persisted = settings();
+    const ui = await panelFixture(t, { handlers: {
+        'save-settings': (value) => { persisted = JSON.parse(JSON.stringify(value)); return persisted; },
+    } });
+    const inter = ui.get('[data-font-family="Inter"]'); inter.value = fontAssets[1].url;
+    await ui.get('#font-map-list').emit('change', { target: inter });
+    const second = design({ id: '2:1', sourceUrl: sourceB }); second.fonts = ['Other']; second.fontAssets = [];
+    ui.handlers['resolve-batch-source'] = () => second;
+    await ui.click('#change-source'); ui.get('#source-url').value = sourceB;
+    await ui.get('#source-url').emit('input'); await ui.click('#fetch-document'); await flush();
+    assert.equal(ui.root.querySelector('[data-font-family="Inter"]'), null);
+    assert.equal(ui.get('[data-font-family="Other"]').value, 'db://assets/fonts/Other.ttf');
+    const other = ui.get('[data-font-family="Other"]'); other.value = '';
+    await ui.get('#font-map-list').emit('change', { target: other });
+    assert.deepEqual(persisted.fontMap, { Inter: fontAssets[1].url, Other: '' });
+    const reopened = await panelFixture(t, { initial: { settings: persisted } });
+    assert.equal(reopened.get('[data-font-family="Inter"]').value, fontAssets[1].url);
+});
+
+test('Frame selection and a refreshed font index preserve explicit empty and unavailable mappings', async (t) => {
+    const first = frameItem('1:1', 'Home_ui'), second = frameItem('2:1', 'Bag_ui');
+    first.document.fonts = ['Inter']; second.document.fonts = ['Other'];
+    first.document.fontAssets = []; second.document.fontAssets = [];
+    const items = [first, second];
+    let assetsReady = false;
+    let persisted = { ...settings(), fontMap: { Inter: fontAssets[1].url, Other: 'db://assets/fonts/Other.ttf' } };
+    const ui = await batchFixture(t, { items, fixture: { initial: { settings: persisted } }, handlers: {
+        'save-settings': (value) => { persisted = JSON.parse(JSON.stringify(value)); return persisted; },
+        'activate-batch-item': (id) => ({ ...items.find((item) => item.id === id).document,
+            fontAssets: assetsReady ? fontAssets : [] }),
+    } });
+    await ui.configure();
+    assert.equal(ui.get('[data-font-family="Inter"]').value, fontAssets[1].url);
+    let checked = ui.get(`[data-batch-checked="${second.id}"]`);
+    checked.checked = false; await checked.emit('change'); await flush();
+    assert.equal(ui.root.querySelector('[data-font-family="Other"]'), null);
+    const inter = ui.get('[data-font-family="Inter"]'); inter.value = '';
+    await ui.get('#font-map-list').emit('change', { target: inter });
+    assert.deepEqual(persisted.fontMap, { Inter: '', Other: 'db://assets/fonts/Other.ttf' });
+    checked = ui.get(`[data-batch-checked="${second.id}"]`);
+    checked.checked = true; await checked.emit('change'); await flush();
+    assetsReady = true;
+    await ui.click(`[data-batch-frame="${second.id}"]`); await flush();
+    assert.equal(ui.get('[data-font-family="Inter"]').value, '');
+    assert.ok(ui.get('[data-font-family="Inter"]').options.some((item) => item.value === fontAssets[1].url),
+        'activation uses its fresh project font index');
+    assert.equal(ui.get('[data-font-family="Other"]').value, persisted.fontMap.Other);
+    await ui.click(`[data-batch-frame="${first.id}"]`); await flush();
+    assert.equal(ui.get('[data-font-family="Inter"]').value, '');
+    assert.equal(ui.get('[data-font-family="Other"]').value, persisted.fontMap.Other);
+});
+
+test('font edits persist using the last valid settings while an unrelated input is temporarily invalid', async (t) => {
+    let persisted;
+    const ui = await panelFixture(t, { handlers: {
+        'save-settings': (value) => { persisted = JSON.parse(JSON.stringify(value)); return persisted; },
+    } });
+    ui.get('#asset-folder').value = 'changed/images'; await ui.get('#asset-folder').emit('change');
+    ui.get('#scale').value = 'invalid';
+    const inter = ui.get('[data-font-family="Inter"]'); inter.value = fontAssets[1].url;
+    await ui.get('#font-map-list').emit('change', { target: inter });
+    assert.equal(persisted.assetFolder, 'changed/images', 'font saving must not revert an already saved directory');
+    assert.equal(persisted.scale, 1.5);
+    assert.equal(persisted.fontMap.Inter, fontAssets[1].url);
+    assert.equal(persisted.fontMap.Other, 'db://assets/fonts/Other.ttf');
+});
+
+test('hidden import defaults on for old settings and toggling it preserves manual node strategies and persisted mappings', async (t) => {
+    const document = design();
+    document.tree[0].children = [{ id: 'hidden:group', name: 'Hidden group', type: 'GROUP', width: 100, height: 80,
+        visible: false, action: 'generate', kind: 'node', patchCandidate: false, children: [
+            { id: 'hidden:leaf', name: 'Nested visible title', type: 'TEXT', width: 80, height: 20,
+                visible: true, action: 'generate', kind: 'label', patchCandidate: false, children: [] },
+        ] }];
+    let persisted = settings();
+    const ui = await panelFixture(t, { initial: { document }, handlers: {
+        'save-settings': (value) => { persisted = JSON.parse(JSON.stringify(value)); return persisted; },
+        'import-selection': () => ({ created: 1, updated: 0 }),
+    } });
+    assert.equal(ui.get('#import-hidden-layers').checked, true);
+    await ui.get('#tree').emit('click', { target: ui.get('[data-node-id="hidden:group"]') }); await flush();
+    const action = ui.get('[data-action-for="hidden:group"]'); action.value = 'render';
+    await ui.root.emit('change', { target: action }); await flush();
+    const strategySaves = ui.calls('save-node-overrides').length;
+    await ui.goToConfirm();
+    const hidden = ui.get('#import-hidden-layers'); hidden.checked = false; await hidden.emit('change'); await flush();
+    assert.equal(ui.get('[data-action-for="hidden:group"]').value, 'ignore');
+    assert.match(ui.get('#node-properties').textContent, /隐藏图层.*本次忽略/);
+    assert.equal(ui.get('#selection-summary').textContent, '1 / 3 个节点将参与导入');
+    assert.equal(persisted.importHiddenLayers, false);
+    assert.equal(persisted.fontMap.Inter, settings().fontMap.Inter);
+    await ui.click('#import-button'); await flush();
+    const excluded = ui.calls('import-selection')[0].args[0];
+    assert.equal(excluded.settings.importHiddenLayers, false);
+    assert.equal(excluded.overrides.find((item) => item.id === 'hidden:group').action, 'ignore');
+    assert.equal(excluded.overrides.find((item) => item.id === 'hidden:leaf').action, 'ignore');
+    await ui.click('#workflow-back'); await ui.goToConfirm();
+    hidden.checked = true; await hidden.emit('change'); await flush();
+    assert.equal(ui.get('[data-action-for="hidden:group"]').value, 'render');
+    assert.equal(ui.get('#selection-summary').textContent, '2 / 3 个节点将参与导入');
+    assert.equal(ui.calls('save-node-overrides').length, strategySaves, 'visibility is a derived filter, not a saved node strategy');
+    await ui.click('#import-button'); await flush();
+    const restored = ui.calls('import-selection')[1].args[0];
+    assert.equal(restored.settings.importHiddenLayers, true);
+    assert.equal(restored.overrides.find((item) => item.id === 'hidden:group').action, 'render');
+    assert.equal(restored.overrides.find((item) => item.id === 'hidden:group').explicit, true);
+    const reopened = await panelFixture(t, { initial: { document, settings: { ...persisted, importHiddenLayers: false } } });
+    assert.equal(reopened.get('#import-hidden-layers').checked, false);
+    assert.equal(reopened.get('#selection-summary').textContent, '1 / 3 个节点将参与导入');
+});
+
+test('hidden Frame roots are visible in the list but excluded from selection, conflicts, fonts and import requests', async (t) => {
+    const first = frameItem('1:1', 'Same_ui'), second = frameItem('2:1', 'Same_ui');
+    second.document.tree[0].visible = false; second.document.fonts = ['HiddenOnlyFont'];
+    const ui = await batchFixture(t, { items: [first, second], fixture: { initial: {
+        settings: { ...settings(), importHiddenLayers: false },
+    } }, handlers: {
+        'import-batch': (request) => ({ id: 'visible-only', stopped: false, completed: 1, total: 1,
+            items: [{ id: request.items[0].id, name: first.name, sourceUrl: first.sourceUrl, status: 'success' }] }),
+    } });
+    assert.match(ui.get('#batch-selected-count').textContent, /已选 1 \/ 1.*1 个隐藏界面本次忽略/);
+    assert.match(ui.get('#batch-source-list').textContent, /隐藏 · 本次忽略/);
+    assert.equal(ui.get(`[data-batch-checked="${second.id}"]`).checked, false);
+    assert.equal(ui.get(`[data-batch-checked="${second.id}"]`).disabled, true);
+    assert.equal(ui.get(`[data-batch-remove="${second.id}"]`).disabled, false);
+    assert.equal(ui.get('#batch-conflicts').hidden, true);
+    assert.equal(ui.root.querySelector(`[data-batch-frame="${second.id}"]`), null);
+    assert.equal(ui.root.querySelector('[data-font-family="HiddenOnlyFont"]'), null);
+    await ui.click('#batch-toggle-all'); await flush();
+    let synced = ui.calls('sync-batch-items').at(-1).args[0];
+    assert.equal(synced.find((item) => item.id === first.id).enabled, false);
+    assert.equal(synced.find((item) => item.id === second.id).enabled, true, 'filtering preserves the hidden Frame selection preference');
+    await ui.click('#batch-toggle-all'); await flush();
+    await ui.configure(first.id); await ui.goToConfirm();
+    assert.equal(ui.root.querySelectorAll('[data-batch-name]').length, 1);
+    await ui.click('#import-button'); await flush();
+    const request = ui.calls('import-batch')[0].args[0];
+    assert.equal(request.settings.importHiddenLayers, false);
+    assert.deepEqual(Array.from(request.items, (item) => item.id), [first.id]);
+    await ui.click('#workflow-back'); await ui.goToConfirm();
+    const hidden = ui.get('#import-hidden-layers'); hidden.checked = true; await hidden.emit('change'); await flush();
+    assert.equal(ui.get(`[data-batch-checked="${second.id}"]`).checked, true);
+    assert.equal(ui.get('#batch-conflicts').hidden, false, 'reenabling hidden roots restores their real filename conflict');
+    assert.ok(ui.get('[data-font-family="HiddenOnlyFont"]'));
+});
+
+test('visibility toggles recalculate cached Frame editors without replacing their manual preferences', async (t) => {
+    const first = frameItem('1:1', 'Home_ui'), second = frameItem('2:1', 'Bag_ui');
+    for (const item of [first, second]) {
+        const child = item.document.tree[0].children[0]; child.visible = false; child.type = 'GROUP'; child.kind = 'node';
+        item.document.nodeOverrides = [{ id: child.id, action: item === first ? 'render' : 'transform',
+            kind: 'sprite', nineSlice: false, explicit: true }];
+    }
+    const ui = await batchFixture(t, { items: [first, second], fixture: { initial: {
+        settings: { ...settings(), importHiddenLayers: false },
+    } }, handlers: { 'import-batch': () => ({ id: 'derived', stopped: false, completed: 0, total: 2, items: [] }) } });
+    await ui.configure(first.id);
+    for (const item of [second, first]) {
+        await ui.click(`[data-batch-frame="${item.id}"]`); await flush();
+        await ui.get('#tree').emit('click', { target: ui.get(`[data-node-id="${item.rootId}:child"]`) }); await flush();
+        assert.equal(ui.get(`[data-action-for="${item.rootId}:child"]`).value, 'ignore');
+    }
+    await ui.goToConfirm(); await ui.click('#import-button'); await flush();
+    for (const item of ui.calls('import-batch')[0].args[0].items) {
+        assert.equal(item.overrides.find((entry) => entry.id.endsWith(':child')).action, 'ignore');
+    }
+    await ui.click('#workflow-back'); await ui.goToConfirm();
+    const hidden = ui.get('#import-hidden-layers'); hidden.checked = true; await hidden.emit('change'); await flush();
+    await ui.click('#workflow-back');
+    for (const item of [second, first]) {
+        await ui.click(`[data-batch-frame="${item.id}"]`); await flush();
+        await ui.get('#tree').emit('click', { target: ui.get(`[data-node-id="${item.rootId}:child"]`) }); await flush();
+        assert.equal(ui.get(`[data-action-for="${item.rootId}:child"]`).value, item === first ? 'render' : 'transform');
+    }
+    assert.equal(ui.calls('save-node-overrides').length, 0);
+});
+
+test('an all-hidden batch can reenable the import option from its list without changing source visibility', async (t) => {
+    const item = frameItem('1:1', 'Hidden_ui'); item.document.tree[0].visible = false;
+    let persisted;
+    const ui = await batchFixture(t, { items: [item], fixture: { initial: {
+        settings: { ...settings(), importHiddenLayers: false },
+    } }, handlers: { 'save-settings': (value) => { persisted = value; return value; } } });
+    assert.equal(ui.step(), 1);
+    assert.equal(ui.get('#fetch-document').disabled, true);
+    assert.equal(ui.get('#batch-toggle-all').disabled, true);
+    assert.match(ui.get('#batch-selected-count').textContent, /已选 0 \/ 0/);
+    const allow = ui.get(`[data-batch-configure="${item.id}"]`);
+    assert.equal(allow.textContent, '允许导入隐藏图层');
+    assert.match(allow.title, /仅修改导入选项.*不改变 Figma 图层/);
+    await allow.click(); await flush();
+    assert.equal(persisted.importHiddenLayers, true);
+    assert.equal(ui.get('#import-hidden-layers').checked, true);
+    assert.equal(ui.get('#fetch-document').disabled, false);
+    assert.equal(item.document.tree[0].visible, false);
+    assert.equal(ui.calls('import-batch').length, 0);
+    await ui.configure(item.id); await ui.goToConfirm();
+    assert.equal(ui.get('#import-button').disabled, false);
+});

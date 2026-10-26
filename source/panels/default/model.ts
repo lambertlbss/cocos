@@ -7,6 +7,7 @@ import {
 } from '../../import-actions';
 import type { ImportAction, NodeKind, TreeNodeDto } from '../../types';
 import { normalizeFigmaSliceDecision } from '../../figma/import-planner';
+import { hiddenLayerIds } from '../../import-visibility';
 
 export interface NodeStrategySummary {
     strategy?: string;
@@ -159,9 +160,11 @@ export function resolveEffectiveActions(
     forcedRenderIds: ReadonlySet<string> = new Set(),
     explicitIds: ReadonlySet<string> = new Set(),
     renamedIds: ReadonlySet<string> = new Set(),
+    importHiddenLayers = true,
 ): { actions: Map<string, ImportAction>; suppressed: Set<string> } {
     const actions = new Map<string, ImportAction>();
     const suppressed = new Set<string>();
+    const hiddenIds = hiddenLayerIds(roots, importHiddenLayers);
     const visit = (node: TreeNodeDto, blockedByAncestor: boolean): void => {
         const requested = normalizeImportAction(preferredActions.get(node.id) ?? smartActionForNode(node));
         let preferred = requested !== 'ignore' && forcedRenderIds.has(node.id) ? 'render' : requested;
@@ -182,8 +185,8 @@ export function resolveEffectiveActions(
             && node.children.some(descendantHasProtectedBoundary)) {
             preferred = 'generate';
         }
-        const action = blockedByAncestor ? 'ignore' : normalizeImportAction(preferred);
-        if (blockedByAncestor) {
+        const action = blockedByAncestor || hiddenIds.has(node.id) ? 'ignore' : normalizeImportAction(preferred);
+        if (blockedByAncestor || hiddenIds.has(node.id)) {
             suppressed.add(node.id);
         }
         actions.set(node.id, action);
