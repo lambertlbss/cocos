@@ -9,6 +9,7 @@ import type { ImportReview } from '../../import-review-model';
 import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import { normalizeImportAction } from '../../import-actions';
 import { sanitizeNodeName } from '../../node-name';
+import { normalizeFigmaSliceDecision } from '../../figma/import-planner';
 import {
     actionOptionsForNode,
     defaultNineSliceIds,
@@ -172,7 +173,7 @@ function initialFrameEditor(document: DocumentDto): FrameEditorState {
         if (name && name !== node.name) { editor.names.set(node.id, name); editor.renamedIds.add(node.id); }
         if (override.explicit) {
             editor.preferredActions.set(node.id, safeAction(node, override.action)); editor.kinds.set(node.id, override.kind);
-            if (override.nineSlice && node.patchCandidate) editor.patches.add(node.id); else editor.patches.delete(node.id);
+            if (node.patchCandidate) editor.patches.add(node.id); else editor.patches.delete(node.id);
             editor.explicitIds.add(node.id); editor.preset = undefined;
         }
     }
@@ -555,8 +556,8 @@ function renderFontMap(): void {
     }
 }
 
-function safeAction(_node: TreeNodeDto, action: unknown): ImportAction {
-    return normalizeImportAction(action);
+function safeAction(node: TreeNodeDto, action: unknown): ImportAction {
+    return normalizeFigmaSliceDecision({ action: normalizeImportAction(action), kind: node.kind, nineSlice: false }, node.patchCandidate).action;
 }
 
 function initializeDocument(document: DocumentDto, navigate = true): void {
@@ -594,7 +595,7 @@ function initializeDocument(document: DocumentDto, navigate = true): void {
         if (override.explicit === true) {
             state.preferredActions.set(node.id, safeAction(node, override.action));
             state.kinds.set(node.id, override.kind);
-            if (override.nineSlice && node.patchCandidate) {
+            if (node.patchCandidate) {
                 state.patches.add(node.id);
             } else {
                 state.patches.delete(node.id);
@@ -852,6 +853,7 @@ function descendants(node: TreeNodeDto): TreeNodeDto[] {
 }
 
 function reconcileActions(): void {
+    state.patches = defaultNineSliceIds(state.document?.tree ?? []);
     const effective = resolveEffectiveActions(
         state.document?.tree ?? [],
         state.preferredActions,
@@ -880,14 +882,14 @@ function explicitOverrides(): ImportOverride[] {
         .filter((node) => state.explicitIds.has(node.id) || state.renamedIds.has(node.id))
         .map((node) => {
             const renamed = state.renamedIds.has(node.id);
-            return {
+            return normalizeFigmaSliceDecision({
                 id: node.id,
                 action: state.preferredActions.get(node.id) ?? smartActionForNode(node),
                 kind: state.kinds.get(node.id) ?? node.kind,
                 nineSlice: state.patches.has(node.id),
                 explicit: state.explicitIds.has(node.id),
                 ...(renamed ? { name: effectiveNodeName(node) } : {}),
-            };
+            }, node.patchCandidate);
         });
 }
 
@@ -1084,19 +1086,17 @@ function renderNodeProperties(): void {
 
     const patch = document.createElement('label');
     patch.className = 'toggle-row patch-toggle';
-    patch.title = node.sliceMode
-        ? `启用${node.sliceMode === 'nine' ? '九宫格' : '三宫格'}切片`
-        : node.patchCandidate
-            ? '启用自动识别的三/九宫格切片'
-            : '该节点不是自动识别的切片候选';
+    patch.title = node.patchCandidate
+        ? 'Figma 分片优先：按 Figma 原始边界导入，不能关闭；仍可忽略整个节点'
+        : '该节点不是有效的 Figma 分片';
     const patchInput = document.createElement('input');
     patchInput.type = 'checkbox';
     patchInput.dataset.patchFor = node.id;
     patchInput.checked = state.patches.has(node.id);
-    patchInput.disabled = state.busy || !node.patchCandidate;
+    patchInput.disabled = true;
     const patchIcon = document.createElement('span');
     patchIcon.textContent = node.patchCandidate
-        ? node.sliceMode === 'nine' ? '启用九宫切片' : node.sliceMode ? '启用三宫切片' : '启用三 / 九宫切片'
+        ? node.sliceMode === 'nine' ? 'Figma 九宫 · 优先启用' : node.sliceMode ? 'Figma 三宫 · 优先启用' : 'Figma 三 / 九宫 · 优先启用'
         : '切片 · 非候选节点';
     patch.append(patchInput, patchIcon);
     container.appendChild(patch);
@@ -1244,14 +1244,14 @@ async function importToScene(): Promise<void> {
         await importBatchFrames(settings);
         return;
     }
-    const overrides: ImportOverride[] = flatten(state.document.tree).map((node) => ({
+    const overrides: ImportOverride[] = flatten(state.document.tree).map((node) => normalizeFigmaSliceDecision({
         id: node.id,
         action: state.actions.get(node.id) ?? node.action,
         kind: state.kinds.get(node.id) ?? node.kind,
         nineSlice: state.patches.has(node.id),
         explicit: state.explicitIds.has(node.id),
         ...(state.renamedIds.has(node.id) ? { name: effectiveNodeName(node) } : {}),
-    }));
+    }, node.patchCandidate));
     workflow?.begin('import');
     setBusy(true);
     updateProgress({ phase: 'assets', value: 0, message: '正在准备导入…' });
@@ -1333,11 +1333,11 @@ async function readBatchSource(): Promise<void> {
 
 function overridesForFrame(entry: FrameEditorItem): ImportOverride[] {
     const editor = entry.editor ?? initialFrameEditor(entry.item.document);
-    return flatten(entry.item.document.tree).map((node) => ({
+    return flatten(entry.item.document.tree).map((node) => normalizeFigmaSliceDecision({
         id: node.id, action: editor.actions.get(node.id) ?? node.action, kind: editor.kinds.get(node.id) ?? node.kind,
         nineSlice: editor.patches.has(node.id), explicit: editor.explicitIds.has(node.id),
         ...(editor.renamedIds.has(node.id) ? { name: editor.names.get(node.id) ?? node.name } : {}),
-    }));
+    }, node.patchCandidate));
 }
 
 async function importBatchFrames(settings: ImportSettings, ids?: Set<string>): Promise<void> {
@@ -1755,9 +1755,9 @@ function bindEvents(): void {
         } else if (target.dataset.actionFor) {
             const node = findNode(target.dataset.actionFor);
             if (node) {
-                const action = target.value as ImportAction;
+                const action = safeAction(node, target.value);
                 state.explicitIds.add(node.id);
-                if (action !== 'render') {
+                if (action !== 'render' && !node.patchCandidate) {
                     state.patches.delete(node.id);
                 }
                 setAction(node, action);
@@ -1777,21 +1777,11 @@ function bindEvents(): void {
             renderTree();
             persistNodeOverrides();
         } else if (target.dataset.patchFor) {
-            state.explicitIds.add(target.dataset.patchFor);
-            if ((target as HTMLInputElement).checked) {
-                state.patches.add(target.dataset.patchFor);
-                const node = findNode(target.dataset.patchFor);
-                if (node) {
-                    setAction(node, 'render');
-                }
-            } else {
-                state.patches.delete(target.dataset.patchFor);
-                reconcileActions();
-            }
+            // Also reject a stale panel/programmatic attempt to disable a valid
+            // Figma definition; the source decision is shared with the importer.
+            reconcileActions();
             renderTree();
-            root().querySelectorAll<HTMLElement>('[data-preset]')
-                .forEach((button) => button.classList.remove('active'));
-            persistNodeOverrides();
+            if (findNode(target.dataset.patchFor)?.patchCandidate) showToast('Figma 分片优先，不能关闭；可在导入方式中忽略整个节点。');
         }
         updateSummary();
     });

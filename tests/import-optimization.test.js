@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = require('node:fs');
+const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } = require('node:fs');
 const { join, resolve, relative, isAbsolute } = require('node:path');
 const { tmpdir } = require('node:os');
 const { PNG } = require('pngjs');
@@ -302,16 +302,27 @@ test('a non-prefix same-name local ancestor cannot absorb an independent slice i
     });
     registerLocal(f, root.name, { uuid: 'unused-parent-frame', sliced: false });
     const asset = registerLocal(f, slice.name, { uuid: 'independent-slice-frame', sliced: true });
+    const libraryPath = join(f.localFolder, `${slice.name}.png`);
+    const libraryBefore = readFileSync(libraryPath);
+    const source = new PNG({ width: 15, height: 6 });
+    source.data.fill(255);
+    f.exportBytes.set(slice.id, PNG.sync.write(source));
+    t.mock.method(AssetWriter.prototype, 'write', async (...args) => ({ ...await f.writeAsset(...args), sliced: true }));
     const decisions = automaticDecisions([root]);
     const result = await f.run([root], decisions);
 
     assert.equal(decisions.get(root.id).action, 'generate');
     assert.equal(decisions.get('protected-prefix').action, 'generate');
-    assert.equal(result.assets.get(slice.id), asset);
+    assert.notEqual(result.assets.get(slice.id).uuid, asset.uuid, 'Figma slice definition creates its own output instead of taking library borders');
+    assert.equal(result.assets.get(slice.id).sliced, true);
     assert.equal(result.assets.has(root.id), false);
-    assert.deepEqual(f.existing, [asset.url]);
-    assert.deepEqual(f.exports, []);
-    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.existing, []);
+    assert.deepEqual(f.exports.flatMap((item) => item.ids), [slice.id]);
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes[0].url, 'db://assets/figma-importer/common_slice_base.png');
+    assert.deepEqual(f.writes[0].borders, { left: 5, right: 5, top: 0, bottom: 0 });
+    assert.deepEqual([PNG.sync.read(f.writes[0].contents).width, PNG.sync.read(f.writes[0].contents).height], [12, 6]);
+    assert.deepEqual(readFileSync(libraryPath), libraryBefore, 'the designated library retains its exact original pixels');
     assert.ok(f.notes.some((note) => note.action === 'fallback' && note.name === 'img_card' && /九宫/.test(note.reason)));
     assert.ok(!f.notes.some((note) => note.name === root.name && note.action === 'reused'));
 });

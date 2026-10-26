@@ -12,7 +12,6 @@ export interface SliceOptimization {
     height?: number;
     sourceBytes: number;
     bytes: number;
-    borderAdjustment?: { from: SliceBorders; to: SliceBorders };
 }
 
 export interface CompactSliceResult {
@@ -67,56 +66,6 @@ function axisAligned(node: FigmaNode): boolean {
         && Math.abs(matrix[0][1]) <= 0.000001 && Math.abs(matrix[1][0]) <= 0.000001);
 }
 
-/** All RGBA samples must match along the stretch axis, including both edge bands.
- * No tolerance: preserve subtle gradients, alpha fringes, text and texture detail.
- */
-function repeatedBand(image: PNG, start: number, end: number, horizontal: boolean): boolean {
-    const stride = image.width * 4;
-    if (!horizontal) {
-        const first = image.data.subarray(start * stride, (start + 1) * stride);
-        for (let y = start + 1; y < end; y++) {
-            if (!first.equals(image.data.subarray(y * stride, (y + 1) * stride))) return false;
-        }
-    } else {
-        for (let y = 0; y < image.height; y++) {
-            const first = image.data.readUInt32LE(y * stride + start * 4);
-            for (let x = start + 1; x < end; x++) {
-                if (image.data.readUInt32LE(y * stride + x * 4) !== first) return false;
-            }
-        }
-    }
-    return true;
-}
-
-/** Compare complete rows/columns, never just their center pixel. */
-function equalAxisSample(image: PNG, first: number, second: number, horizontal: boolean): boolean {
-    const stride = image.width * 4;
-    if (!horizontal) return image.data.subarray(first * stride, (first + 1) * stride)
-        .equals(image.data.subarray(second * stride, (second + 1) * stride));
-    for (let y = 0; y < image.height; y++) {
-        if (image.data.readUInt32LE(y * stride + first * 4)
-            !== image.data.readUInt32LE(y * stride + second * 4)) return false;
-    }
-    return true;
-}
-
-/** A narrow transition at an inset belongs in the fixed cap. Keep every pixel
- * of that transition and move the inset; only remove exactly identical samples.
- * Limit growth on either side to the existing two-logical-pixel center budget,
- * so a central motif or gradient cannot be swallowed into arbitrarily large caps.
- */
-function compactableBand(image: PNG, start: number, end: number, horizontal: boolean, keep: number): Segment | null {
-    if (end - start <= keep) return null;
-    if (repeatedBand(image, start, end, horizontal)) return { start, size: end - start };
-    const middle = Math.floor((start + end - 1) / 2);
-    let first = middle;
-    let last = middle + 1;
-    while (first > start && equalAxisSample(image, first - 1, middle, horizontal)) first--;
-    while (last < end && equalAxisSample(image, last, middle, horizontal)) last++;
-    if (first - start > keep || end - last > keep || last - first <= keep) return null;
-    return { start: first, size: last - first };
-}
-
 function segments(length: number, before: number, after: number, keep: number, shrink: boolean): Segment[] {
     if (!shrink) return [{ start: 0, size: length }];
     return [
@@ -126,7 +75,8 @@ function segments(length: number, before: number, after: number, keep: number, s
     ];
 }
 
-/** Adapted from main/a42fcc7. Shrink only provably repeatable middle bands.
+/** Follow the Figma slice definition: keep its fixed caps and sample its middle.
+ * Pixel variation never changes the design's insets or cancels its stretch axis.
  * Analysis uses Figma logical units; metadata and PNG use export pixels.
  * The node geometry, input Buffer, source asset and download cache never change.
  */
@@ -171,21 +121,8 @@ export function compactSlicePng(contents: Buffer, node: FigmaNode, analysis: Sli
         const canShrinkY = vertical && header.height - borders.top - borders.bottom > keep;
         if (!canShrinkX && !canShrinkY) return unchanged('中心区域已足够小', 'unchanged');
         const image = PNG.sync.read(contents, { checkCRC: true });
-        const bandX = canShrinkX ? compactableBand(image, borders.left, image.width - borders.right, true, keep) : null;
-        const bandY = canShrinkY ? compactableBand(image, borders.top, image.height - borders.bottom, false, keep) : null;
-        const shrinkX = bandX !== null;
-        const shrinkY = bandY !== null;
-        if (!shrinkX && !shrinkY) return unchanged('中心或边带含非重复像素，为保留图案/渐变不缩小', 'unchanged');
-        const compactedBorders: SliceBorders = {
-            left: bandX?.start ?? borders.left,
-            right: bandX ? image.width - bandX.start - bandX.size : borders.right,
-            top: bandY?.start ?? borders.top,
-            bottom: bandY ? image.height - bandY.start - bandY.size : borders.bottom,
-        };
-        const adjusted = (Object.keys(borders) as Array<keyof SliceBorders>)
-            .some((side) => borders[side] !== compactedBorders[side]);
-        const columns = segments(image.width, compactedBorders.left, compactedBorders.right, keep, shrinkX);
-        const rows = segments(image.height, compactedBorders.top, compactedBorders.bottom, keep, shrinkY);
+        const columns = segments(image.width, borders.left, borders.right, keep, canShrinkX);
+        const rows = segments(image.height, borders.top, borders.bottom, keep, canShrinkY);
         const output = new PNG({ width: columns.reduce((sum, item) => sum + item.size, 0),
             height: rows.reduce((sum, item) => sum + item.size, 0) });
         let targetY = 0;
@@ -204,12 +141,11 @@ export function compactSlicePng(contents: Buffer, node: FigmaNode, analysis: Sli
         const encoded = PNG.sync.write(output);
         const result = header.metadata.length
             ? Buffer.concat([encoded.subarray(0, 33), ...header.metadata, encoded.subarray(33)]) : encoded;
-        return { contents: result, borders: compactedBorders, sourceBorders: borders, optimization: {
+        return { contents: result, borders, sourceBorders: borders, optimization: {
             ...optimization, status: 'compacted',
-            reason: (adjusted ? '保留切片边缘过渡，' : '')
-                + (shrinkX && shrinkY ? '横纵中心带最小化' : shrinkX ? '仅横向中心带最小化' : '仅纵向中心带最小化'),
+            reason: '按 Figma 原始切片边界：'
+                + (canShrinkX && canShrinkY ? '横纵中心带最小化' : canShrinkX ? '仅横向中心带最小化' : '仅纵向中心带最小化'),
             width: output.width, height: output.height, bytes: result.length,
-            ...(adjusted ? { borderAdjustment: { from: borders, to: compactedBorders } } : {}),
         } };
     } catch (error) {
         return fallback(error instanceof Error ? error.message : 'PNG 最小化失败，保留完整图片');
@@ -253,7 +189,7 @@ export async function writeSlicedPng(
         return { asset, optimization: { ...compact.optimization, status: 'restored',
             reason: '小图九宫边距未能确认，已恢复完整 PNG',
             width: compact.optimization.sourceWidth, height: compact.optimization.sourceHeight,
-            bytes: contents.length, borderAdjustment: undefined } };
+            bytes: contents.length } };
     }
     return { asset, optimization: compact.optimization };
 }

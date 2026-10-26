@@ -17,7 +17,7 @@ import {
     isNamedSliceGroup,
     isPatchCandidate,
 } from './analyzer';
-import { isMergedResourceName } from '../import-actions';
+import { isMergedResourceName, kindForImportAction } from '../import-actions';
 
 const CONTAINER_TYPES = new Set([
     'DOCUMENT',
@@ -79,16 +79,24 @@ function defaultDecision(node: FigmaNode): ImportDecision {
     return {
         action: inferAction(node),
         kind: inferKind(node),
-        nineSlice: false,
+        nineSlice: isPatchCandidate(node),
         explicit: false,
     };
+}
+
+/** Valid Figma slice geometry owns its strategy; ignoring the node still wins.
+ * The renderer supplies its analyzed patchCandidate instead of re-reading geometry.
+ */
+export function normalizeFigmaSliceDecision<T extends ImportDecision>(decision: T, hasFigmaSlice: boolean): T {
+    if (!hasFigmaSlice || decision.action === 'ignore') return decision;
+    return { ...decision, action: 'render', kind: kindForImportAction(decision.kind, 'render', true), nineSlice: true };
 }
 
 function resolvedDecision(
     node: FigmaNode,
     decisions: ReadonlyMap<string, ImportDecision>,
 ): ImportDecision {
-    return decisions.get(node.id) ?? defaultDecision(node);
+    return normalizeFigmaSliceDecision(decisions.get(node.id) ?? defaultDecision(node), isPatchCandidate(node));
 }
 
 function visiblePaints(node: FigmaNode): boolean {
@@ -240,7 +248,7 @@ export function resolveAutomaticMergeDecisions(
                 ...decision,
                 action: isRoot || prefixMergeConflict(node, result) ? 'generate' : 'render',
             });
-        } else if (!result.has(node.id)) {
+        } else {
             result.set(node.id, decision);
         }
         node.children.forEach((child) => visit(child, false));
@@ -255,6 +263,7 @@ function baseReason(
     decision: ImportDecision,
     isRoot: boolean,
 ): ImportPlanReason {
+    if (decision.action !== 'ignore' && isPatchCandidate(node)) return 'slice-resource';
     if (decision.explicit) return 'user-override';
     if (decision.action === 'ignore') return 'ignored';
     if (isRoot) return 'root-structure';

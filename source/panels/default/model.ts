@@ -6,6 +6,7 @@ import {
     normalizeImportAction,
 } from '../../import-actions';
 import type { ImportAction, NodeKind, TreeNodeDto } from '../../types';
+import { normalizeFigmaSliceDecision } from '../../figma/import-planner';
 
 export interface NodeStrategySummary {
     strategy?: string;
@@ -67,6 +68,7 @@ export function rerenderPreservingScroll(
 
 export function smartActionForNode(node: TreeNodeDto): ImportAction {
     const inferred = normalizeImportAction(node.action);
+    if (node.patchCandidate) return normalizeFigmaSliceDecision({ action: inferred, kind: node.kind, nineSlice: false }, true).action;
     const renderSubtree = Boolean(node.renderSubtree) || (node.action as unknown) === 'merge';
     if (isVectorNodeType(node.type) && inferred !== 'ignore') {
         return 'render';
@@ -90,6 +92,7 @@ export function defaultNineSliceIds(roots: TreeNodeDto[]): Set<string> {
 }
 
 export function actionOptionsForNode(node: TreeNodeDto): Array<[ImportAction, string]> {
+    if (node.patchCandidate) return [['ignore', '忽略'], ['render', 'Figma 三/九宫']];
     return [
         ['ignore', '忽略'],
         ['generate', '生成'],
@@ -122,10 +125,11 @@ export function strategySummaryForNode(
     explicit = false,
 ): NodeStrategySummary {
     const details: string[] = [];
-    const reason = explicit ? 'user-override' : node.reason;
+    const reason = node.patchCandidate ? 'slice-resource' : explicit ? 'user-override' : node.reason;
     if (reason) {
         details.push(REASON_LABELS[reason]);
     }
+    if (node.patchCandidate) details.push('Figma 分片优先 · 按 Figma 原始边界导入');
     if (node.fold && !explicit) {
         const absorbed = node.absorbedNodeIds?.length ?? 0;
         details.push(`${FOLD_LABELS[node.fold]}，吸收 ${absorbed} 个子层`);
@@ -145,7 +149,8 @@ export function effectiveKindForNode(
     const resolvedKind = selectedKind === 'auto'
         ? node.kind === 'auto' ? 'node' : node.kind
         : selectedKind;
-    return kindForImportAction(resolvedKind, action, nineSlice);
+    const decision = normalizeFigmaSliceDecision({ action, kind: resolvedKind, nineSlice }, node.patchCandidate);
+    return kindForImportAction(decision.kind, decision.action, decision.nineSlice);
 }
 
 export function resolveEffectiveActions(
@@ -158,9 +163,10 @@ export function resolveEffectiveActions(
     const actions = new Map<string, ImportAction>();
     const suppressed = new Set<string>();
     const visit = (node: TreeNodeDto, blockedByAncestor: boolean): void => {
-        let preferred = forcedRenderIds.has(node.id)
-            ? 'render'
-            : preferredActions.get(node.id) ?? smartActionForNode(node);
+        const requested = normalizeImportAction(preferredActions.get(node.id) ?? smartActionForNode(node));
+        let preferred = requested !== 'ignore' && forcedRenderIds.has(node.id) ? 'render' : requested;
+        preferred = normalizeFigmaSliceDecision({ action: preferred, kind: node.kind,
+            nineSlice: forcedRenderIds.has(node.id) }, node.patchCandidate).action;
         const descendantHasProtectedBoundary = (child: TreeNodeDto): boolean =>
             explicitIds.has(child.id)
             || renamedIds.has(child.id)
@@ -172,6 +178,7 @@ export function resolveEffectiveActions(
             && isMergedResourceName(node.name)
             && !explicitIds.has(node.id)
             && !forcedRenderIds.has(node.id)
+            && !node.patchCandidate
             && node.children.some(descendantHasProtectedBoundary)) {
             preferred = 'generate';
         }

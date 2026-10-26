@@ -69,6 +69,17 @@ function assertReconstructs(original, compact) {
         }
     }
 }
+function assertFixedCorners(original, compact) {
+    const source = PNG.sync.read(original), output = PNG.sync.read(compact.contents);
+    const { left, right, top, bottom } = compact.borders;
+    for (const [sourceX, outputX, width] of [[0, 0, left], [source.width - right, output.width - right, right]]) {
+        for (const [sourceY, outputY, height] of [[0, 0, top], [source.height - bottom, output.height - bottom, bottom]]) {
+            for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+                assert.deepEqual(pixel(output, outputX + x, outputY + y), pixel(source, sourceX + x, sourceY + y));
+            }
+        }
+    }
+}
 
 test('nine-slice shrinks only the middle and reconstructs every RGBA pixel', () => {
     const contents = fixture();
@@ -131,36 +142,41 @@ test('an existing 1px or 2px middle band is never enlarged', () => {
     }
 });
 
-test('non-repeating gradients and pattern details preserve the full PNG', () => {
+test('Figma nine-slice definition takes priority over gradients and pattern differences', () => {
     const contents = encode(30, 20, (x, y) => [x * 5, y * 5, (x + y) % 2 * 255, 255]);
     const result = compactSlicePng(contents, node(), nine, 1);
-    assert.equal(result.optimization.status, 'unchanged');
-    assert.equal(result.contents, contents);
-    assert.match(result.optimization.reason, /非重复像素/);
+    assert.equal(result.optimization.status, 'compacted');
+    assert.deepEqual(result.borders, nine.borders);
+    assert.deepEqual([result.optimization.width, result.optimization.height], [9, 7]);
+    assertFixedCorners(contents, result);
+    const output = PNG.sync.read(result.contents);
+    assert.deepEqual([...pixel(output, 3, 2)], [65, 40, 255, 255], 'middle sample follows the original stretch region');
+    assert.match(result.optimization.reason, /Figma 原始切片边界/);
 });
 
-test('a gradient on one axis still permits safe compaction on the other', () => {
+test('a gradient on one axis cannot disable a Figma-defined stretch axis', () => {
     const contents = encode(30, 20, (_x, y) => [50, y * 5, 90, 255]);
     const result = compactSlicePng(contents, node(), nine, 1);
-    assert.deepEqual([result.optimization.width, result.optimization.height], [9, 20]);
-    assertReconstructs(contents, result);
+    assert.deepEqual([result.optimization.width, result.optimization.height], [9, 7]);
+    assert.deepEqual(result.borders, nine.borders);
+    assertFixedCorners(contents, result);
 });
 
-test('thin boundary transitions become fixed insets while the remaining center shrinks losslessly', () => {
+test('thin boundary transitions cannot move the original Figma insets', () => {
     const contents = boundaryFixture({ left: 1, right: 2, top: 2, bottom: 1 });
     const before = Buffer.from(contents);
     const originalAnalysis = structuredClone(nine);
     const result = compactSlicePng(contents, node(), nine, 1);
     assert.equal(result.optimization.status, 'compacted');
-    assert.deepEqual(result.borders, { left: 4, right: 6, top: 4, bottom: 4 });
-    assert.deepEqual([result.optimization.width, result.optimization.height], [12, 10]);
-    assertReconstructs(contents, result);
+    assert.deepEqual(result.borders, nine.borders);
+    assert.deepEqual([result.optimization.width, result.optimization.height], [9, 7]);
+    assertFixedCorners(contents, result);
     assert.deepEqual(contents, before, 'the full source and its cache must remain unchanged');
     assert.deepEqual(nine, originalAnalysis, 'analysis cannot acquire the compact texture insets');
 });
 
 for (const mode of ['horizontal', 'vertical']) {
-    test(`${mode} three-slice preserves thin edge transitions only on its stretch axis`, () => {
+    test(`${mode} three-slice follows its Figma axis and original fixed edge strips`, () => {
         const horizontal = mode === 'horizontal';
         const analysis = { mode, borders: horizontal
             ? { left: 3, right: 4, top: 0, bottom: 0 }
@@ -170,40 +186,47 @@ for (const mode of ['horizontal', 'vertical']) {
         const contents = boundaryFixture(guards, analysis);
         const result = compactSlicePng(contents, node(), analysis, 1);
         assert.equal(result.optimization.status, 'compacted');
-        assert.deepEqual(result.borders, horizontal
-            ? { left: 5, right: 5, top: 0, bottom: 0 }
-            : { left: 0, right: 0, top: 3, bottom: 5 });
-        assert.deepEqual([result.optimization.width, result.optimization.height], horizontal ? [12, 20] : [30, 10]);
-        assertReconstructs(contents, result);
+        assert.deepEqual(result.borders, analysis.borders);
+        assert.deepEqual([result.optimization.width, result.optimization.height], horizontal ? [9, 20] : [30, 7]);
+        const source = PNG.sync.read(contents), output = PNG.sync.read(result.contents);
+        const leading = horizontal ? analysis.borders.left : analysis.borders.top;
+        const trailing = horizontal ? analysis.borders.right : analysis.borders.bottom;
+        const originalLength = horizontal ? source.width : source.height;
+        const outputLength = horizontal ? output.width : output.height;
+        for (let along = 0; along < leading + trailing; along++) {
+            const sourceAlong = along < leading ? along : originalLength - trailing + along - leading;
+            const outputAlong = along < leading ? along : outputLength - trailing + along - leading;
+            for (let across = 0; across < (horizontal ? source.height : source.width); across++) {
+                assert.deepEqual(pixel(output, horizontal ? outputAlong : across, horizontal ? across : outputAlong),
+                    pixel(source, horizontal ? sourceAlong : across, horizontal ? across : sourceAlong));
+            }
+        }
     });
 }
 
-test('2x boundary transition budget and expanded insets use physical pixels once', () => {
+test('2x slicing scales original Figma insets exactly once despite edge transitions', () => {
     const contents = boundaryFixture({ left: 4, right: 2, top: 3, bottom: 4 }, nine, 2);
     const result = compactSlicePng(contents, node(), nine, 2);
     assert.equal(result.optimization.status, 'compacted');
-    assert.deepEqual(result.borders, { left: 10, right: 10, top: 7, bottom: 10 });
-    assert.deepEqual([result.optimization.width, result.optimization.height], [24, 21]);
-    assertReconstructs(contents, result);
+    assert.deepEqual(result.borders, { left: 6, right: 8, top: 4, bottom: 6 });
+    assert.deepEqual([result.optimization.width, result.optimization.height], [18, 14]);
+    assertFixedCorners(contents, result);
 });
 
 for (const side of ['left', 'right', 'top', 'bottom']) {
-    test(`a ${side} transition exceeding the edge budget blocks only that stretch axis`, () => {
+    test(`a long ${side} transition does not redefine the Figma stretch region`, () => {
         const guards = { left: 1, right: 1, top: 1, bottom: 1, [side]: 3 };
         const contents = boundaryFixture(guards);
         const result = compactSlicePng(contents, node(), nine, 1);
-        const horizontalBlocked = side === 'left' || side === 'right';
         assert.equal(result.optimization.status, 'compacted');
-        assert.deepEqual(result.borders, horizontalBlocked
-            ? { left: 3, right: 4, top: 3, bottom: 4 }
-            : { left: 4, right: 5, top: 2, bottom: 3 });
-        assert.deepEqual([result.optimization.width, result.optimization.height], horizontalBlocked ? [30, 9] : [11, 20]);
-        assertReconstructs(contents, result);
+        assert.deepEqual(result.borders, nine.borders);
+        assert.deepEqual([result.optimization.width, result.optimization.height], [9, 7]);
+        assertFixedCorners(contents, result);
     });
 }
 
 for (const axis of ['horizontal', 'vertical']) {
-    test(`thin inset transitions do not permit cropping a ${axis} center gradient`, () => {
+    test(`a ${axis} gradient follows the Figma definition without expanding insets`, () => {
         const image = PNG.sync.read(boundaryFixture({ left: 1, right: 1, top: 1, bottom: 1 }));
         for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
             // Keep the other axis fully repeatable after its thin transition.
@@ -212,45 +235,47 @@ for (const axis of ['horizontal', 'vertical']) {
         }
         const contents = PNG.sync.write(image);
         const result = compactSlicePng(contents, node(), nine, 1);
-        assert.deepEqual([result.optimization.width, result.optimization.height], axis === 'horizontal' ? [30, 9] : [11, 20]);
-        assert.deepEqual(result.borders, axis === 'horizontal'
-            ? { left: 3, right: 4, top: 3, bottom: 4 }
-            : { left: 4, right: 5, top: 2, bottom: 3 });
-        assertReconstructs(contents, result);
+        assert.deepEqual([result.optimization.width, result.optimization.height], [9, 7]);
+        assert.deepEqual(result.borders, nine.borders);
+        assertFixedCorners(contents, result);
     });
 }
 
-test('thin boundary transitions cannot hide a single different alpha pixel in the center', () => {
+test('a single alpha difference cannot cancel a valid Figma slice definition', () => {
     const image = PNG.sync.read(boundaryFixture({ left: 1, right: 1, top: 1, bottom: 1 }));
     image.data[(10 * image.width + 12) * 4 + 3]--;
     const contents = PNG.sync.write(image);
     const result = compactSlicePng(contents, node(), nine, 1);
-    assert.equal(result.optimization.status, 'unchanged');
-    assert.equal(result.contents, contents);
+    assert.equal(result.optimization.status, 'compacted');
+    assert.deepEqual([result.optimization.width, result.optimization.height], [9, 7]);
+    assertFixedCorners(contents, result);
     assert.deepEqual(result.borders, nine.borders);
 });
 
-test('a one-level alpha fringe inside the inset is preserved as fixed edge pixels', () => {
+test('an alpha fringe in the stretch region does not expand the fixed caps', () => {
     const contents = encode(30, 20, (x) => [50, 60, 70, x === nine.borders.left + 1 ? 199 : 200]);
     const result = compactSlicePng(contents, node(), nine, 1);
     assert.equal(result.optimization.status, 'compacted');
-    assert.deepEqual(result.borders, { left: 5, right: 4, top: 2, bottom: 3 });
-    assert.deepEqual([result.optimization.width, result.optimization.height], [11, 7]);
-    assertReconstructs(contents, result);
+    assert.deepEqual(result.borders, nine.borders);
+    assert.deepEqual([result.optimization.width, result.optimization.height], [9, 7]);
+    assertFixedCorners(contents, result);
 });
 
-test('even a single changed alpha pixel prevents destructive center cropping', () => {
-    const contents = encode(30, 20, (x, y) => [50, 60, 70, x === 12 && y === 10 ? 254 : 255]);
+test('Figma-defined center sampling retains the selected alpha values', () => {
+    const contents = encode(30, 20, (x, y) => [50, 60, 70, x === 13 && y === 8 ? 254 : 255]);
     const result = compactSlicePng(contents, node(), nine, 1);
-    assert.equal(result.contents, contents);
+    assert.deepEqual(result.borders, nine.borders);
+    assert.equal(pixel(PNG.sync.read(result.contents), 3, 2)[3], 254);
+    assertFixedCorners(contents, result);
 });
 
-test('detail on the top edge prevents horizontal compaction, not only center detail', () => {
+test('stretchable edge detail follows Figma without altering the fixed corners', () => {
     const contents = encode(30, 20, (x, y) => [y === 0 ? x * 5 : 30, 60, 70, 255]);
     const result = compactSlicePng(contents, node(), nine, 1);
-    assert.equal(result.optimization.width, 30);
+    assert.equal(result.optimization.width, 9);
     assert.equal(result.optimization.height, 7);
-    assertReconstructs(contents, result);
+    assertFixedCorners(contents, result);
+    assert.equal(pixel(PNG.sync.read(result.contents), 3, 0)[0], 65);
 });
 
 test('a white motif in the fixed left cap is preserved without copying into the stretch band', () => {
@@ -273,14 +298,20 @@ test('a white motif in the fixed left cap is preserved without copying into the 
     }
 });
 
-test('a white motif crossing the inset is never removed to make a smaller stretch band', () => {
+test('a motif crossing the Figma inset does not move that inset', () => {
     const analysis = { mode: 'horizontal', borders: { left: 8, right: 8, top: 0, bottom: 0 } };
     const contents = encode(80, 28, (x, y) => x >= 6 && x <= 14 && y >= 7 && y <= 20
         ? [255, 255, 255, 255] : [20, 110, 240, 255]);
     const result = compactSlicePng(contents, node(80, 28), analysis, 1);
-    assert.equal(result.contents, contents);
-    assert.equal(result.optimization.status, 'unchanged');
-    assert.equal(result.sliceFallback, undefined, 'valid insets remain available; compaction cannot repair the design');
+    assert.deepEqual(result.borders, analysis.borders);
+    assert.deepEqual([result.optimization.width, result.optimization.height], [18, 28]);
+    assert.equal(result.optimization.status, 'compacted');
+    const output = PNG.sync.read(result.contents), source = PNG.sync.read(contents);
+    for (let y = 0; y < 28; y++) for (let x = 0; x < 8; x++) {
+        assert.deepEqual(pixel(output, x, y), pixel(source, x, y), 'the fixed left cap is never cropped');
+        assert.deepEqual(pixel(output, 10 + x, y), pixel(source, 72 + x, y));
+    }
+    assert.equal(result.sliceFallback, undefined);
 });
 
 test('color gamma metadata is preserved rather than silently changing interpretation', () => {
@@ -399,16 +430,16 @@ for (const retrySucceeds of [false, true]) {
     });
 }
 
-test('expanded inset metadata failure restores the full image with its original insets', async () => {
+test('Figma inset metadata failure restores the full image with its original insets', async () => {
     const contents = boundaryFixture({ left: 2, right: 2, top: 2, bottom: 2 });
     const calls = [];
     const result = await writeSlicedPng({ async write(url, data, borders) {
         calls.push({ data, borders: { ...borders } });
         return { uuid: 'same-frame', url, sliced: calls.length > 1,
-            ...(calls.length === 1 ? { sliceFallback: 'cannot verify expanded insets' } : {}) };
+            ...(calls.length === 1 ? { sliceFallback: 'cannot verify Figma insets' } : {}) };
     } }, 'db://assets/panel.png', contents, node(), nine, 1);
     assert.equal(calls.length, 2);
-    assert.deepEqual(calls[0].borders, { left: 5, right: 6, top: 4, bottom: 5 });
+    assert.deepEqual(calls[0].borders, nine.borders);
     assert.notEqual(calls[0].data, contents);
     assert.equal(calls[1].data, contents);
     assert.deepEqual(calls[1].borders, nine.borders);
@@ -417,7 +448,7 @@ test('expanded inset metadata failure restores the full image with its original 
     assert.equal(result.asset.sliced, true);
 });
 
-test('expanded inset write failure restores original pixels and insets before propagating the error', async () => {
+test('Figma slice write failure restores original pixels and insets before propagating the error', async () => {
     const contents = boundaryFixture({ left: 2, right: 2, top: 2, bottom: 2 });
     const calls = [];
     await assert.rejects(writeSlicedPng({ async write(url, data, borders) {
@@ -426,7 +457,7 @@ test('expanded inset write failure restores original pixels and insets before pr
         return { uuid: 'same-frame', url, sliced: true };
     } }, 'db://assets/panel.png', contents, node(), nine, 1), /metadata readiness timeout/);
     assert.equal(calls.length, 2);
-    assert.deepEqual(calls[0].borders, { left: 5, right: 6, top: 4, bottom: 5 });
+    assert.deepEqual(calls[0].borders, nine.borders);
     assert.equal(calls[1].data, contents);
     assert.deepEqual(calls[1].borders, nine.borders);
 });

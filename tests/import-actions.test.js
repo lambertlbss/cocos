@@ -125,6 +125,31 @@ test('smart mode enables every recognized three- and nine-slice candidate', () =
     );
 });
 
+test('Figma slice definitions lock their own render strategy without bypassing ignore boundaries', () => {
+    const leaf = treeNode({ id: 'slice:part', type: 'RECTANGLE', action: 'render' });
+    const sliced = treeNode({ id: 'slice:defined', patchCandidate: true, sliceMode: 'nine', children: [leaf] });
+    for (const preferred of ['generate', 'render', 'transform']) {
+        assert.equal(smartActionForNode({ ...sliced, action: preferred }), 'render');
+        const effective = resolveEffectiveActions([sliced], new Map([[sliced.id, preferred]]), new Set(), new Set([sliced.id]));
+        assert.equal(effective.actions.get(sliced.id), 'render');
+        assert.equal(effective.actions.get(leaf.id), 'ignore');
+        assert.equal(effectiveKindForNode(sliced, 'layout', preferred, false), 'sprite');
+        assert.equal(effectiveKindForNode(sliced, 'button', preferred, false), 'button');
+    }
+    assert.deepEqual(actionOptionsForNode(sliced).map(([value]) => value), ['ignore', 'render']);
+    assert.match(strategySummaryForNode(sliced, true).strategy, /Figma 分片优先.*Figma 原始边界/);
+    const ownIgnore = resolveEffectiveActions([sliced], new Map([[sliced.id, 'ignore']]), new Set([sliced.id]));
+    assert.equal(ownIgnore.actions.get(sliced.id), 'ignore');
+    const parent = treeNode({ id: 'slice:parent', children: [sliced] });
+    for (const action of ['ignore', 'render']) {
+        const effective = resolveEffectiveActions([parent], new Map([[parent.id, action]]), new Set([sliced.id]), new Set([parent.id]));
+        assert.equal(effective.actions.get(parent.id), action);
+        assert.equal(effective.actions.get(sliced.id), 'ignore');
+    }
+    const invalid = treeNode({ action: 'generate', patchCandidate: false });
+    assert.equal(resolveEffectiveActions([invalid], new Map([[invalid.id, 'transform']])).actions.get(invalid.id), 'transform');
+});
+
 test('hidden nodes keep their normal smart actions and do not suppress generated descendants', () => {
     const child = treeNode({
         id: 'hidden:child',

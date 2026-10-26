@@ -252,10 +252,10 @@ test('document sessions bind stable pagination cursors and invalidate old sessio
         ['btn', 1],
         ['title', 1],
     ]);
-    const forcedNineSlice = scoped.nodes.find((item) => item.nodeId === 'btn');
-    assert.equal(forcedNineSlice.preferredAction, 'ignore');
-    assert.equal(forcedNineSlice.action, 'render');
-    assert.equal(forcedNineSlice.nineSlice, true);
+    const ignoredNineSlice = scoped.nodes.find((item) => item.nodeId === 'btn');
+    assert.equal(ignoredNineSlice.preferredAction, 'ignore');
+    assert.equal(ignoredNineSlice.action, 'ignore', 'Figma slicing does not cancel an explicit ignore');
+    assert.equal(ignoredNineSlice.nineSlice, true);
 
     const renamedSearch = await api.invoke('listNodes', {
         documentSessionId: firstSession,

@@ -19,7 +19,8 @@ async function main() {
     ]);
     const modules = {};
     for (const file of ['panels/default/index', 'panels/default/workflow', 'panels/default/model',
-        'panels/default/import-review', 'import-actions', 'node-name', 'importer/fonts', 'importer/assets', 'figma/url', 'diagnostics']) {
+        'panels/default/import-review', 'import-actions', 'node-name', 'importer/fonts', 'importer/assets', 'figma/url',
+        'figma/import-planner', 'figma/analyzer', 'figma/slicing', 'diagnostics']) {
         modules[`/dist/${file}.js`] = (await readFile(join(root, `dist/${file}.js`), 'utf8')).replace(/\/\/# sourceMappingURL=.*$/gm, '');
     }
     const html = `<!doctype html><html><body style="margin:0"><div id="host" style="height:100vh"></div><script>
@@ -105,6 +106,15 @@ async function main() {
             await checkLayout(`nodes ${width}`); await page.screenshot({ path: join(temp, `nodes-${width}.png`) });
         }
         await page.locator('#workflow-next').click();
+        await page.locator('#workflow-back').click();
+        await page.locator('[data-node-id="1:1:background"]').click();
+        assert.equal(await page.locator('[data-patch-for="1:1:background"]').isChecked(), true);
+        assert.equal(await page.locator('[data-patch-for="1:1:background"]').isDisabled(), true);
+        assert.deepEqual(await page.locator('[data-action-for="1:1:background"] option').evaluateAll(nodes => nodes.map(node => node.value)), ['ignore', 'render']);
+        await page.locator('[data-action-for="1:1:background"]').selectOption('ignore');
+        assert.equal(await page.locator('[data-action-for="1:1:background"]').inputValue(), 'ignore');
+        await page.locator('[data-action-for="1:1:background"]').selectOption('render');
+        await page.locator('#workflow-next').click();
         assert.equal(await page.locator('[data-batch-name]').count(), 3);
         await page.locator('#import-button').click();
         await page.waitForFunction(() => Boolean(window.finishImport));
@@ -130,7 +140,7 @@ async function main() {
         await page.locator('#batch-retry-failed').click();
         await page.waitForFunction(() => q('#result-summary').textContent.includes('成功 3 项'));
         assert.deepEqual(errors, []);
-        console.log(`Compiled batch panel browser checks passed: Section list, Frame tabs, independent edits, full node controls, shared settings, stop/resume/retry, per-item reports, and 650/420px layout. Screenshots: ${temp}`);
+        console.log(`Compiled batch panel browser checks passed: Figma slice priority/ignore, Section list, Frame tabs, independent edits, full node controls, shared settings, stop/resume/retry, per-item reports, and 650/420px layout. Screenshots: ${temp}`);
     } finally { await browser.close(); server.close(); }
 }
 

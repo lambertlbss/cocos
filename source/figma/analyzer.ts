@@ -320,6 +320,7 @@ export function inferAction(node: FigmaNode, isRoot = false): ImportAction {
         // to edit.
         return 'generate';
     }
+    if (isPatchCandidate(node)) return 'render';
     if (hasManualExport(node) || isNamedSliceGroup(node)) {
         return 'render';
     }
@@ -450,6 +451,12 @@ function warningFor(
     if (!node.absoluteBoundingBox) {
         return withInactive('缺少边界信息，将按 0×0 导入');
     }
+    if (isPatchCandidate(node)) {
+        return withInactive((isNamedSliceGroup(node)
+            ? '检测到有效的 3/9 个 Rectangle 连续切片；'
+            : '检测到有效三/九宫分片；')
+            + 'Figma 分片优先，按 Figma 原始边界导入，旧策略、Export 和前缀规则不能关闭切片');
+    }
     if (renderManualExportSubtree) {
         return withInactive('检测到 Figma Export 设置，智能模式将按 PNG 整层导入；Figma 的格式、后缀和倍率不沿用');
     }
@@ -488,11 +495,12 @@ function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
     const inferredAction = inferAction(node, isRoot);
     const renderManualExportSubtree = inferredAction !== 'ignore'
         && node.type !== 'TEXT'
+        && !sliceAnalysis
         && hasManualExport(node);
     const renderMessySubtree = shouldRenderMessySubtree(node, isRoot);
     const mergeResourceSubtree = shouldMergeResourceNode(node, isRoot);
     const renderSubtree = inferredAction !== 'ignore'
-        && (renderManualExportSubtree || isNamedSliceGroup(node) || renderMessySubtree || mergeResourceSubtree);
+        && (Boolean(sliceAnalysis) || renderManualExportSubtree || isNamedSliceGroup(node) || renderMessySubtree || mergeResourceSubtree);
     return {
         id: node.id,
         name: node.name,

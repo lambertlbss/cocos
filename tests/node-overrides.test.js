@@ -38,7 +38,7 @@ function settings(scale) {
     };
 }
 
-test('enables recognized slice decisions by default and preserves an explicit opt-out', () => {
+test('recognized Figma slice decisions outrank an explicit opt-out while ignore still prevents import', () => {
     const tree = [{
         id: 'slice:1',
         name: 'img_yushi_line',
@@ -60,7 +60,12 @@ test('enables recognized slice decisions by default and preserves an explicit op
         kind: 'sprite',
         nineSlice: false,
         explicit: true,
-    }], tree).get('slice:1').nineSlice, false);
+    }], tree).get('slice:1').nineSlice, true);
+    const ignored = decisionMap([{
+        id: 'slice:1', action: 'ignore', kind: 'node', nineSlice: false, explicit: true,
+    }], tree).get('slice:1');
+    assert.equal(ignored.action, 'ignore');
+    assert.equal(ignored.nineSlice, false);
 });
 
 test('serializes settings writes so a slower older write cannot overwrite a newer value', async () => {

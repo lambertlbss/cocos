@@ -21,6 +21,7 @@ import { parseDocument } from './figma/parser';
 import {
     annotateTreeWithImportPlan,
     compileImportPlan,
+    normalizeFigmaSliceDecision,
     resolveAutomaticMergeDecisions,
 } from './figma/import-planner';
 import { analyzeMaskTint, verifyWhiteAlphaPng } from './figma/mask-tint';
@@ -44,6 +45,7 @@ import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
 import { gradientPng } from './importer/svg';
 import { writeSlicedPng } from './importer/sliced-png';
+import { isPng } from './importer/raster-format';
 import { pixelSizedTileAsset, rasterizeTile, tiledRasterKey } from './importer/tiled-png';
 import { rasterizeImageFill } from './importer/image-fill';
 import {
@@ -551,27 +553,29 @@ function decisionForNode(node: FigmaNode, decisions: Map<string, Decision>): Dec
 
 export function decisionMap(overrides: ImportOverride[], tree: TreeNodeDto[]): Map<string, Decision> {
     const decisions = new Map<string, Decision>();
+    const figmaSlices = new Set<string>();
     const addDefaults = (nodes: TreeNodeDto[]) => {
         for (const node of nodes) {
-            decisions.set(node.id, {
+            if (node.patchCandidate) figmaSlices.add(node.id);
+            decisions.set(node.id, normalizeFigmaSliceDecision({
                 action: normalizeImportAction(node.action),
                 kind: node.kind,
                 nineSlice: node.patchCandidate,
                 explicit: false,
-            });
+            }, Boolean(node.patchCandidate)));
             addDefaults(node.children);
         }
     };
     addDefaults(tree);
     for (const item of overrides ?? []) {
         const name = sanitizeNodeName(item.name);
-        decisions.set(item.id, {
+        decisions.set(item.id, normalizeFigmaSliceDecision({
             action: normalizeImportAction(item.action),
             kind: NODE_KINDS.has(item.kind) ? item.kind : 'auto',
             nineSlice: item.nineSlice,
             explicit: item.explicit === true,
             ...(name ? { name } : {}),
-        });
+        }, figmaSlices.has(item.id)));
     }
     return decisions;
 }
@@ -1190,8 +1194,37 @@ export async function buildAssets(
             if (activeController?.signal.aborted) {
                 throw new CancelledError();
             }
-            const node = groupedNodes[0];
+            // A declared Figma slice owns this same-name resource even when an
+            // ordinary PNG was encountered first. IMAGE and gradient stages
+            // run later and share this single generated result.
+            const slicedSources = groupedNodes.flatMap((candidate) => {
+                if (decisionForNode(candidate, decisions).action === 'ignore') return [];
+                const analysis = analyzeSliceGrid(candidate);
+                return analysis ? [{ node: candidate, analysis }] : [];
+            });
+            const selectedSlice = slicedSources[0];
+            const node = selectedSlice?.node ?? groupedNodes[0];
             const decision = decisions.get(node.id) ?? defaultDecision(node);
+            const sliceAnalysis = selectedSlice?.analysis ?? (decision.nineSlice ? analyzeSliceGrid(node) : null);
+            if (selectedSlice) {
+                const shape = (entry: typeof selectedSlice) => JSON.stringify({ mode: entry.analysis.mode,
+                    borders: entry.analysis.borders, frame: entry.node.absoluteBoundingBox && {
+                        width: entry.node.absoluteBoundingBox.width, height: entry.node.absoluteBoundingBox.height,
+                    } });
+                if (slicedSources.slice(1).some((entry) => shape(entry) !== shape(selectedSlice))) {
+                    const reason = `同名三/九宫定义不同，沿用首个有效 Figma 切片“${node.name}”的原始画布与边距，仅生成一份资源`;
+                    warnings.add(reason);
+                    note('merged', node.name, reason, url);
+                }
+                const destination = resolve(Editor.Project.path, url.slice('db://'.length));
+                if (localResources.some((library) => {
+                    const suffix = relative(library.root, destination);
+                    return !suffix || (!isAbsolute(suffix) && suffix !== '..'
+                        && !suffix.startsWith(`..\\`) && !suffix.startsWith('../'));
+                })) throw new Error('Figma 三/九宫需要写入输出目录，但该目录位于指定本地素材库中；请调整输出目录，避免修改素材库。');
+                note('merged', node.name,
+                    'Figma 三/九宫定义优先：使用 Figma 原始画布与边距生成输出资源，不沿用同名素材的旧边距', url);
+            }
             const reuseAsset = (asset: SpriteAssetSpec, source: 'local' | 'existing') => {
                 sharedAssets.set(resourceKey(node), asset);
                 if (decision.nineSlice && !asset.sliced) {
@@ -1199,14 +1232,14 @@ export async function buildAssets(
                 }
                 completeGroup(groupedNodes, asset, source);
             };
-            const shared = sharedAssets.get(resourceKey(node));
+            const shared = sliceAnalysis ? undefined : sharedAssets.get(resourceKey(node));
             if (shared) {
                 reuseAsset(shared, 'existing');
                 continue;
             }
-            const localMatch = analyzeMaskTint(node) ? null : await findLocal(node.name, false);
-            // Project-local SpriteFrames own their pixels and slice borders.
-            // Reuse their UUID before any slice analysis, compaction or refresh.
+            const localMatch = sliceAnalysis || analyzeMaskTint(node) ? null : await findLocal(node.name, false);
+            // Without a valid Figma slice, preserve the existing local name
+            // mapping, UUID and slice borders even during an explicit refresh.
             const localUrl = localMatch
                 ? assetDatabaseUrl(localMatch.path)
                 : null;
@@ -1218,16 +1251,13 @@ export async function buildAssets(
             if (localUrl) {
                 throw new Error(`同名本地资源尚无可用 SpriteFrame，请先在 Cocos 中完成资源导入并设置为 SpriteFrame 后重试，不会另建副本：${localUrl}`);
             }
-            const namedOutput = !localMatch && !analyzeMaskTint(node) ? await findOutput(node.name) : null;
+            const namedOutput = !sliceAnalysis && !localMatch && !analyzeMaskTint(node) ? await findOutput(node.name) : null;
             if (namedOutput) {
                 const namedAsset = await writer.existing(assetDatabaseUrl(namedOutput.path)!);
                 if (!namedAsset) throw new Error(`同名已有资源尚无可用 SpriteFrame，不会另建副本：${namedOutput.path}`);
                 reuseAsset(namedAsset, 'existing');
                 continue;
             }
-            const sliceAnalysis = decision.nineSlice && format === 'png'
-                ? analyzeSliceGrid(node)
-                : null;
             if (decision.nineSlice && !sliceAnalysis) {
                 warnings.add(`三/九宫节点“${node.name}”无法计算连续切片边界，已临时作为 PNG 整层导入`);
             }
@@ -1242,9 +1272,20 @@ export async function buildAssets(
                 scale: importSettings.scale,
                 variant: renderFrame ? 'visual-overflow-v1' : undefined,
             };
-            const cached = localMatch || importSettings.refreshAssets
+            let cached = localMatch || importSettings.refreshAssets
                 ? null
                 : await cache.read(key);
+            if (sliceAnalysis && cached) {
+                const frame = node.absoluteBoundingBox!;
+                const isFullCanvas = isPng(cached) && cached.length >= 24
+                    && cached.toString('ascii', 12, 16) === 'IHDR'
+                    && Math.abs(cached.readUInt32BE(16) - frame.width * importSettings.scale) <= 1
+                    && Math.abs(cached.readUInt32BE(20) - frame.height * importSettings.scale) <= 1;
+                if (!isFullCanvas) {
+                    cached = null;
+                    note('fallback', node.name, '缓存不是 Figma 完整画布，重新导出原始 PNG 后再应用三/九宫边距', url);
+                }
+            }
             pending.push({
                 node,
                 nodes: groupedNodes,

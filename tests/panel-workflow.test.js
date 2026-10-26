@@ -163,7 +163,7 @@ test('workflow gates future steps and importing until a design is read and setti
     assert.equal(ui.calls('import-selection').length, 0);
 });
 
-test('freshly fetched inspector controls unlock while slice eligibility keeps its original constraint', async (t) => {
+test('freshly fetched inspector controls unlock while Figma slice definitions stay locked on', async (t) => {
     for (const patchCandidate of [false, true]) {
         const fetched = design();
         Object.assign(fetched.tree[0], { patchCandidate, sliceMode: patchCandidate ? 'nine' : undefined });
@@ -177,9 +177,43 @@ test('freshly fetched inspector controls unlock while slice eligibility keeps it
                 `${attribute} unlocks after a fresh read`);
         }
         const slice = ui.get('[data-patch-for="1:1"]');
-        assert.equal(slice.disabled, !patchCandidate);
+        assert.equal(slice.disabled, true);
         assert.equal(slice.checked, patchCandidate);
     }
+});
+
+test('historical slice off settings and presets serialize the current Figma definition', async (t) => {
+    const document = design();
+    Object.assign(document.tree[0], { patchCandidate: true, sliceMode: 'nine', reason: 'slice-resource' });
+    document.nodeOverrides = [{ id: '1:1', action: 'transform', kind: 'button', nineSlice: false, explicit: true }];
+    const ui = await panelFixture(t, { initial: { document } });
+    const assertSlice = () => {
+        assert.equal(ui.get('[data-action-for="1:1"]').value, 'render');
+        assert.equal(ui.get('[data-patch-for="1:1"]').checked, true);
+        assert.equal(ui.get('[data-patch-for="1:1"]').disabled, true);
+        assert.match(ui.get('.node-inspector-note').textContent, /Figma 分片优先/);
+    };
+    assertSlice();
+    assert.equal(ui.get('[data-kind-for="1:1"]').value, 'button');
+    const patch = ui.get('[data-patch-for="1:1"]'); patch.checked = false;
+    await ui.root.emit('change', { target: patch }); assertSlice();
+    for (const preset of ['editable', 'bitmap', 'smart']) {
+        // The third preset may use another label; exercise its actual fallback branch.
+        const button = preset === 'bitmap'
+            ? [...ui.root.querySelectorAll('[data-preset]')].find((item) => !['editable', 'smart'].includes(item.dataset.preset))
+            : ui.get(`[data-preset="${preset}"]`);
+        assert.ok(button); await button.click(); await flush(); assertSlice();
+    }
+    const action = ui.get('[data-action-for="1:1"]'); action.value = 'ignore';
+    await ui.root.emit('change', { target: action }); await flush();
+    assert.equal(ui.get('[data-action-for="1:1"]').value, 'ignore');
+    const savedIgnore = ui.calls('save-node-overrides').at(-1).args[1].find((item) => item.id === '1:1');
+    assert.equal(savedIgnore.action, 'ignore');
+    await ui.click('[data-preset="smart"]');
+    await ui.goToConfirm(); await ui.click('#import-button'); await flush();
+    const serialized = ui.calls('import-selection').at(-1).args[0].overrides.find((item) => item.id === '1:1');
+    assert.equal(serialized.action, 'render');
+    assert.equal(serialized.nineSlice, true);
 });
 
 test('back and forward keep directory, font, node strategy, rename and selection without backend calls', async (t) => {
@@ -490,6 +524,36 @@ async function batchFixture(t, options = {}) {
         assert.equal(ui.step(), 2);
     } };
 }
+
+test('batch restoration and frame switching retain Figma slices over historical off overrides', async (t) => {
+    const first = frameItem('1:1', 'Home_ui'), second = frameItem('2:1', 'Bag_ui');
+    for (const item of [first, second]) {
+        Object.assign(item.document.tree[0], { patchCandidate: true, sliceMode: 'horizontal' });
+        item.document.nodeOverrides = [{ id: item.rootId, action: 'generate', kind: 'button', nineSlice: false, explicit: true }];
+    }
+    const items = [first, second];
+    const ui = await panelFixture(t, { empty: true, handlers: {
+        'get-batch-state': () => ({ items }),
+        'activate-batch-item': (id) => items.find((item) => item.id === id).document,
+        'sync-batch-items': (next) => ({ items: next }),
+        'import-batch': () => ({ id: 'slice-batch', stopped: false, completed: 0, total: 2, items: [] }),
+    } });
+    await ui.click(`[data-batch-configure="${first.id}"]`); await flush();
+    for (const item of [second, first]) {
+        await ui.click(`[data-batch-frame="${item.id}"]`); await flush();
+        assert.equal(ui.get(`[data-patch-for="${item.rootId}"]`).checked, true);
+        assert.equal(ui.get(`[data-patch-for="${item.rootId}"]`).disabled, true);
+        assert.equal(ui.get(`[data-action-for="${item.rootId}"]`).value, 'render');
+        assert.equal(ui.get(`[data-kind-for="${item.rootId}"]`).value, 'button');
+    }
+    await ui.goToConfirm(); await ui.click('#import-button'); await flush();
+    const request = ui.calls('import-batch').at(-1).args[0];
+    assert.equal(request.items.length, 2);
+    for (const item of request.items) {
+        const root = item.overrides.find((override) => ['1:1', '2:1'].includes(override.id));
+        assert.equal(root.action, 'render'); assert.equal(root.nineSlice, true); assert.equal(root.kind, 'button');
+    }
+});
 
 test('Section source stays on the frame list, appends unique frames and retains unchecked choices', async (t) => {
     const ui = await batchFixture(t);

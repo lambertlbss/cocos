@@ -8,6 +8,7 @@ const {
     compileImportPlan,
     importPlanReasonText,
     resolveAutomaticMergeDecisions,
+    normalizeFigmaSliceDecision,
     semanticRoleForNode,
 } = require('../dist/figma/import-planner');
 const { parseNode } = require('../dist/figma/parser');
@@ -691,6 +692,58 @@ test('keeps independent inner slices and preserves own slicing before the prefix
     }));
     assert.equal(ownSlice.get('merge:outer').nineSlice, true);
     assert.equal(compileImportPlan([root], ownSlice).get('merge:outer').reason, 'slice-resource');
+});
+
+test('valid Figma slice geometry wins over saved off strategies, Export, and naming conventions', () => {
+    for (const name of ['Plain Resource', 'img_resource', 'icon_resource', 'btn_resource']) {
+        const sliced = node({ ...slicedChild('figma:slice', name), hasExportSettings: true });
+        for (const action of ['generate', 'render', 'transform']) {
+            const input = decisionsFor([sliced], { [sliced.id]: {
+                action, kind: 'layout', nineSlice: false, explicit: true, name: 'Custom node',
+            } });
+            const resolved = resolveAutomaticMergeDecisions([sliced], input);
+            const decision = resolved.get(sliced.id);
+            assert.equal(decision.action, 'render');
+            assert.equal(decision.kind, 'sprite');
+            assert.equal(decision.nineSlice, true);
+            assert.equal(decision.name, 'Custom node');
+            assert.equal(input.get(sliced.id).nineSlice, false, 'normalization does not mutate saved input');
+            const plan = compileImportPlan([sliced], resolved).get(sliced.id);
+            assert.equal(plan.reason, 'slice-resource', 'Figma definition is visible even for explicit/root strategies');
+            assert.equal(plan.fold, undefined);
+        }
+    }
+    const button = normalizeFigmaSliceDecision({ action: 'generate', kind: 'button', nineSlice: false }, true);
+    assert.equal(button.kind, 'button');
+    assert.equal(button.action, 'render');
+});
+
+test('invalid named grids keep manual strategies, and ignored Figma slices stay ignored', () => {
+    const invalid = node({ ...slicedChild('figma:invalid', 'img_invalid'), children: [
+        { id: 'gap:a', name: 'Rectangle', type: 'RECTANGLE', absoluteBoundingBox: { x: 0, y: 0, width: 10, height: 10 } },
+        { id: 'gap:b', name: 'Rectangle 1', type: 'RECTANGLE', absoluteBoundingBox: { x: 20, y: 0, width: 10, height: 10 } },
+        { id: 'gap:c', name: 'Rectangle 2', type: 'RECTANGLE', absoluteBoundingBox: { x: 40, y: 0, width: 10, height: 10 } },
+    ] });
+    const invalidInput = decisionsFor([invalid], { [invalid.id]: { action: 'transform', nineSlice: false, explicit: true } });
+    const invalidDecision = resolveAutomaticMergeDecisions([invalid], invalidInput).get(invalid.id);
+    assert.equal(invalidDecision.action, 'transform');
+    assert.equal(invalidDecision.nineSlice, false);
+    const sliced = node(slicedChild('figma:ignored', 'img_ignored'));
+    const ignored = resolveAutomaticMergeDecisions([sliced], decisionsFor([sliced], {
+        [sliced.id]: { action: 'ignore', nineSlice: false, explicit: true },
+    }));
+    assert.equal(ignored.get(sliced.id).action, 'ignore');
+    assert.equal(makeSpec(sliced, undefined, ignored, compileImportPlan([sliced], ignored), indexNodes([sliced]), new Map(), new Map(), true), null);
+
+    const parent = node({ id: 'figma:parent', children: [sliced] });
+    for (const action of ['ignore', 'render']) {
+        const decisions = resolveAutomaticMergeDecisions([parent], decisionsFor([parent], {
+            [parent.id]: { action, explicit: true },
+        }));
+        assert.equal(decisions.get(parent.id).action, action, 'an explicit ancestor retains its subtree boundary');
+        const spec = makeSpec(parent, undefined, decisions, compileImportPlan([parent], decisions), indexNodes([parent]), new Map(), new Map(), true);
+        assert.equal(spec?.children.length ?? 0, 0);
+    }
 });
 
 test('keeps a selected prefix root structural unless its strategy is explicitly changed', () => {

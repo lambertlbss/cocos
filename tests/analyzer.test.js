@@ -847,6 +847,26 @@ test('detects executable three- and nine-slice candidates with their slice mode'
     assert.equal(analyzeTree([arbitraryChildren])[0].sliceMode, undefined);
 });
 
+test('valid Figma slice geometry is an explicit resource boundary before Export and arbitrary names', () => {
+    for (const name of ['Plain Resource', 'img_sliced', 'icon_sliced', 'btn_sliced']) {
+        const sliced = node({ id: 'figma:priority', name, hasExportSettings: true,
+            absoluteBoundingBox: { x: 0, y: 0, width: 30, height: 10 },
+            children: [0, 1, 2].map((index) => ({
+                id: `figma:part:${index}`, name: `custom part ${index}`, type: 'RECTANGLE',
+                absoluteBoundingBox: { x: index * 10, y: 0, width: 10, height: 10 },
+            })),
+        });
+        assert.equal(isNamedSliceGroup(sliced), false);
+        assert.equal(inferAction(sliced, true), 'render');
+        const tree = analyzeTree([sliced])[0];
+        assert.equal(tree.patchCandidate, true);
+        assert.equal(tree.sliceMode, 'horizontal');
+        assert.equal(tree.renderSubtree, true);
+        assert.match(tree.warning, /Figma 分片优先.*Figma 原始边界/);
+        assert.doesNotMatch(tree.warning, /检测到 Figma Export 设置/);
+    }
+});
+
 test('automatically renders parents containing three or nine Rectangle-named children as one PNG', () => {
     for (const count of [3, 9]) {
         const candidate = node({
