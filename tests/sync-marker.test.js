@@ -413,6 +413,33 @@ test('a wrapper with padding inside still treats the image as part of its pixels
     ).assetStale, true);
 });
 
+test('a three-slice node can be stretched without re-rendering, but new art still re-renders', () => {
+    const slice = (scale, imageRef = 'image-ref-1') => node({
+        id: '2:1',
+        name: 'img_paiming_tiao2',
+        type: 'FRAME',
+        fills: [],
+        absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 300 * scale },
+        children: [0, 1, 2].map((index) => imgNode({
+            id: `2:${index + 2}`,
+            fills: [{ type: 'IMAGE', imageRef, scaleMode: 'FILL' }],
+            absoluteBoundingBox: {
+                x: 0,
+                y: index * 100 * scale,
+                width: 100,
+                height: 100 * scale,
+            },
+        })),
+    });
+    const before = createSyncMarker({ fileKey: FILE_KEY, node: slice(1) });
+    const stretched = createSyncMarker({ fileKey: FILE_KEY, node: slice(2) });
+    assert.equal(compareSyncMarker(before, stretched).pixelChanged, false);
+    assert.equal(compareSyncMarker(before, stretched).assetStale, false);
+
+    const replaced = createSyncMarker({ fileKey: FILE_KEY, node: slice(1, 'image-ref-2') });
+    assert.equal(compareSyncMarker(before, replaced).assetStale, true);
+});
+
 test('the generated marker script is minimal, valid and detectable', () => {
     assert.equal(SYNC_MARKER_SCRIPT_URL, 'db://assets/figma-importer-runtime/FigmaSyncNode.ts');
     assert.equal(isSyncMarkerScript(SYNC_MARKER_SCRIPT_SOURCE), true);

@@ -1,4 +1,5 @@
 import type { FigmaEffect, FigmaNode, FigmaPaint, FigmaTextStyle, Rect, SyncMarkerSpec } from '../types';
+import { analyzeSliceGrid } from '../figma/slicing';
 import { canonicalStringify, quantizeDecimal, sha256 } from '../roundtrip/canonical-json';
 
 /**
@@ -287,6 +288,11 @@ function hasOwnVisual(node: FigmaNode): boolean {
  *   最内层是纯图片节点，且与最外层完全同框（这正是单图片折叠的形态）。
  */
 export function isStretchableImage(node: FigmaNode): boolean {
+    // 三/九宫节点：拉伸由 Cocos 的 SLICED Sprite 完成，尺寸变化不需要重新出图。
+    // 只认几何识别通过的结构，命名像切片但几何不成立的节点仍按普通图片处理。
+    if (analyzeSliceGrid(node)) {
+        return true;
+    }
     if (isPlainImageNode(node)) {
         return true;
     }
