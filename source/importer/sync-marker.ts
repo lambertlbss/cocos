@@ -360,14 +360,13 @@ export function assertUniqueSyncOwnership(markers: readonly SyncMarkerSpec[]): v
 /** 需要在项目 assets 中生成的最小标记组件源码（无业务逻辑，只保存来源与指纹）。 */
 export const SYNC_MARKER_SCRIPT_SOURCE = `import { _decorator, Component } from 'cc';
 
-const { ccclass, property, menu } = _decorator;
+const { ccclass, property } = _decorator;
 
 /**
  * Figma Importer 生成的同步标记。字段由插件维护，手工修改会导致下次同步被拒绝。
  * 删除本组件即表示该节点退出 Figma 同步：插件不会再移动、缩放或删除它。
  */
 @ccclass('${SYNC_MARKER_CLASS}')
-@menu('${SYNC_MARKER_CATEGORY}/${SYNC_MARKER_CLASS}')
 export class ${SYNC_MARKER_CLASS} extends Component {
     @property({ tooltip: '标记协议版本' })
     public figmaMarkerSchema: number = ${SYNC_MARKER_SCHEMA};

@@ -14,6 +14,7 @@ import type {
     SceneNodeSpec,
 } from './types';
 import { sanitizeNodeName } from './node-name';
+import { SYNC_MARKER_CLASS, markerToComponentValues } from './importer/sync-marker';
 import { shouldGenerateMask, setMaskShapeSafely } from './mask-policy';
 import type { MaskTarget } from './mask-policy';
 import { captureReviewScene, registerSceneReview, reviewManagedComponentIds,
@@ -46,6 +47,8 @@ interface SceneImportResult {
     updated: number;
     temporaryRoot?: boolean;
     prefabSync?: PrefabSceneSyncCapture;
+    /** 标记组件脚本尚未编译完成时的降级说明；导入本身继续成功。 */
+    syncMarkerWarning?: string;
 }
 
 const BACKGROUND_NODE_NAME = '__FigmaBackground';
@@ -894,6 +897,25 @@ function figmaPanelLineHeight(value: number | undefined): number {
     // Preserve Figma's pixel line height independently of import scale and
     // engine-computed content size; only round to one decimal place.
     return Math.round((lineHeight + Number.EPSILON) * 10) / 10;
+}
+
+let syncMarkerFailure: string | null = null;
+
+/**
+ * 组件同步标记：只在节点上写数据，不参与渲染。
+ * 组件类由主进程生成到 `assets/figma-importer-runtime/FigmaSyncNode.ts`，
+ * 尚未编译完成时整次导入降级为"无标记"并回传警告，不阻断建树。
+ */
+function configureSyncMarker(node: any, spec: SceneNodeSpec): void {
+    const marker = spec.syncMarker;
+    if (!marker || spec.action === 'transform') {
+        return;
+    }
+    const component = node.getComponent(SYNC_MARKER_CLASS) ?? node.addComponent(SYNC_MARKER_CLASS);
+    const values = markerToComponentValues(marker) as unknown as Record<string, unknown>;
+    for (const [key, value] of Object.entries(values)) {
+        component[key] = value;
+    }
 }
 
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
@@ -1780,6 +1802,7 @@ export const methods = {
 
     async importDocument(payload: SceneImportPayload): Promise<SceneImportResult> {
         const cc = require('cc') as any;
+        syncMarkerFailure = null;
         const {
             director,
             Node,
@@ -2020,6 +2043,13 @@ export const methods = {
                 nodeMap[figmaId] = node.uuid;
             }
             configureGeometry(node, spec, payload.scale, cc);
+            if (spec.syncMarker && spec.action !== 'transform' && syncMarkerFailure === null) {
+                try {
+                    configureSyncMarker(node, spec);
+                } catch (error) {
+                    syncMarkerFailure = error instanceof Error ? error.message : String(error);
+                }
+            }
 
             if (spec.action !== 'transform') {
                 removeObsoleteScrollHelpers(node, spec, cc, prefabOwnershipGuard);
@@ -2257,6 +2287,7 @@ export const methods = {
             updated,
             temporaryRoot: !prefabContext && directRoot && !reusedImportRoot,
             prefabSync,
+            ...(syncMarkerFailure ? { syncMarkerWarning: syncMarkerFailure } : {}),
         };
     },
 

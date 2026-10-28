@@ -33,6 +33,13 @@ import {
     normalizeImportAction,
 } from './import-actions';
 import {
+    SYNC_MARKER_SCRIPT_URL,
+    assertUniqueSyncOwnership,
+    createSyncMarker,
+    type SyncMarkerSpec,
+} from './importer/sync-marker';
+import { planSyncMarkerScript } from './importer/sync-marker-asset';
+import {
     AssetWriter,
     RASTER_IMAGE_EXTENSIONS,
     detectImageExtension,
@@ -162,6 +169,8 @@ interface SceneImportResult {
     temporaryRoot?: boolean;
     prefabUrl?: string;
     prefabSync?: PrefabSceneSyncCapture;
+    /** 标记组件脚本尚未编译完成时的降级说明；导入本身继续成功。 */
+    syncMarkerWarning?: string;
     warnings?: string[];
 }
 
@@ -1613,6 +1622,7 @@ export function makeSpec(
     fonts: Map<string, string>,
     isRoot = false,
     parentWorldRotation = 0,
+    sync?: { fileKey: string },
 ): SceneNodeSpec | null {
     const decision = decisionForNode(node, decisions);
     if (decision.action === 'ignore') {
@@ -1636,6 +1646,15 @@ export function makeSpec(
     const absorbedDirectIds = new Set(fold ? [fold.sourceNodeId] : []);
     const fullFold = fold?.kind === 'single-image' || fold?.kind === 'single-text';
     const worldRotation = parentWorldRotation + node.rotation;
+    // 折叠到本节点的子层 id 与 aliasFigmaIds 一致；标记只记录聚合身份，
+    // 不试图为折叠子层单独建节点。
+    const syncMarker: SyncMarkerSpec | undefined = sync
+        ? createSyncMarker({
+            fileKey: sync.fileKey,
+            node,
+            aliasNodeIds: fold?.absorbedNodeIds ?? [],
+        })
+        : undefined;
     return {
         figmaId: node.id,
         name: decision.name ?? node.name,
@@ -1688,6 +1707,7 @@ export function makeSpec(
                 ? false
                 : undefined,
         planReason: plan?.reason,
+        syncMarker,
         children: terminal
             ? []
             : node.children
@@ -1702,6 +1722,7 @@ export function makeSpec(
                     fonts,
                     false,
                     worldRotation,
+                    sync,
                 ))
                 .filter((child): child is SceneNodeSpec => child !== null),
     };
@@ -1791,6 +1812,75 @@ function prefabDiskPath(url: string): string {
         throw new Error(`Prefab URL 无效：${url}`);
     }
     return resolve(Editor.Project.path, url.slice('db://'.length));
+}
+
+async function waitForSyncMarkerScript(url: string): Promise<void> {
+    const started = Date.now();
+    while (Date.now() - started < 15_000) {
+        const info = await Editor.Message.request('asset-db', 'query-asset-info', url) as {
+            uuid?: string;
+        } | null;
+        if (typeof info?.uuid === 'string') {
+            return;
+        }
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    }
+    throw new Error(`等待 Cocos 导入组件同步标记脚本超时：${url}`);
+}
+
+/**
+ * 组件同步需要在项目里有一个极小的标记组件脚本。首次导入时生成，
+ * 之后每次导入校验；被其他脚本占用时 fail-closed，被截断或改旧时重建。
+ */
+async function ensureSyncMarkerScript(): Promise<{ action: string; reason?: string }> {
+    const url = SYNC_MARKER_SCRIPT_URL;
+    let existing: string | null = null;
+    try {
+        existing = await readFile(prefabDiskPath(url), 'utf8');
+    } catch {
+        existing = null;
+    }
+    const plan = planSyncMarkerScript(existing);
+    if (plan.action === 'reject') {
+        throw new Error(plan.reason);
+    }
+    if (plan.action === 'keep') {
+        await waitForSyncMarkerScript(url);
+        return { action: 'keep' };
+    }
+    const info = await Editor.Message.request('asset-db', 'query-asset-info', url) as {
+        uuid?: string;
+    } | null;
+    if (!info) {
+        const created = await Editor.Message.request('asset-db', 'create-asset', url, plan.content, {
+            overwrite: false,
+            rename: false,
+        }) as { uuid?: string } | null;
+        if (!created) {
+            throw new Error(`无法创建组件同步标记脚本：${url}`);
+        }
+    } else {
+        await Editor.Message.request('asset-db', 'save-asset', url, plan.content);
+    }
+    await waitForSyncMarkerScript(url);
+    return {
+        action: plan.action,
+        reason: plan.action === 'rewrite' ? plan.reason : undefined,
+    };
+}
+
+function collectSyncMarkerSpecs(specs: readonly SceneNodeSpec[]): SyncMarkerSpec[] {
+    const markers: SyncMarkerSpec[] = [];
+    const visit = (nodes: readonly SceneNodeSpec[]) => {
+        for (const node of nodes) {
+            if (node.syncMarker) {
+                markers.push(node.syncMarker);
+            }
+            visit(node.children);
+        }
+    };
+    visit(specs);
+    return markers;
 }
 
 async function storedPrefabMatchesRecord(
@@ -2349,6 +2439,15 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
             }
             : sourceRootFrames[0] ?? { x: 0, y: 0, width: 0, height: 0 };
         let rootCursor = 0;
+        // 组件级同步：只有单节点链接、且根节点确实是组件（或实例）时启用。
+        // Frame 链接保持原有行为，不生成标记、不额外创建项目脚本。
+        const syncRootNode = document.sourceNodeId && document.roots.length === 1
+            ? document.roots[0]
+            : undefined;
+        const syncContext = syncRootNode
+            && (syncRootNode.type === 'COMPONENT' || syncRootNode.type === 'INSTANCE')
+            ? { fileKey: document.fileKey }
+            : undefined;
         const roots = document.roots
             .map((node, index) => {
                 const spec = makeSpec(
@@ -2360,6 +2459,8 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
                     assets,
                     fonts,
                     true,
+                    0,
+                    syncContext,
                 );
                 if (spec && multipleRoots) {
                     spec.frame = {
@@ -2376,6 +2477,13 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         if (!roots.length) {
             throw new Error('没有选中任何可导入节点。');
         }
+        if (syncContext) {
+            try {
+                assertUniqueSyncOwnership(collectSyncMarkerSpecs(roots));
+            } catch (error) {
+                warnings.push(error instanceof Error ? error.message : '同步标记所有权校验失败。');
+            }
+        }
 
         const sourceNodeId = document.sourceNodeId;
         if (sourceNodeId && roots.length === 1) {
@@ -2385,6 +2493,17 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
                 || document.roots[0]?.name?.trim()
                 || document.fileName;
             const prefabUrl = `db://assets/${prefabWriter.folder}/${sanitizeAssetName(frameName)}.prefab`;
+            if (syncContext) {
+                emitProgress({
+                    phase: 'scene',
+                    value: 0.02,
+                    message: '正在准备组件同步标记脚本…',
+                });
+                const script = await ensureSyncMarkerScript();
+                if (script.reason) {
+                    warnings.push(script.reason);
+                }
+            }
             emitProgress({
                 phase: 'scene',
                 value: 0.05,
@@ -2400,6 +2519,9 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
                 scale: importSettings.scale,
                 roots,
             });
+            if (result.syncMarkerWarning) {
+                warnings.push(`组件同步标记未写入：${result.syncMarkerWarning}`);
+            }
             const nodeMaps = await getNodeMaps();
             // Prefab updates persist by PrefabInfo.fileId in the asset meta;
             // runtime node UUIDs are session-only and must never be reused here.
