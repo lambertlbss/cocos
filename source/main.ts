@@ -808,7 +808,6 @@ export async function buildAssets(
     decisions: Map<string, Decision>,
     importSettings: ImportSettings,
     review: ImportReviewRecorder,
-    options: { preferGeneratedResources?: boolean } = {},
 ): Promise<AssetBuildResult> {
     const hidden = hiddenLayerIds(session.roots, importSettings.importHiddenLayers !== false);
     const applyVisibility = (node: FigmaNode): void => {
@@ -868,12 +867,6 @@ export async function buildAssets(
         return null;
     };
     const findLocal = async (name: string, includeOutput = true) => {
-        // 组件同步勾选「更新资源」时，设计像素已经变化，必须重新出图：
-        // 不再把节点绑定到项目里的同名素材（项目素材本身永远不被改写），
-        // 新图写入资源输出目录，只影响当前 Prefab 的引用。
-        if (options.preferGeneratedResources) {
-            return null;
-        }
         for (const library of localResources) {
             const match = await library.find(name, 'png');
             // Directory order, extension preference and root-before-subfolder
@@ -2459,20 +2452,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         const reviewDocument = document;
         importReviews.invalidate(options.preserveReviews ? { preserveHistory: true } : undefined);
         const reviewRecorder = new ImportReviewRecorder();
-        // 组件同步（单节点 COMPONENT/INSTANCE 链接）勾选「更新资源」时，
-        // 本次导入不再引用项目里的同名素材，改为重新生成图片。
-        const syncRootCandidate = document.sourceNodeId && document.roots.length === 1
-            ? document.roots[0]
-            : undefined;
-        const syncMode = Boolean(syncRootCandidate
-            && (syncRootCandidate.type === 'COMPONENT' || syncRootCandidate.type === 'INSTANCE'));
-        const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(
-            document,
-            decisions,
-            importSettings,
-            reviewRecorder,
-            { preferGeneratedResources: syncMode && importSettings.refreshAssets },
-        ));
+        const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings, reviewRecorder));
         const { assets, warnings } = builtAssets;
         if (controller.signal.aborted) throw new CancelledError();
         const attachReview = async (result: SceneImportResult) => {
@@ -2518,7 +2498,13 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         let rootCursor = 0;
         // 组件级同步：只有单节点链接、且根节点确实是组件（或实例）时启用。
         // Frame 链接保持原有行为，不生成标记、不额外创建项目脚本。
-        const syncContext = syncMode ? { fileKey: document.fileKey } : undefined;
+        const syncRootNode = document.sourceNodeId && document.roots.length === 1
+            ? document.roots[0]
+            : undefined;
+        const syncContext = syncRootNode
+            && (syncRootNode.type === 'COMPONENT' || syncRootNode.type === 'INSTANCE')
+            ? { fileKey: document.fileKey }
+            : undefined;
         const roots = document.roots
             .map((node, index) => {
                 const spec = makeSpec(
