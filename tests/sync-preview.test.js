@@ -129,7 +129,7 @@ test('a change inside a collapsed subtree is reported without touching the node 
     assert.equal(preview.items[0].assetStale, true);
 });
 
-test('a position-only change is reported as 位置 and keeps the existing image', () => {
+test('a position-only change keeps the existing image', () => {
     const PIXEL = 'sha256:' + '9'.repeat(64);
     const previous = readPrefabSyncMarkers(prefabJson([{
         id: '164:4718',
@@ -144,12 +144,12 @@ test('a position-only change is reported as 位置 and keeps the existing image'
         syncMarker: marker({ visualHash: VISUAL_B, subtreeHash: SUBTREE_B, pixelHash: PIXEL }),
     })], { scale: 1 });
     assert.equal(preview.changed, 1);
-    assert.deepEqual(preview.items[0].fields, ['位置']);
+    assert.deepEqual(preview.items[0].fields, ['位置或尺寸']);
     assert.equal(preview.items[0].assetStale, false);
     assert.equal(preview.assetStaleCount, 0);
 });
 
-test('resizing a plain image node only reports 尺寸 and keeps the existing image', () => {
+test('resizing a plain image node keeps the existing image', () => {
     const PIX = 'sha256:' + '4'.repeat(64);
     const previous = readPrefabSyncMarkers(prefabJson([{
         id: '164:4718',
@@ -165,7 +165,7 @@ test('resizing a plain image node only reports 尺寸 and keeps the existing ima
         frame: { x: 0, y: 0, width: 200, height: 100 },
         syncMarker: marker({ visualHash: VISUAL_B, subtreeHash: SUBTREE_A, pixelHash: PIX }),
     })], { scale: 1 });
-    assert.deepEqual(preview.items[0].fields, ['尺寸']);
+    assert.deepEqual(preview.items[0].fields, ['位置或尺寸']);
     assert.equal(preview.items[0].assetStale, false);
     assert.equal(preview.assetStaleCount, 0);
 });
@@ -178,19 +178,21 @@ test('a renamed node does not force a new image', () => {
     assert.equal(preview.items[0].assetStale, false);
 });
 
-test('visibility and size changes are reported separately', () => {
+test('visibility changes are reported, Cocos-side size differences are not', () => {
     const hidden = readPrefabSyncMarkers(prefabJson([
         { id: '164:4718', name: 'img_paiming_tiao1', width: 488, height: 104, active: false },
     ]));
     assert.deepEqual(planSyncPreview(hidden, [spec()], { scale: 1 }).items[0].fields, ['显隐']);
 
+    // Prefab 里是 Cocos 调整后的尺寸（Label 测字、本地素材尺寸），与 Figma 参考框不同，
+    // 不能当成设计变化：没有任何指纹变化时不应上报。
     const smaller = readPrefabSyncMarkers(prefabJson([
         { id: '164:4718', name: 'img_paiming_tiao1', width: 400, height: 104 },
     ]));
     const resized = planSyncPreview(smaller, [spec()], { scale: 1 });
-    assert.deepEqual(resized.items[0].fields, ['尺寸']);
-    assert.deepEqual(resized.items[0].previousWidth, 400);
-    assert.deepEqual(resized.items[0].width, 488);
+    assert.equal(resized.changed, 0);
+    assert.equal(resized.unchanged, 1);
+    assert.deepEqual(resized.items, []);
 });
 
 test('added and removed nodes are both reported', () => {
@@ -217,12 +219,12 @@ test('specs without markers are counted instead of silently ignored', () => {
     assert.equal(preview.added, 0);
 });
 
-test('scale is applied when comparing planned sizes with persisted sizes', () => {
+test('the import scale never turns Cocos-side sizes into design changes', () => {
     const previous = readPrefabSyncMarkers(prefabJson([
         { id: '164:4718', name: 'img_paiming_tiao1', width: 976, height: 208 },
     ]));
     assert.equal(planSyncPreview(previous, [spec()], { scale: 2 }).changed, 0);
-    assert.equal(planSyncPreview(previous, [spec()], { scale: 1 }).changed, 1);
+    assert.equal(planSyncPreview(previous, [spec()], { scale: 1 }).changed, 0);
 });
 
 test('a folded sub-layer change is reported as a structure change', () => {

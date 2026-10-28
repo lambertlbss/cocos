@@ -23,6 +23,14 @@ export interface PrefabSyncMarkerSnapshot {
 
 export type SyncPreviewStatus = 'added' | 'removed' | 'changed' | 'unchanged';
 
+/**
+ * 只比较"设计侧可证明等同"的信息：名称、显隐与三类指纹。
+ *
+ * 刻意不比较 Prefab 里的 UITransform 尺寸：那是 Cocos 侧的最终结果，
+ * Label 会被字体度量与描边扩边（例如 Figma 94×19 → Cocos 95.027×24.066），
+ * 引用本地素材的 Sprite 也会沿用原资源尺寸。拿它和 Figma 参考框比较
+ * 每次都会报"尺寸变化"，但实际导入什么都没改。
+ */
 export interface SyncPreviewItem {
     nodeId: string;
     name: string;
@@ -32,10 +40,6 @@ export interface SyncPreviewItem {
     fields: string[];
     /** 该节点的图片需要重新生成（整层/折叠/矢量）。 */
     assetStale: boolean;
-    width?: number;
-    height?: number;
-    previousWidth?: number;
-    previousHeight?: number;
 }
 
 export interface SyncPreviewSummary {
@@ -204,8 +208,6 @@ export function planSyncPreview(
             missingMarkers += 1;
             continue;
         }
-        const width = Math.round(spec.frame.width * scale * 100) / 100;
-        const height = Math.round(spec.frame.height * scale * 100) / 100;
         const before = previous.get(nodeId);
         if (!before) {
             added += 1;
@@ -215,8 +217,6 @@ export function planSyncPreview(
                 status: 'added',
                 fields: ['新增节点'],
                 assetStale: false,
-                width,
-                height,
             });
             continue;
         }
@@ -226,11 +226,6 @@ export function planSyncPreview(
         }
         if (before.active !== spec.visible) {
             fields.push('显隐');
-        }
-        const sizeChanged = Math.abs(before.width - width) > 0.5
-            || Math.abs(before.height - height) > 0.5;
-        if (sizeChanged) {
-            fields.push('尺寸');
         }
         // 像素指纹（不含页面坐标、含子树）优先；旧标记缺该字段时退回原来的三项比较。
         const pixelComparable = typeof before.pixelHash === 'string'
@@ -247,12 +242,8 @@ export function planSyncPreview(
             fields.push('子层内容');
         }
         if (before.visualHash !== marker.visualHash) {
-            // 像素没变却几何变了：尺寸已单独列出时不再重复，否则就是单纯挪了位置。
-            if (pixelChanged) {
-                fields.push('几何或外观');
-            } else if (!sizeChanged) {
-                fields.push('位置');
-            }
+            // 像素没变但几何变了：纯图片/包装层/九宫节点被拉伸或移动。
+            fields.push(pixelChanged ? '几何或外观' : '位置或尺寸');
         }
         const assetStale = pixelChanged || aliasChanged;
         if (assetStale) {
@@ -267,10 +258,6 @@ export function planSyncPreview(
                 status: 'changed',
                 fields,
                 assetStale,
-                width,
-                height,
-                previousWidth: before.width,
-                previousHeight: before.height,
             });
         } else {
             unchanged += 1;
@@ -289,8 +276,6 @@ export function planSyncPreview(
             status: 'removed',
             fields: ['删除节点'],
             assetStale: false,
-            previousWidth: snapshot.width,
-            previousHeight: snapshot.height,
         });
     }
 

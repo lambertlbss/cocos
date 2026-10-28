@@ -400,11 +400,7 @@ export class PanelWorkflow {
             name.title = item.nodeId;
             const detail = document.createElement('span');
             detail.className = 'sync-change-fields';
-            const sizeChanged = item.fields.includes('尺寸')
-                && item.previousWidth !== undefined && item.width !== undefined;
-            detail.textContent = sizeChanged
-                ? `${item.fields.join(' · ')}（${item.previousWidth}×${item.previousHeight} → ${item.width}×${item.height}）`
-                : item.fields.join(' · ');
+            detail.textContent = item.fields.join(' · ');
             row.append(name, detail);
             if (item.assetStale) {
                 const badge = document.createElement('span');
