@@ -337,6 +337,7 @@ export class PanelWorkflow {
                     : `将更新 ${changes} 处（新增 ${sync.added} · 修改 ${sync.changed} · 删除 ${sync.removed}）${assetNote}`;
             }
         }
+        this.renderSyncChanges(batch ? undefined : sync);
         const advanced = this.host.querySelector('#advanced-summary');
         if (advanced) {
             const folders = [0, 1, 2].filter((index) => this.get<HTMLInputElement>(`#local-resource-folder-${index}`).value.trim()).length;
@@ -367,6 +368,59 @@ export class PanelWorkflow {
             this.get('#result-target').textContent = `assets/${folder}/`;
             this.get('#selection-summary').textContent = `成功 ${result.success} · 失败 ${result.failed} · 未完成 ${result.pending}`;
         }
+    }
+
+    /**
+     * 逐条列出本次将要改动的内容；只展示摘要，不会假装能定位整层子树内部的具体子层。
+     */
+    private renderSyncChanges(sync: SyncPreviewResult | undefined): void {
+        const box = this.host.querySelector<HTMLElement>('#sync-changes');
+        const list = this.host.querySelector<HTMLElement>('#sync-change-list');
+        if (!box || !list) {
+            return;
+        }
+        const items = sync?.exists ? sync.items : [];
+        box.hidden = items.length === 0;
+        if (!items.length) {
+            list.replaceChildren();
+            return;
+        }
+        const count = this.host.querySelector('#sync-changes-count');
+        if (count) {
+            count.textContent = `共 ${sync!.added + sync!.changed + sync!.removed} 处 · `
+                + `${sync!.assetStaleCount} 张图需更新`;
+        }
+        const visible = items.slice(0, 40);
+        const rows = visible.map((item) => {
+            const row = document.createElement('li');
+            row.className = `sync-change-row is-${item.status}`;
+            const name = document.createElement('span');
+            name.className = 'sync-change-name';
+            name.textContent = item.status === 'removed' ? `− ${item.name}` : item.name;
+            name.title = item.nodeId;
+            const detail = document.createElement('span');
+            detail.className = 'sync-change-fields';
+            const sizeChanged = item.fields.includes('尺寸')
+                && item.previousWidth !== undefined && item.width !== undefined;
+            detail.textContent = sizeChanged
+                ? `${item.fields.join(' · ')}（${item.previousWidth}×${item.previousHeight} → ${item.width}×${item.height}）`
+                : item.fields.join(' · ');
+            row.append(name, detail);
+            if (item.assetStale) {
+                const badge = document.createElement('span');
+                badge.className = 'sync-change-asset';
+                badge.textContent = '图片需更新';
+                row.append(badge);
+            }
+            return row;
+        });
+        if (items.length > visible.length) {
+            const more = document.createElement('li');
+            more.className = 'sync-change-row is-more';
+            more.textContent = `另有 ${items.length - visible.length} 处未展开`;
+            rows.push(more);
+        }
+        list.replaceChildren(...rows);
     }
 
     private renderResult(result: WorkflowResult): void {

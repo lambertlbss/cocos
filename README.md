@@ -206,6 +206,23 @@ Cocos Creator 必须已经打开目标项目并启用本扩展，但 Figma Impor
 
 “本地同名资源目录”最多 3 个，按目录顺序递归匹配 Figma 原名的 PNG / JPG / JPEG。项目内命中直接引用原 SpriteFrame 和边距，三/九宫和平铺也适用；外部素材无 Cocos UUID，仍需导入，未命中才从 Figma 下载。目录可单独清空，下载缓存自动维护。
 
+## 组件同步（1.1.0）
+
+顶层是 `COMPONENT` 或 `INSTANCE` 的节点链接会进入组件同步模式：除了生成独立 Prefab，还会给每个建出来的节点挂一个 `FigmaSyncNode` 标记组件。
+
+- 标记脚本由插件生成到项目 `assets/figma-importer-runtime/FigmaSyncNode.ts`，只保存来源与指纹、没有运行逻辑；首次导入自动创建，之后每次校验。
+- 标记字段：`figmaNodeId`（明文节点 id）、`figmaFileHash`（file key 的 SHA-256，不存明文）、`figmaAliasNodeIds`（折叠吸收的子层 id）、`figmaVisualHash`（本节点视觉指纹）、`figmaSubtreeHash`（整棵子树指纹）。
+- **删掉某个节点的标记组件，等于让该节点退出同步**：之后重新导入不会移动、缩放或删除它。
+
+重新导入同源链接时，面板第 3 步显示「更新已有预制体」、目标 `db://` 路径和**将要改动的逐条清单**（新增／修改／删除、名称／显隐／尺寸／几何或外观／折叠结构／子层内容）。检测到图片内容变化时会自动勾选「强制刷新资源」，按文件名覆盖输出目录中的同名图片，SpriteFrame UUID 保持不变。
+
+边界：
+
+- 折叠（`img_*` / `txt_*` / Button 背景提升）和 PNG 整层节点只做**聚合检测**：能报告「该节点内容变了」，不会列出整层子树内部是哪个子层变了；这类改动必须靠「更新资源」重新出图。
+- 指纹检测不到：Auto Layout 元数据、原型交互、评论、Figma 端字体文件替换。
+- 目标路径按「预制体目录 + 根节点名」计算，改组件名会被当成新 Prefab；组件被删除重建导致 `nodeId` 全变时，目前仍会拒绝覆盖同名 Prefab。
+- Frame 链接与整份文件导入完全不受影响，不会生成标记，也不会创建上述脚本。
+
 ## 节点策略
 
 - 生成：转换为 `UITransform`、`Graphics`、`Label`、`Layout`、`Button`、`ScrollView`、`Mask` 等可编辑组件。

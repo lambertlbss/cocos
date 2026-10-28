@@ -2,9 +2,9 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.64`
+> 当前插件版本：`1.1.0`
 > 当前文档状态：持续维护  
-> 最近审计：2026-10-26
+> 最近审计：2026-10-28
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
 
 ## 1. 文档目的
@@ -540,6 +540,7 @@ Frame Prefab 不使用 runtime `nodeMaps`；其节点映射保存在 Prefab Meta
 | `pick-local-resource-folder` | 选择本地同名资源目录 |
 | `fetch-document` | 读取 Figma 文档 |
 | `get-preview` | 获取单节点 PNG 预览 |
+| `sync-preview` | 组件同步预检：只读目标 Prefab 与当前计划，返回改动清单与需重导图片数 |
 | `import-selection` | 启动导入 |
 | `cancel-import` | 取消当前导入 |
 | `progress` | 面板进度回调 |
@@ -1045,6 +1046,18 @@ npm test
 - 添加清理服务/Scene 回归与真实浏览器面板交互脚本 `scripts/verify-import-review-ui.js`（通过 `CHROME_PATH` 可指定 Chrome/Edge）。清理专项测试 `14/14` 通过；构建、Cocos/MCP 分发和浏览器验证通过；完整回归 `289/290`，唯一失败仍为既有冻结文件 Windows CRLF 哈希差异，未修改冻结协议文件。
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-10-28 · `1.1.0` · 组件级双边同步（标记 + 改动预检）
+
+- 新增组件同步标记协议 `importer/sync-marker.ts`：`FigmaSyncNode` 组件保存明文 `figmaNodeId`、file key 的 SHA-256、折叠子层 id、视觉指纹与子树指纹；指纹使用规范 JSON + SHA-256，几何按 `0.0001 px` 量化，与属性顺序无关。视觉指纹覆盖几何、显隐、填充/描边/特效、圆角、圆弧角度、文字样式、图片裁切矩阵与滤镜。
+- 只有单节点链接且根为 `COMPONENT` / `INSTANCE` 的导入才生成标记；Frame 与整份文件导入行为完全不变。首次导入自动创建 `assets/figma-importer-runtime/FigmaSyncNode.ts`，之后每次校验；被其他脚本占用时 fail-closed，内容不一致（且仍是本插件脚本）时按模板重建。
+- Scene 按类名挂载标记并写入字段；标记组件脚本尚未编译完成时整次导入降级为「无标记」并回传警告，不阻断建树。
+- 新增 `sync-preview` 消息与 `importer/sync-preview.ts`：只读目标 Prefab 与当前计划，按字段识别标记（不依赖脚本 UUID），逐节点比对名称、显隐、尺寸、几何或外观、折叠结构、子层内容，并按指纹判定哪些图片需要重新生成。不下载图片、不打开 Prefab、不写文件。
+- 面板第 3 步命中已有 Prefab 时显示「更新已有预制体」、`db://` 目标路径、「将更新 N 处（新增/修改/删除）· M 张图需更新」，并展开逐条清单；检测到图片过期时自动勾选「强制刷新资源」，用户手动取消后不会被覆盖。
+- 修复同步标记被误判为手工组件：`removeStalePrefabNodes` 跳过标记组件，`capturePrefabSync` 把标记纳入受管组件集合。旧 Prefab 的 Meta 写于没有标记的版本，其 `managedComponentFileIds` 不含标记，此前会阻断旧节点删除并停止整次同步。
+- 规则修订：知识库 §2.2「不把 file key、node id 写入项目资源」登记为显式例外——file key 仍只保存哈希，节点 id 明文与 Project Profile 中 `nodeMaps` 的既有明文一致，Token 永不落盘。
+- 边界：折叠与 PNG 整层节点只做聚合检测（不定位整层子树内部的具体子层）；指纹不覆盖 Auto Layout 元数据、原型交互、评论与 Figma 端字体文件替换；改组件名会按新 Prefab 处理，组件重建导致 `nodeId` 全变时仍拒绝覆盖同名 Prefab。
+- 验证：完整 `npm test` 635 项全通过；真实项目 `PopChariotRaceTopItem.prefab` 实测 23 个节点与 23 个标记一一对应，预检对未改动设计返回 `changed 0 / assetStale 0`；设计与分期记录见 `docs/adr/component-sync-v1.md`。
 
 ### 2026-09-09 · 仓库维护（不变更插件版本）
 

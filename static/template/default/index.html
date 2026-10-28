@@ -62,6 +62,7 @@
                 <div class="field font-field"><span>字体映射<span class="optional">（Figma 字体 → 项目字体）</span></span><div id="font-map-list" class="font-map-list"></div><small id="font-hint">读取 Figma 后自动匹配项目字体；可在每行下拉框手动指定。</small></div>
             </div></details>
             <p id="confirmation-summary" class="confirmation-summary">确认节点与输出位置后，即可开始导入。</p>
+            <details id="sync-changes" class="card sync-changes" hidden><summary><span><strong>将要改动的内容</strong><small id="sync-changes-count">与上次导入对比</small></span><span class="details-action"><span class="details-closed">展开</span><span class="details-open">收起</span><span class="details-chevron" aria-hidden="true">⌄</span></span></summary><ul id="sync-change-list" class="sync-change-list"></ul><p class="sync-change-note">名称、显隐、尺寸来自 Prefab 实际值；整层/折叠节点内部改动只报告到所属节点。</p></details>
             <section id="progress-region" class="progress-region" aria-live="polite"><div class="progress-copy"><span id="progress-icon" class="pulse-dot" aria-hidden="true"></span><span id="progress-label">准备就绪</span><span id="progress-percent">0%</span></div><div class="progress-track"><span id="progress-bar"></span></div></section>
         </section>
 

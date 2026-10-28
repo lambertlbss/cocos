@@ -523,3 +523,20 @@ button.review-tree-cell { cursor: pointer; }
     .review-footer-actions { justify-content: flex-end; }
     .review-tabs { gap: 4px; }
 }
+
+/* ---- 组件同步：将要改动的内容 ---- */
+.sync-changes { margin: 10px 0 12px; }
+.sync-changes summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
+.sync-changes summary::-webkit-details-marker { display: none; }
+.sync-changes summary strong { font-size: 13px; }
+.sync-changes summary small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+.sync-change-list { list-style: none; margin: 10px 0 0; padding: 0; max-height: 220px; overflow: auto; border-top: 1px solid var(--border); }
+.sync-change-row { display: flex; align-items: baseline; gap: 8px; padding: 6px 2px; border-bottom: 1px solid var(--border-soft); font-size: 12px; }
+.sync-change-row.is-added { border-left: 3px solid var(--accent); padding-left: 6px; }
+.sync-change-row.is-removed { border-left: 3px solid var(--danger); padding-left: 6px; }
+.sync-change-row.is-changed { border-left: 3px solid var(--amber); padding-left: 6px; }
+.sync-change-row.is-more { color: var(--muted); font-size: 11px; justify-content: center; }
+.sync-change-name { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-change-fields { flex: none; color: var(--muted); font-size: 11px; }
+.sync-change-asset { flex: none; color: var(--amber); font-size: 11px; }
+.sync-change-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
