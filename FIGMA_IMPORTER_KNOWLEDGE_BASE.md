@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.1.1`
+> 当前插件版本：`1.1.2`
 > 当前文档状态：持续维护  
 > 最近审计：2026-10-28
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -455,6 +455,8 @@ Frame 链接的 Prefab 流程是当前最重要的特殊路径：
 **逐条勾选**：未勾选的节点按 `ignore` 处理，连同子层一起跳过，不创建、不更新、不删除；标记不重写，旧指纹保留，下次导入仍会列出。`retainPrefabSyncEntries` 把节点 fileId 合并回新记录，`collectPrefabComponentFileIds`（从保存后的 Prefab 读取，节点用 `_prefab`、组件用 `__prefab`）把组件 fileId 一并保留，保证重新勾选时原地更新而不是新建副本；`retainNodeFileIds` 让 Scene 的陈旧清理保留这些节点。
 
 已知边界：折叠/整层节点只做聚合检测；整体缩放顶层组件会被判为子层几何变化并可能重导；没有 `figmaPixelHash` 的旧标记退回子树比较，首次导入后补齐；改组件名按新 Prefab 处理，组件重建导致 `nodeId` 全变时仍拒绝覆盖同名 Prefab。
+
+**同名接管暂不实现（2026-10-28 决定）**：该场景可手工绕过——关闭并删除目标 `.prefab`（连同 `.meta`）后重新导入即可重建来源记录。代价是该 Prefab 被其他场景/Prefab 引用时会断引用、手工添加的节点与脚本会丢失；若组件 Prefab 已被大量引用且经常在设计端重建，再按 `docs/adr/component-sync-v1.md` 的接管思路实现。
 
 ## 7. Cocos 组件映射
 
@@ -1067,6 +1069,13 @@ npm test
 - 添加清理服务/Scene 回归与真实浏览器面板交互脚本 `scripts/verify-import-review-ui.js`（通过 `CHROME_PATH` 可指定 Chrome/Edge）。清理专项测试 `14/14` 通过；构建、Cocos/MCP 分发和浏览器验证通过；完整回归 `289/290`，唯一失败仍为既有冻结文件 Windows CRLF 哈希差异，未修改冻结协议文件。
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-10-28 · `1.1.2` · MCP 暴露组件同步预检
+
+- MCP 新增只读工具 `figma_importer_get_sync_preview`：调用同一个 `sync-preview` 实现，返回目标 Prefab、是否存在、新增/修改/删除数量、需重导图片数与逐条清单；要求有效的 `documentSessionId`，不下载图片、不打开 Prefab、不写文件。
+- 主进程 host 绑定 `syncPreview`，MCP Bridge 方法白名单同步增加 `syncPreview`；工具总数 9 → 10，调用顺序建议在 `figma_importer_get_preview` 之后、`figma_importer_import` 之前。
+- 同名接管登记为暂缓事项，并记录手工删除旧 Prefab 的绕过方式与代价。
+- 验证：完整 `npm test` 659 项全通过（新增 sync-preview 的 MCP 用例：无会话/失效会话被拒绝、返回清单结构）；Cocos 与 MCP 分发检查通过。
 
 ### 2026-10-28 · `1.1.1` · 定向重导、改动清单勾选与误报修复
 

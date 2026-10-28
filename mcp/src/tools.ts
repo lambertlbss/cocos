@@ -11,6 +11,8 @@ import {
     FetchDocumentOutputSchema,
     GetPreviewInputSchema,
     GetPreviewOutputSchema,
+    GetSyncPreviewInputSchema,
+    GetSyncPreviewOutputSchema,
     GetStatusInputSchema,
     GetStatusOutputSchema,
     ImportDocumentInputSchema,
@@ -30,6 +32,7 @@ export const FIGMA_IMPORTER_TOOL_NAMES = [
     'figma_importer_fetch_document',
     'figma_importer_list_nodes',
     'figma_importer_get_preview',
+    'figma_importer_get_sync_preview',
     'figma_importer_update_settings',
     'figma_importer_update_nodes',
     'figma_importer_rename_nodes',
@@ -46,6 +49,7 @@ export interface FigmaImporterToolHandlers {
     figma_importer_fetch_document: Handler<z.infer<typeof FetchDocumentInputSchema>>;
     figma_importer_list_nodes: Handler<z.infer<typeof ListNodesInputSchema>>;
     figma_importer_get_preview: Handler<z.infer<typeof GetPreviewInputSchema>>;
+    figma_importer_get_sync_preview: Handler<z.infer<typeof GetSyncPreviewInputSchema>>;
     figma_importer_update_settings: Handler<z.infer<typeof UpdateSettingsInputSchema>>;
     figma_importer_update_nodes: Handler<z.infer<typeof UpdateNodesInputSchema>>;
     figma_importer_rename_nodes: Handler<z.infer<typeof RenameNodesInputSchema>>;
@@ -73,6 +77,7 @@ export function createFigmaImporterToolHandlers(bridge: BridgeInvoker): FigmaImp
         figma_importer_fetch_document: (input, extra) => invokeBridgeTool(bridge, 'fetchDocument', input, FetchDocumentOutputSchema, extra?.signal),
         figma_importer_list_nodes: (input, extra) => invokeBridgeTool(bridge, 'listNodes', input, ListNodesOutputSchema, extra?.signal),
         figma_importer_get_preview: (input, extra) => invokeBridgeTool(bridge, 'getPreview', input, GetPreviewOutputSchema, extra?.signal),
+        figma_importer_get_sync_preview: (input, extra) => invokeBridgeTool(bridge, 'syncPreview', input, GetSyncPreviewOutputSchema, extra?.signal),
         figma_importer_update_settings: (input, extra) => invokeBridgeTool(bridge, 'updateSettings', input, UpdateSettingsOutputSchema, extra?.signal),
         figma_importer_update_nodes: (input, extra) => invokeBridgeTool(bridge, 'updateNodes', input, UpdateNodesOutputSchema, extra?.signal),
         figma_importer_rename_nodes: (input, extra) => invokeBridgeTool(bridge, 'renameNodes', input, RenameNodesOutputSchema, extra?.signal),
@@ -145,6 +150,14 @@ export function registerFigmaImporterTools(server: McpServer, bridge: BridgeInvo
         outputSchema: GetPreviewOutputSchema,
         annotations: READ_ONLY_FIXED_FIGMA_API,
     }, handlers.figma_importer_get_preview);
+
+    server.registerTool('figma_importer_get_sync_preview', {
+        title: 'Get Component Sync Preview',
+        description: '只读比较目标 Prefab 与当前 Figma 计划，返回将要新增、修改、删除的节点清单以及需要重新生成图片的数量；不下载图片、不打开 Prefab、不写文件。',
+        inputSchema: GetSyncPreviewInputSchema,
+        outputSchema: GetSyncPreviewOutputSchema,
+        annotations: READ_ONLY_LOCAL,
+    }, handlers.figma_importer_get_sync_preview);
 
     server.registerTool('figma_importer_update_settings', {
         title: 'Update Import Settings',

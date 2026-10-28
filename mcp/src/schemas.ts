@@ -225,6 +225,34 @@ export const GetPreviewOutputSchema = z.object({
     url: z.string().url(),
 });
 
+export const GetSyncPreviewInputSchema = z.object({
+    documentSessionId: z.string().min(1).max(256),
+});
+
+const SyncPreviewItemSchema = z.object({
+    nodeId: z.string(),
+    name: z.string(),
+    previousName: z.string().optional(),
+    status: z.enum(['added', 'removed', 'changed', 'unchanged']),
+    fields: z.array(z.string()),
+    assetStale: z.boolean(),
+});
+
+export const GetSyncPreviewOutputSchema = z.object({
+    targetUrl: z.string(),
+    exists: z.boolean(),
+    prefabUuid: z.string().optional(),
+    total: z.number().int().nonnegative(),
+    added: z.number().int().nonnegative(),
+    removed: z.number().int().nonnegative(),
+    changed: z.number().int().nonnegative(),
+    unchanged: z.number().int().nonnegative(),
+    assetStaleCount: z.number().int().nonnegative(),
+    missingMarkers: z.number().int().nonnegative(),
+    items: z.array(SyncPreviewItemSchema),
+    changedTotal: z.number().int().optional(),
+});
+
 export const UpdateSettingsOutputSchema = PublicSettingsSchema;
 
 const ImportOverrideOutputSchema = z.object({

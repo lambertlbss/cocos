@@ -7,6 +7,7 @@ export const MCP_BRIDGE_METHODS = [
     'fetchDocument',
     'listNodes',
     'getPreview',
+    'syncPreview',
     'updateSettings',
     'updateNodes',
     'renameNodes',

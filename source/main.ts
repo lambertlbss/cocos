@@ -3275,6 +3275,7 @@ async function startMcpBridge(): Promise<void> {
         getState: getMcpPluginState,
         fetchDocument: fetchFigmaDocument,
         getPreview: getNodePreview,
+        syncPreview: () => previewComponentSync(),
         saveSettings,
         patchSettings,
         saveNodeOverrides,

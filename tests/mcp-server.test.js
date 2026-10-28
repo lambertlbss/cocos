@@ -35,6 +35,7 @@ test('bundled stdio server initializes, lists the allowlisted tools, and returns
             'figma_importer_fetch_document',
             'figma_importer_list_nodes',
             'figma_importer_get_preview',
+            'figma_importer_get_sync_preview',
             'figma_importer_update_settings',
             'figma_importer_update_nodes',
             'figma_importer_rename_nodes',

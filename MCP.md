@@ -59,7 +59,7 @@ args = [
 
 ## MCP 工具列表与用途
 
-所有工具成功时都会同时返回可供 AI 阅读的 JSON 文本和 `structuredContent` 结构化数据。当前固定开放以下 9 个工具：
+所有工具成功时都会同时返回可供 AI 阅读的 JSON 文本和 `structuredContent` 结构化数据。当前固定开放以下 10 个工具：
 
 | 工具 | 用途 | 关键输入 | 主要返回 | 读写属性 |
 |---|---|---|---|---|
@@ -67,6 +67,7 @@ args = [
 | `figma_importer_fetch_document` | 让 Cocos 插件读取一个 Figma 文件或 Frame，并创建后续工具必须使用的文档会话 | `sourceUrl`：有效的 `figma.com` 链接 | `documentSessionId`、文件名、节点数、字体、根节点摘要 | 访问 Figma；仅更新最近链接，不创建 Cocos 资源 |
 | `figma_importer_list_nodes` | 分页查询节点，并查看 Figma 原名、最终 Cocos 名、有效 action/kind、九宫状态、折叠、抑制和警告 | `documentSessionId`；可选 `rootNodeId`、`search`、过滤项、`depth`、`limit`、`cursor` | `nodes`、`totalCount`、`hasMore`、`nextCursor` | 本地只读 |
 | `figma_importer_get_preview` | 获取一个节点的临时 Figma PNG 预览 URL，供 AI 或用户核对视觉结果 | `documentSessionId`、`nodeId` | `url` | 只读访问 Figma |
+| `figma_importer_get_sync_preview` | 只读比较目标 Prefab 与当前 Figma 计划，返回将要新增/修改/删除的节点清单与需重新生成的图片数 | `documentSessionId` | `targetUrl`、`exists`、`added/changed/removed`、`assetStaleCount`、`items[]` | 本地只读，不下载图片、不写文件 |
 | `figma_importer_update_settings` | 更新本次导入使用的输出目录、倍率、更新策略、刷新、自动保存和字体映射；不会立即导入 | `documentSessionId`、`settings` 部分字段 | 合并后的安全公开设置 | 写 Cocos 项目 Profile，可重复调用 |
 | `figma_importer_update_nodes` | 批量修改节点导入策略，也可同时修改名称 | `documentSessionId`、`updates[]`；每项包含 `nodeId` 及 action/kind/nineSlice/name 中至少一项 | 最终持久化的 `updated` 节点覆盖 | 写 Cocos 项目 Profile，可重复调用 |
 | `figma_importer_rename_nodes` | 只批量修改导入后的 Cocos 节点名，保留 action、kind、nineSlice 和 explicit；`name:null` 可恢复原名 | `documentSessionId`、`renames[]`、可选 `allowRootRename` | Figma/Cocos 名称、是否重置及风险提示 | 写 Cocos 项目 Profile，可重复调用 |
@@ -120,7 +121,7 @@ args = [
 1. `figma_importer_get_status`
 2. `figma_importer_fetch_document`
 3. `figma_importer_list_nodes`（必要时多页查询）
-4. `figma_importer_get_preview`（可选）
+4. `figma_importer_get_preview` / `figma_importer_get_sync_preview`（可选；后者用于先向用户说明“将更新哪些节点、几张图需要重导”）
 5. `figma_importer_rename_nodes` / `figma_importer_update_nodes` / `figma_importer_update_settings`（可选）
 6. 再次查询并向用户说明目标 Prefab/场景和警告
 7. 生成一个至少 8 字符的唯一 `operationId`，调用 `figma_importer_import` 并显式传入 `confirm=true`

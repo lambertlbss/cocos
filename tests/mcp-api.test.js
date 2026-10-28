@@ -141,6 +141,24 @@ function createHostFixture() {
         async getPreview(nodeId) {
             return { url: `https://example.test/${nodeId}.png` };
         },
+        async syncPreview() {
+            return {
+                targetUrl: 'db://assets/figma-importer/prefabs/Component.prefab',
+                exists: true,
+                prefabUuid: 'prefab-uuid',
+                total: 3,
+                added: 1,
+                removed: 0,
+                changed: 1,
+                unchanged: 1,
+                assetStaleCount: 1,
+                missingMarkers: 0,
+                items: [
+                    { nodeId: '1:2', name: 'Title', status: 'added', fields: ['新增节点'], assetStale: false },
+                    { nodeId: '1:3', name: 'Icon', status: 'changed', fields: ['几何或外观'], assetStale: true },
+                ],
+            };
+        },
         async saveSettings(value) {
             settings = value;
             return settings;
@@ -212,6 +230,25 @@ async function rejectsWithCode(operation, code) {
         return true;
     });
 }
+
+test('sync preview requires a live document session and returns the change list', async () => {
+    const fixture = createHostFixture();
+    await assert.rejects(
+        fixture.api.invoke('syncPreview', {}),
+        (error) => error.code === 'INVALID_ARGUMENT' || /documentSessionId/.test(error.message),
+    );
+    const sessionId = await fetchSession(fixture.api);
+    await assert.rejects(
+        fixture.api.invoke('syncPreview', { documentSessionId: 'stale-session' }),
+        /STALE_DOCUMENT_SESSION|文档会话已失效/,
+    );
+    const preview = await fixture.api.invoke('syncPreview', { documentSessionId: sessionId });
+    assert.equal(preview.exists, true);
+    assert.equal(preview.targetUrl, 'db://assets/figma-importer/prefabs/Component.prefab');
+    assert.equal(preview.assetStaleCount, 1);
+    assert.equal(preview.items.length, 2);
+    assert.deepEqual(preview.items.map((item) => item.status), ['added', 'changed']);
+});
 
 test('document sessions bind stable pagination cursors and invalidate old sessions', async () => {
     const { api } = createHostFixture();

@@ -47,6 +47,7 @@ export interface McpApiHost {
     getState(): Promise<PluginStateDto>;
     fetchDocument(sourceUrl: string): Promise<PluginDocumentDto>;
     getPreview(nodeId: string): Promise<{ url: string }>;
+    syncPreview(): Promise<unknown>;
     saveSettings(value: unknown): Promise<ImportSettings>;
     patchSettings?(value: Partial<ImportSettings>): Promise<ImportSettings>;
     saveNodeOverrides(fileKey: unknown, overrides: unknown, scopeIds: unknown): Promise<ImportOverride[]>;
@@ -304,6 +305,7 @@ export class FigmaImporterMcpApi {
             case 'fetchDocument': return this.fetchDocument(params);
             case 'listNodes': return this.listNodes(params);
             case 'getPreview': return this.getPreview(params);
+            case 'syncPreview': return this.syncPreview(params);
             case 'updateSettings': return this.updateSettings(params);
             case 'updateNodes': return this.updateNodes(params);
             case 'renameNodes': return this.renameNodes(params);
@@ -394,6 +396,11 @@ export class FigmaImporterMcpApi {
             throw new McpBridgeError('STALE_DOCUMENT_SESSION', '当前插件文档已变化，请重新读取 Figma 链接。');
         }
         return { session, document, state };
+    }
+
+    private async syncPreview(params: unknown): Promise<unknown> {
+        await this.currentDocument(record(params));
+        return this.host.syncPreview();
     }
 
     private async listNodes(params: unknown): Promise<unknown> {
