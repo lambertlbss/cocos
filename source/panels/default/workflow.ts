@@ -1,5 +1,6 @@
 import { parseFigmaSource } from '../../figma/url';
 import type { ImportReview } from '../../import-review-model';
+import type { SyncPreviewResult } from '../../importer/sync-preview';
 import type { ImportAction, ImportSettings, ProgressEvent, TreeNodeDto } from '../../types';
 
 export type WorkflowStep = 1 | 2 | 3 | 4;
@@ -11,6 +12,8 @@ interface WorkflowContext {
     runtimeCompatible: boolean;
     settings: ImportSettings;
     batch?: BatchWorkflowContext;
+    /** 组件同步预检结果；只在单节点组件链接下存在。 */
+    syncPreview?: SyncPreviewResult;
 }
 export interface BatchWorkflowContext {
     count: number;
@@ -39,6 +42,7 @@ export class PanelWorkflow {
     private error = '';
     private result: WorkflowResult | null = null;
     private reviewAvailable = false;
+    private autoRefreshApplied = false;
     private operationControls: Array<{ control: HTMLInputElement | HTMLSelectElement | HTMLButtonElement; disabled: boolean }> = [];
 
     constructor(
@@ -132,6 +136,7 @@ export class PanelWorkflow {
         this.result = null;
         this.error = '';
         this.step = 2;
+        this.autoRefreshApplied = false;
         this.render();
     }
 
@@ -140,6 +145,19 @@ export class PanelWorkflow {
         this.result = null;
         this.error = '';
         this.step = 1;
+        this.render();
+    }
+
+    /**
+     * 组件同步预检结果到达后刷新第 3 步文案。
+     * 只有检测到图片过期时才自动勾选"更新资源"，用户手动取消后不会被再次覆盖。
+     */
+    syncPreviewUpdated(): void {
+        const sync = this.context().syncPreview;
+        if (sync?.exists && sync.assetStaleCount > 0 && !this.autoRefreshApplied) {
+            this.autoRefreshApplied = true;
+            this.get<HTMLInputElement>('#refresh-assets').checked = true;
+        }
         this.render();
     }
 
@@ -305,6 +323,20 @@ export class PanelWorkflow {
         }
         const confirmation = this.host.querySelector('#confirmation-summary');
         if (confirmation) confirmation.textContent = `${batch ? `${batch.count} 个界面 · ` : ''}${this.selectedCount()} 个节点 · ${this.get<HTMLInputElement>('#scale').value}× · 项目目录与字体设置已保留`;
+        const sync = this.context().syncPreview;
+        if (!batch && prefab && sync?.exists) {
+            this.get('#confirmation-target').textContent = '更新已有预制体';
+            this.get('#confirmation-path').textContent = sync.targetUrl;
+            const changes = sync.added + sync.changed + sync.removed;
+            const assetNote = sync.assetStaleCount
+                ? ` · ${sync.assetStaleCount} 张图需更新`
+                : ' · 图片均未变化';
+            if (confirmation) {
+                confirmation.textContent = changes === 0
+                    ? `与上次导入一致 · ${sync.total} 个节点${assetNote}`
+                    : `将更新 ${changes} 处（新增 ${sync.added} · 修改 ${sync.changed} · 删除 ${sync.removed}）${assetNote}`;
+            }
+        }
         const advanced = this.host.querySelector('#advanced-summary');
         if (advanced) {
             const folders = [0, 1, 2].filter((index) => this.get<HTMLInputElement>(`#local-resource-folder-${index}`).value.trim()).length;

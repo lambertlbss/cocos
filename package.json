@@ -68,6 +68,7 @@
       "get-import-review-preview": { "methods": ["getImportReviewPreview"] },
       "get-import-review-source-preview": { "methods": ["getImportReviewSourcePreview"] },
       "apply-import-review": { "methods": ["applyImportReview"] },
+      "sync-preview": { "methods": ["syncPreview"] },
       "open-panel": {
         "methods": [
           "openPanel"

@@ -5,6 +5,7 @@ import { ImportReviewPanel } from './import-review';
 import { PanelWorkflow, type BatchWorkflowContext, type WorkflowResult } from './workflow';
 import type { BatchFrameItem, BatchImportItemResult, BatchImportResult, BatchProgress, BatchSourceResult, BatchState } from '../../batch-types';
 import { sanitizeAssetName } from '../../importer/assets';
+import type { SyncPreviewResult } from '../../importer/sync-preview';
 import type { ImportReview } from '../../import-review-model';
 import { findFontAsset, type FontAssetOption } from '../../importer/fonts';
 import { normalizeImportAction } from '../../import-actions';
@@ -86,6 +87,8 @@ interface PanelState {
     busy: boolean;
     runtimeCompatible: boolean;
     fontAssets: FontAssetOption[];
+    /** 组件同步预检；单节点组件链接才存在。 */
+    syncPreview?: SyncPreviewResult;
 }
 
 let panelHost: any = null;
@@ -480,6 +483,24 @@ async function request<T>(message: string, ...args: unknown[]): Promise<T> {
     return await Editor.Message.request(packageJSON.name, message, ...args) as T;
 }
 
+/**
+ * 组件同步预检。失败是正常情况（Frame 链接、文件链接、Prefab 尚不存在），
+ * 静默清空即可，不影响导入本身。
+ */
+async function refreshSyncPreview(): Promise<void> {
+    if (!state.document) {
+        state.syncPreview = undefined;
+        workflow?.syncPreviewUpdated();
+        return;
+    }
+    try {
+        state.syncPreview = await request<SyncPreviewResult>('sync-preview');
+    } catch {
+        state.syncPreview = undefined;
+    }
+    workflow?.syncPreviewUpdated();
+}
+
 function showToast(message: string, error = false): void {
     const toast = element<HTMLDivElement>('#toast');
     toast.textContent = message;
@@ -661,6 +682,7 @@ function initializeDocument(document: DocumentDto, navigate = true): void {
     renderTree(true);
     updateSummary();
     if (navigate) workflow?.documentReady();
+    void refreshSyncPreview();
 }
 
 function applySettings(settings: ImportSettings): void {
@@ -1357,6 +1379,8 @@ async function importToScene(): Promise<void> {
         workflow?.end();
         setBusy(false);
         updateSummary();
+        // 导入后 Prefab 已经存在，刷新一次预检，下一次点开第 3 步就能看到差异。
+        void refreshSyncPreview();
     }
 }
 

@@ -40,6 +40,12 @@ import {
 } from './importer/sync-marker';
 import { planSyncMarkerScript } from './importer/sync-marker-asset';
 import {
+    emptySyncPreviewSummary,
+    planSyncPreview,
+    readPrefabSyncMarkers,
+    type SyncPreviewResult,
+} from './importer/sync-preview';
+import {
     AssetWriter,
     RASTER_IMAGE_EXTENSIONS,
     detectImageExtension,
@@ -2378,6 +2384,57 @@ async function importLinkedFramePrefab(args: {
     }
 }
 
+/**
+ * 组件同步预检：只读目标 Prefab 与当前 Figma 计划。
+ * 不下载图片、不打开 Prefab、不写入任何文件，可在用户点击导入前反复调用。
+ */
+async function previewComponentSync(): Promise<SyncPreviewResult> {
+    const document = activeDocument;
+    if (!document) {
+        throw new Error('请先读取 Figma 文件。');
+    }
+    if (!document.sourceNodeId || document.roots.length !== 1) {
+        throw new Error('只有单个节点链接才能预览组件同步。');
+    }
+    const root = document.roots[0];
+    if (root.type !== 'COMPONENT' && root.type !== 'INSTANCE') {
+        throw new Error(`当前根节点是 ${root.type}，只有组件（COMPONENT/INSTANCE）链接支持组件同步。`);
+    }
+    const settings = await getSettings();
+    // AssetWriter 构造函数只规范化目录，不会创建文件夹。
+    const writer = new AssetWriter(settings.prefabFolder);
+    const prefabUrl = `db://assets/${writer.folder}/${sanitizeAssetName(root.name)}.prefab`;
+    const info = await queryPrefabAsset(prefabUrl);
+    if (!info) {
+        return { targetUrl: prefabUrl, exists: false, ...emptySyncPreviewSummary() };
+    }
+    const previous = readPrefabSyncMarkers(await readFile(prefabDiskPath(prefabUrl)));
+    const overrides = await nodeOverridesFor(document.fileKey);
+    const decisions = decisionMap(overrides, document.tree);
+    const plans = compileImportPlan(document.roots, decisions);
+    const rootFrame = nodeFrame(root);
+    const specs = document.roots
+        .map((node) => makeSpec(
+            node,
+            rootFrame,
+            decisions,
+            plans,
+            document.nodeById,
+            new Map(),
+            new Map(),
+            true,
+            0,
+            { fileKey: document.fileKey },
+        ))
+        .filter((spec): spec is SceneNodeSpec => spec !== null);
+    return {
+        targetUrl: prefabUrl,
+        exists: true,
+        prefabUuid: info.uuid,
+        ...planSyncPreview(previous, specs, { scale: settings.scale }),
+    };
+}
+
 async function performImport(request: ImportRequest, operationOwner: string | null = null, options: {
     document?: DocumentSession; preserveReviews?: boolean; silentReview?: boolean;
 } = {}): Promise<SceneImportResult> {
@@ -2992,6 +3049,10 @@ export const methods: Record<string, (...args: any[]) => any> = {
 
     async getPreview(nodeId: string) {
         return getNodePreview(nodeId);
+    },
+
+    async syncPreview() {
+        return previewComponentSync();
     },
 
     async roundtripDetect(sourceUrl: string, explicitRootId?: string) {
