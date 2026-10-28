@@ -16,6 +16,8 @@ export interface PrefabSyncMarkerSnapshot {
     aliasNodeIds: string[];
     aliasHash: string;
     visualHash: string;
+    /** 像素指纹（不含页面坐标，含子树）；旧版标记没有该字段。 */
+    pixelHash?: string;
     subtreeHash: string;
 }
 
@@ -138,6 +140,9 @@ export function readPrefabSyncMarkers(
                 : [],
             aliasHash: typeof item.figmaAliasHash === 'string' ? item.figmaAliasHash : '',
             visualHash,
+            pixelHash: typeof item.figmaPixelHash === 'string' && item.figmaPixelHash
+                ? item.figmaPixelHash
+                : undefined,
             subtreeHash: typeof item.figmaSubtreeHash === 'string' ? item.figmaSubtreeHash : '',
         });
     }
@@ -225,19 +230,25 @@ export function planSyncPreview(
         if (Math.abs(before.width - width) > 0.5 || Math.abs(before.height - height) > 0.5) {
             fields.push('尺寸');
         }
-        if (before.visualHash !== marker.visualHash) {
-            fields.push('几何或外观');
-        }
-        if (before.aliasHash !== marker.aliasHash
-            || before.aliasNodeIds.join(',') !== marker.aliasNodeIds.join(',')) {
+        // 像素指纹（不含页面坐标、含子树）优先；旧标记缺该字段时退回原来的三项比较。
+        const pixelComparable = typeof before.pixelHash === 'string'
+            && typeof marker.pixelHash === 'string';
+        const pixelChanged = pixelComparable
+            ? before.pixelHash !== marker.pixelHash
+            : before.subtreeHash !== marker.subtreeHash || before.visualHash !== marker.visualHash;
+        const aliasChanged = before.aliasHash !== marker.aliasHash
+            || before.aliasNodeIds.join(',') !== marker.aliasNodeIds.join(',');
+        if (aliasChanged) {
             fields.push('折叠结构');
-        } else if (before.subtreeHash !== marker.subtreeHash) {
-            // 子树变了但本节点自身没变：整层/折叠节点内部有改动。
+        } else if (before.subtreeHash !== marker.subtreeHash && (pixelChanged || !pixelComparable)) {
+            // 子树变了且像素确实受影响：整层/折叠节点内部有改动。
             fields.push('子层内容');
         }
-        const assetStale = before.visualHash !== marker.visualHash
-            || before.subtreeHash !== marker.subtreeHash
-            || before.aliasHash !== marker.aliasHash;
+        if (before.visualHash !== marker.visualHash) {
+            // 像素没变却几何变了，说明只是整体挪了位置。
+            fields.push(pixelChanged ? '几何或外观' : '位置');
+        }
+        const assetStale = pixelChanged || aliasChanged;
         if (assetStale) {
             assetStaleCount += 1;
         }

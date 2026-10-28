@@ -808,6 +808,7 @@ export async function buildAssets(
     decisions: Map<string, Decision>,
     importSettings: ImportSettings,
     review: ImportReviewRecorder,
+    options: { regenerateNodeIds?: ReadonlySet<string> } = {},
 ): Promise<AssetBuildResult> {
     const hidden = hiddenLayerIds(session.roots, importSettings.importHiddenLayers !== false);
     const applyVisibility = (node: FigmaNode): void => {
@@ -866,7 +867,12 @@ export async function buildAssets(
         }
         return null;
     };
-    const findLocal = async (name: string, includeOutput = true) => {
+    const findLocal = async (name: string, includeOutput = true, nodeId?: string) => {
+        // 组件同步：只有像素指纹判定为"图片已变化"的节点才跳过本地素材复用；
+        // 没变化的节点继续引用项目里的同名素材，不生成重复图片。
+        if (nodeId && options.regenerateNodeIds?.has(nodeId)) {
+            return null;
+        }
         for (const library of localResources) {
             const match = await library.find(name, 'png');
             // Directory order, extension preference and root-before-subfolder
@@ -935,7 +941,7 @@ export async function buildAssets(
             // A local parent resource cannot represent independently inactive
             // descendants. Keep the hierarchy whenever such a boundary exists.
             && !hasHiddenDescendant(node)) {
-            const localMatch = await findLocal(node.name, false);
+            const localMatch = await findLocal(node.name, false, node.id);
             if (localMatch) {
                 decisions.set(node.id, { ...decision, action: 'render', nineSlice: false });
                 return;
@@ -1062,7 +1068,7 @@ export async function buildAssets(
             const nameKey = resourceKey(group.node);
             let local = namedLocalTiles.get(nameKey);
             if (!local) {
-                const match = await findLocal(group.node.name, false);
+                const match = await findLocal(group.node.name, false, group.node.id);
                 const localUrl = match ? assetDatabaseUrl(match.path) : null;
                 const asset = localUrl ? await writer.existing(localUrl) : null;
                 if (localUrl && !asset) throw new Error(`同名本地资源尚无可用 SpriteFrame，请先在 Cocos 中完成资源导入后重试，不会另建副本：${localUrl}`);
@@ -1272,7 +1278,7 @@ export async function buildAssets(
                 reuseAsset(shared, 'existing');
                 continue;
             }
-            const localMatch = analyzeMaskTint(node) && !sliceAnalysis ? null : await findLocal(node.name, false);
+            const localMatch = analyzeMaskTint(node) && !sliceAnalysis ? null : await findLocal(node.name, false, node.id);
             // An explicitly designated local SpriteFrame owns its pixels and
             // insets. Reuse it read-only, even when Figma defines a slice or
             // refresh is requested; source insets cannot be applied to an
@@ -1439,7 +1445,7 @@ export async function buildAssets(
                 continue;
             }
             const { leaf } = imageDetails(group.node);
-            const match = await findLocal(group.node.name, false);
+            const match = await findLocal(group.node.name, false, group.node.id);
             const localUrl = match ? assetDatabaseUrl(match.path) : null;
             if (localUrl) {
                 const localAsset = await writer.existing(localUrl);
@@ -1527,7 +1533,7 @@ export async function buildAssets(
             completeAsset(node, shared, 'existing');
             continue;
         }
-        const named = await findLocal(node.name, false);
+        const named = await findLocal(node.name, false, node.id);
         const namedUrl = named ? assetDatabaseUrl(named.path) : null;
         if (namedUrl) {
             const existing = await writer.existing(namedUrl);
@@ -2452,7 +2458,52 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         const reviewDocument = document;
         importReviews.invalidate(options.preserveReviews ? { preserveHistory: true } : undefined);
         const reviewRecorder = new ImportReviewRecorder();
-        const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings, reviewRecorder));
+        // 组件同步（单节点 COMPONENT/INSTANCE 链接）：先用像素指纹算出哪些节点的
+        // 图片内容确实变了，只有这些节点在资源准备阶段跳过本地同名素材复用。
+        const syncRootCandidate = document.sourceNodeId && document.roots.length === 1
+            ? document.roots[0]
+            : undefined;
+        const syncMode = Boolean(syncRootCandidate
+            && (syncRootCandidate.type === 'COMPONENT' || syncRootCandidate.type === 'INSTANCE'));
+        let regenerateNodeIds: ReadonlySet<string> | undefined;
+        if (syncMode && importSettings.refreshAssets) {
+            try {
+                const prefabWriter = new AssetWriter(importSettings.prefabFolder);
+                const prefabUrl = `db://assets/${prefabWriter.folder}/`
+                    + `${sanitizeAssetName(document.roots[0].name)}.prefab`;
+                if (await queryPrefabAsset(prefabUrl)) {
+                    const previous = readPrefabSyncMarkers(await readFile(prefabDiskPath(prefabUrl)));
+                    if (previous.size) {
+                        const stale = new Set<string>();
+                        const visit = (node: FigmaNode) => {
+                            const before = previous.get(node.id.replace(/-/g, ':'));
+                            const fresh = createSyncMarker({ fileKey: document.fileKey, node });
+                            const pixelComparable = typeof before?.pixelHash === 'string'
+                                && typeof fresh.pixelHash === 'string';
+                            const changed = before
+                                ? pixelComparable
+                                    ? before.pixelHash !== fresh.pixelHash
+                                    : before.subtreeHash !== fresh.subtreeHash
+                                : true;
+                            if (changed) stale.add(node.id);
+                            node.children.forEach(visit);
+                        };
+                        document.roots.forEach(visit);
+                        regenerateNodeIds = stale;
+                    }
+                }
+            } catch {
+                // 预检失败不阻断导入：退回"所有节点都按现有规则处理"。
+                regenerateNodeIds = undefined;
+            }
+        }
+        const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(
+            document,
+            decisions,
+            importSettings,
+            reviewRecorder,
+            { regenerateNodeIds },
+        ));
         const { assets, warnings } = builtAssets;
         if (controller.signal.aborted) throw new CancelledError();
         const attachReview = async (result: SceneImportResult) => {
@@ -2498,13 +2549,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         let rootCursor = 0;
         // 组件级同步：只有单节点链接、且根节点确实是组件（或实例）时启用。
         // Frame 链接保持原有行为，不生成标记、不额外创建项目脚本。
-        const syncRootNode = document.sourceNodeId && document.roots.length === 1
-            ? document.roots[0]
-            : undefined;
-        const syncContext = syncRootNode
-            && (syncRootNode.type === 'COMPONENT' || syncRootNode.type === 'INSTANCE')
-            ? { fileKey: document.fileKey }
-            : undefined;
+        const syncContext = syncMode ? { fileKey: document.fileKey } : undefined;
         const roots = document.roots
             .map((node, index) => {
                 const spec = makeSpec(

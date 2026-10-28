@@ -43,6 +43,8 @@ export interface SyncMarkerInput {
 export interface SyncMarkerComparison {
     /** 本节点的几何、显隐、外观、文字或组件类型发生变化。 */
     visualChanged: boolean;
+    /** 像素内容变化（不含页面坐标，含整棵子树）；旧标记缺字段时按子树变化推断。 */
+    pixelChanged: boolean;
     /** Figma 子树内任意后代发生变化（含新增/删除/同名替换）。 */
     subtreeChanged: boolean;
     /** 折叠子层集合发生变化（子层新增、删除或被替换）。 */
@@ -217,17 +219,31 @@ export function syncVisualHash(node: FigmaNode): string {
 }
 
 /**
- * 只保留影响像素的属性：把页面坐标（x/y）从 frame 与 renderBounds 中剔除。
- * 移动节点只改位置，不应被判定为"图片过期"；尺寸、旋转、外观仍然计入。
+ * 只保留影响像素的属性：坐标改为相对本节点原点的偏移，并递归包含整棵子树。
+ * - 整个节点在页面里移动：所有相对坐标不变 → 像素指纹不变；
+ * - 子层在节点内部移动：相对坐标改变 → 像素指纹改变；
+ * - 尺寸、旋转、外观、文字与任何后代变化都计入。
  */
-export function syncPixelPayload(node: FigmaNode): Record<string, unknown> {
+export function syncPixelPayload(
+    node: FigmaNode,
+    origin?: { x: number; y: number },
+): Record<string, unknown> {
     const visual = syncVisualPayload(node);
-    const frame = visual.frame as number[] | null;
-    const render = visual.renderBounds as number[] | null;
+    const box = node.absoluteBoundingBox;
+    const base = origin ?? { x: box?.x ?? 0, y: box?.y ?? 0 };
+    const relative = (frame: number[] | null): number[] | null => (frame
+        ? [
+            quantizeDecimal(frame[0] - base.x, 4),
+            quantizeDecimal(frame[1] - base.y, 4),
+            frame[2],
+            frame[3],
+        ]
+        : null);
     return {
         ...visual,
-        frame: frame ? [frame[2], frame[3]] : null,
-        renderBounds: render ? [render[2], render[3]] : null,
+        frame: relative(visual.frame as number[] | null),
+        renderBounds: relative(visual.renderBounds as number[] | null),
+        children: (node.children ?? []).map((child) => syncPixelPayload(child, base)),
     };
 }
 
@@ -282,12 +298,20 @@ export function compareSyncMarker(
         || previous.aliasNodeIds.join(',') !== next.aliasNodeIds.join(',');
     const sourceChanged = previous.figmaFileHash !== next.figmaFileHash
         || previous.figmaNodeId !== next.figmaNodeId;
+    // 像素是否变化：两边都有像素指纹时用它（不含页面坐标）；
+    // 旧标记没有该字段时退回子树指纹，宁可多判一次过期，也不能漏掉真实改动。
+    const pixelComparable = typeof previous.pixelHash === 'string'
+        && typeof next.pixelHash === 'string';
+    const pixelChanged = pixelComparable
+        ? previous.pixelHash !== next.pixelHash
+        : subtreeChanged;
     return {
         visualChanged,
+        pixelChanged,
         subtreeChanged,
         structureChanged,
-        // 换了来源、几何、子树或折叠集合，都意味着这张图不再是上次导出的那张。
-        assetStale: visualChanged || subtreeChanged || structureChanged || sourceChanged,
+        // 只改位置不再要求重新出图；来源、像素或折叠结构变化才需要。
+        assetStale: pixelChanged || structureChanged || sourceChanged,
     };
 }
 

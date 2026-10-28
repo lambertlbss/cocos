@@ -37,6 +37,7 @@ function prefabJson(entries) {
             figmaAliasNodeIds: entry.aliases ?? '',
             figmaAliasHash: entry.aliasHash ?? ALIAS_A,
             figmaVisualHash: entry.visualHash ?? VISUAL_A,
+            ...(entry.pixelHash ? { figmaPixelHash: entry.pixelHash } : {}),
             figmaSubtreeHash: entry.subtreeHash ?? SUBTREE_A,
         });
     }
@@ -126,6 +127,26 @@ test('a change inside a collapsed subtree is reported without touching the node 
     assert.equal(preview.changed, 1);
     assert.deepEqual(preview.items[0].fields, ['子层内容']);
     assert.equal(preview.items[0].assetStale, true);
+});
+
+test('a position-only change is reported as 位置 and keeps the existing image', () => {
+    const PIXEL = 'sha256:' + '9'.repeat(64);
+    const previous = readPrefabSyncMarkers(prefabJson([{
+        id: '164:4718',
+        name: 'img_paiming_tiao1',
+        width: 488,
+        height: 104,
+        visualHash: VISUAL_A,
+        subtreeHash: SUBTREE_A,
+        pixelHash: PIXEL,
+    }]));
+    const preview = planSyncPreview(previous, [spec({
+        syncMarker: marker({ visualHash: VISUAL_B, subtreeHash: SUBTREE_B, pixelHash: PIXEL }),
+    })], { scale: 1 });
+    assert.equal(preview.changed, 1);
+    assert.deepEqual(preview.items[0].fields, ['位置']);
+    assert.equal(preview.items[0].assetStale, false);
+    assert.equal(preview.assetStaleCount, 0);
 });
 
 test('a renamed node does not force a new image', () => {

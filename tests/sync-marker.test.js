@@ -150,6 +150,7 @@ test('an unchanged design produces no change at all', () => {
     const comparison = compareSyncMarker(before, after);
     assert.deepEqual(comparison, {
         visualChanged: false,
+        pixelChanged: false,
         subtreeChanged: false,
         structureChanged: false,
         assetStale: false,
@@ -181,12 +182,27 @@ test('changing the source file marks the marker as stale', () => {
     assert.equal(comparison.assetStale, true);
 });
 
-test('asset refresh only applies to rasterized nodes with stale design', () => {
+test('a moved node is not an asset change, but a restyled one is', () => {
     const before = createSyncMarker({ fileKey: FILE_KEY, node: node() });
-    const after = createSyncMarker({ fileKey: FILE_KEY, node: node({ absoluteBoundingBox: { x: 30, y: 20, width: 300, height: 200 } }) });
-    const comparison = compareSyncMarker(before, after);
-    assert.equal(syncNeedsAssetRefresh({ comparison, rasterized: true }), true);
-    assert.equal(syncNeedsAssetRefresh({ comparison, rasterized: false }), false);
+    const moved = createSyncMarker({
+        fileKey: FILE_KEY,
+        node: node({ absoluteBoundingBox: { x: 30, y: 20, width: 300, height: 200 } }),
+    });
+    const movedComparison = compareSyncMarker(before, moved);
+    assert.equal(movedComparison.visualChanged, true);
+    assert.equal(movedComparison.pixelChanged, false);
+    assert.equal(movedComparison.assetStale, false);
+    assert.equal(syncNeedsAssetRefresh({ comparison: movedComparison, rasterized: true }), false);
+
+    const restyled = createSyncMarker({
+        fileKey: FILE_KEY,
+        node: node({ fills: [{ type: 'SOLID', color: { r: 0, g: 1, b: 0, a: 1 }, opacity: 1 }] }),
+    });
+    const restyledComparison = compareSyncMarker(before, restyled);
+    assert.equal(restyledComparison.pixelChanged, true);
+    assert.equal(restyledComparison.assetStale, true);
+    assert.equal(syncNeedsAssetRefresh({ comparison: restyledComparison, rasterized: true }), true);
+    assert.equal(syncNeedsAssetRefresh({ comparison: restyledComparison, rasterized: false }), false);
     assert.equal(syncNeedsAssetRefresh({
         comparison: compareSyncMarker(before, before),
         rasterized: true,
@@ -261,7 +277,7 @@ test('an image filter change is a pixel change', () => {
     assert.equal(compareSyncMarker(before, after).visualChanged, true);
 });
 
-test('the pixel hash ignores page position but keeps size, rotation and paint', () => {
+test('the pixel hash ignores page position but keeps size, rotation, paint and inner layout', () => {
     const base = node();
     const moved = node({ absoluteBoundingBox: { x: 310, y: 420, width: 300, height: 200 } });
     assert.equal(syncVisualHash(base) === syncVisualHash(moved), false);
@@ -272,6 +288,17 @@ test('the pixel hash ignores page position but keeps size, rotation and paint', 
 
     const restyled = node({ fills: [{ type: 'SOLID', color: { r: 0, g: 0, b: 1, a: 1 }, opacity: 1 }] });
     assert.equal(syncPixelHash(base) === syncPixelHash(restyled), false);
+});
+
+test('moving the whole subtree together keeps the pixel hash; moving a child inside it does not', () => {
+    const tree = (rootX, childX) => node({
+        absoluteBoundingBox: { x: rootX, y: 20, width: 300, height: 200 },
+        children: [child('1:3', { absoluteBoundingBox: { x: childX, y: 30, width: 40, height: 40 } })],
+    });
+    // 整体右移 200px：子层相对位置不变。
+    assert.equal(syncPixelHash(tree(10, 20)), syncPixelHash(tree(210, 220)));
+    // 只有子层在节点内部移动。
+    assert.equal(syncPixelHash(tree(10, 20)) === syncPixelHash(tree(10, 24)), false);
 });
 
 test('the marker round-trips the pixel hash', () => {
