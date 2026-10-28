@@ -317,6 +317,46 @@ test('an older marker without a pixel hash still parses', () => {
     assert.equal(parsed.visualHash, marker.visualHash);
 });
 
+function imgNode(overrides = {}) {
+    return node({
+        type: 'RECTANGLE',
+        name: 'img_icon',
+        fills: [{ type: 'IMAGE', imageRef: 'image-ref-1', scaleMode: 'FILL' }],
+        ...overrides,
+    });
+}
+
+test('scaling a plain image node is not a pixel change; adding corners makes it one', () => {
+    const before = createSyncMarker({ fileKey: FILE_KEY, node: imgNode() });
+    const scaled = createSyncMarker({
+        fileKey: FILE_KEY,
+        node: imgNode({ absoluteBoundingBox: { x: 10, y: 20, width: 600, height: 400 } }),
+    });
+    const comparison = compareSyncMarker(before, scaled);
+    assert.equal(comparison.visualChanged, true);
+    assert.equal(comparison.pixelChanged, false);
+    assert.equal(comparison.assetStale, false);
+
+    // 有圆角时像素由 Figma 渲染决定，尺寸变化必须重新出图。
+    const rounded = (size) => imgNode({
+        absoluteBoundingBox: { x: 10, y: 20, width: size, height: 200 },
+        cornerRadius: 12,
+    });
+    const roundedBefore = createSyncMarker({ fileKey: FILE_KEY, node: rounded(300) });
+    const roundedAfter = createSyncMarker({ fileKey: FILE_KEY, node: rounded(600) });
+    assert.equal(compareSyncMarker(roundedBefore, roundedAfter).assetStale, true);
+});
+
+test('a child image resized inside a rendered parent still changes pixels', () => {
+    const parent = (childWidth) => node({
+        children: [imgNode({
+            id: '1:9',
+            absoluteBoundingBox: { x: 20, y: 30, width: childWidth, height: 40 },
+        })],
+    });
+    assert.equal(syncPixelHash(parent(40)) === syncPixelHash(parent(80)), false);
+});
+
 test('the generated marker script is minimal, valid and detectable', () => {
     assert.equal(SYNC_MARKER_SCRIPT_URL, 'db://assets/figma-importer-runtime/FigmaSyncNode.ts');
     assert.equal(isSyncMarkerScript(SYNC_MARKER_SCRIPT_SOURCE), true);

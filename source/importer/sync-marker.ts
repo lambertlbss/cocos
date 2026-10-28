@@ -227,6 +227,7 @@ export function syncVisualHash(node: FigmaNode): string {
 export function syncPixelPayload(
     node: FigmaNode,
     origin?: { x: number; y: number },
+    root = true,
 ): Record<string, unknown> {
     const visual = syncVisualPayload(node);
     const box = node.absoluteBoundingBox;
@@ -239,12 +240,43 @@ export function syncPixelPayload(
             frame[3],
         ]
         : null);
+    // 纯图片节点的位图可以被 Sprite 直接拉伸：自身尺寸/旋转不改变像素内容，
+    // 因此不参与像素指纹（后代仍然参与，缩放子层会改变整层渲染结果）。
+    const stretchable = root && isPlainImageNode(node);
     return {
         ...visual,
-        frame: relative(visual.frame as number[] | null),
-        renderBounds: relative(visual.renderBounds as number[] | null),
-        children: (node.children ?? []).map((child) => syncPixelPayload(child, base)),
+        size: stretchable ? null : visual.size,
+        rotation: stretchable ? null : visual.rotation,
+        frame: stretchable ? null : relative(visual.frame as number[] | null),
+        renderBounds: stretchable ? null : relative(visual.renderBounds as number[] | null),
+        children: (node.children ?? []).map((child) => syncPixelPayload(child, base, false)),
     };
+}
+
+/**
+ * 纯图片节点：单个可见 IMAGE 填充、无描边/特效/圆角/裁剪/圆弧、无子层。
+ * 这类节点的位图可以被 Sprite 直接拉伸，改变尺寸或旋转不需要重新出图。
+ */
+export function isPlainImageNode(node: FigmaNode): boolean {
+    if (node.children?.length) {
+        return false;
+    }
+    if (node.clipsContent || node.arcData) {
+        return false;
+    }
+    if ((node.cornerRadius ?? 0) > 0 || (node.rectangleCornerRadii ?? []).some((radius) => radius > 0)) {
+        return false;
+    }
+    if ((node.strokes ?? []).some((stroke) => stroke.visible !== false)) {
+        return false;
+    }
+    if ((node.effects ?? []).some((effect) => effect.visible !== false)) {
+        return false;
+    }
+    const visibleFills = (node.fills ?? []).filter((fill) => fill.visible !== false);
+    return visibleFills.length === 1
+        && visibleFills[0].type === 'IMAGE'
+        && Boolean(visibleFills[0].imageRef);
 }
 
 export function syncPixelHash(node: FigmaNode): string {

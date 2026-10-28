@@ -149,6 +149,27 @@ test('a position-only change is reported as 位置 and keeps the existing image'
     assert.equal(preview.assetStaleCount, 0);
 });
 
+test('resizing a plain image node only reports 尺寸 and keeps the existing image', () => {
+    const PIX = 'sha256:' + '4'.repeat(64);
+    const previous = readPrefabSyncMarkers(prefabJson([{
+        id: '164:4718',
+        name: 'img_icon',
+        width: 100,
+        height: 100,
+        visualHash: VISUAL_A,
+        subtreeHash: SUBTREE_A,
+        pixelHash: PIX,
+    }]));
+    const preview = planSyncPreview(previous, [spec({
+        name: 'img_icon',
+        frame: { x: 0, y: 0, width: 200, height: 100 },
+        syncMarker: marker({ visualHash: VISUAL_B, subtreeHash: SUBTREE_A, pixelHash: PIX }),
+    })], { scale: 1 });
+    assert.deepEqual(preview.items[0].fields, ['尺寸']);
+    assert.equal(preview.items[0].assetStale, false);
+    assert.equal(preview.assetStaleCount, 0);
+});
+
 test('a renamed node does not force a new image', () => {
     const previous = readPrefabSyncMarkers(prefabJson([{ id: '164:4718', name: 'img_old', width: 488, height: 104 }]));
     const preview = planSyncPreview(previous, [spec()], { scale: 1 });

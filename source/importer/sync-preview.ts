@@ -227,7 +227,9 @@ export function planSyncPreview(
         if (before.active !== spec.visible) {
             fields.push('显隐');
         }
-        if (Math.abs(before.width - width) > 0.5 || Math.abs(before.height - height) > 0.5) {
+        const sizeChanged = Math.abs(before.width - width) > 0.5
+            || Math.abs(before.height - height) > 0.5;
+        if (sizeChanged) {
             fields.push('尺寸');
         }
         // 像素指纹（不含页面坐标、含子树）优先；旧标记缺该字段时退回原来的三项比较。
@@ -245,8 +247,12 @@ export function planSyncPreview(
             fields.push('子层内容');
         }
         if (before.visualHash !== marker.visualHash) {
-            // 像素没变却几何变了，说明只是整体挪了位置。
-            fields.push(pixelChanged ? '几何或外观' : '位置');
+            // 像素没变却几何变了：尺寸已单独列出时不再重复，否则就是单纯挪了位置。
+            if (pixelChanged) {
+                fields.push('几何或外观');
+            } else if (!sizeChanged) {
+                fields.push('位置');
+            }
         }
         const assetStale = pixelChanged || aliasChanged;
         if (assetStale) {
