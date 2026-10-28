@@ -4379,3 +4379,66 @@ test('retainNodeFileIds keeps an unchecked node alive during stale cleanup', asy
     assert.equal(environment.canvas.getChildByName('Kept Node'), child, 'unchecked node retained');
     assert.notEqual(child.destroyed, true);
 });
+
+
+test('an unchecked node survives a skipped import and is reused when checked again', async () => {
+    const environment = fakeCocos();
+    environment.autoAssignPrefabInfo = true;
+    const prefabUuid = 'prefab-reskip-uuid';
+    const rootFileId = 'reskipRootFileId';
+    const rootTransformFileId = 'reskipRootTransformFileId';
+    environment.canvas._prefab = { fileId: rootFileId, root: environment.canvas, asset: { uuid: prefabUuid } };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+
+    const specWithChild = (name) => makeSpec({
+        figmaId: 'reskip-root',
+        name: 'Reskip Root',
+        children: [makeSpec({ figmaId: 'reskip-child', name, figmaType: 'RECTANGLE' })],
+    });
+    const specWithoutChild = () => makeSpec({ figmaId: 'reskip-root', name: 'Reskip Root', children: [] });
+
+    // 1) 首次导入：根 + 子节点。
+    const first = await importWithPrefabContext(environment, specWithChild('Skipped Node'), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'reskip-root': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+    const child = environment.canvas.getChildByName('Skipped Node');
+    assert.ok(child, 'child imported on first pass');
+    const childFileId = child._prefab.fileId;
+    const childComponents = child.components
+        .map((component) => component.__prefab?.fileId)
+        .filter(Boolean);
+
+    // 2) 未勾选：本次不生成子节点，但保留它的 fileId 与组件归属。
+    const skipped = await importWithPrefabContext(environment, specWithoutChild(), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: first.prefabSync.nodeFileIds,
+        managedNodeFileIds: [...first.prefabSync.managedNodeFileIds, childFileId],
+        managedComponentFileIds: [...first.prefabSync.managedComponentFileIds, ...childComponents],
+        managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+    }, { retainNodeFileIds: [childFileId] });
+    assert.ok(skipped);
+    assert.equal(environment.canvas.getChildByName('Skipped Node'), child, 'unchecked node kept');
+
+    // 3) 重新勾选：映射仍在，必须复用同一个节点，不能新建副本。
+    const rechecked = await importWithPrefabContext(environment, specWithChild('Skipped Node'), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { ...first.prefabSync.nodeFileIds, 'reskip-child': childFileId },
+        managedNodeFileIds: [...first.prefabSync.managedNodeFileIds, childFileId],
+        managedComponentFileIds: [...first.prefabSync.managedComponentFileIds, ...childComponents],
+        managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+    });
+
+    assert.ok(rechecked);
+    const children = environment.canvas.children.filter((item) => item.name === 'Skipped Node');
+    assert.equal(children.length, 1, 'no duplicate node created');
+    assert.equal(children[0], child, 'same node instance reused');
+    assert.notEqual(child.destroyed, true);
+    assert.equal(rechecked.prefabSync.nodeFileIds['reskip-child'], childFileId, 'mapping preserved');
+});
