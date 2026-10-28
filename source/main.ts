@@ -608,6 +608,44 @@ export function subtreeHasExplicitOverride(
         || node.children.some((child) => subtreeHasExplicitOverride(child, decisions));
 }
 
+/**
+ * 本地同名素材把父容器整体提升为 PNG 整层：该父容器的子层不再单独建节点。
+ * 导入与"改动预检"共用这段规则，避免预检把被吸收的子层报成"新增"。
+ */
+export async function applyLocalParentPromotion(
+    roots: readonly FigmaNode[],
+    decisions: Map<string, Decision>,
+    matchesLocal: (node: FigmaNode) => Promise<boolean>,
+    protectedDescendant: (node: FigmaNode) => boolean,
+    hasAsset: (nodeId: string) => boolean = () => false,
+): Promise<void> {
+    const promote = async (node: FigmaNode): Promise<void> => {
+        if (hasAsset(node.id) || analyzeMaskTint(node)) {
+            return;
+        }
+        const decision = decisionForNode(node, decisions);
+        if (decision.action !== 'generate') {
+            return;
+        }
+        if (node.children.length
+            && node.type !== 'TEXT'
+            && !decision.nineSlice
+            // 重命名不改变资源匹配；只有自身或后代的显式策略覆盖才阻止提升，
+            // 否则被吸收的后代会静默消失。
+            && !subtreeHasExplicitOverride(node, decisions, false)
+            // 同名祖先不能成为抹掉独立切片资源或蒙版表示的理由。
+            && !protectedDescendant(node)
+            // 父资源无法表达独立的隐藏后代，这种边界必须保留层级。
+            && !hasHiddenDescendant(node)
+            && await matchesLocal(node)) {
+            decisions.set(node.id, { ...decision, action: 'render', nineSlice: false });
+            return;
+        }
+        await Promise.all(node.children.map(promote));
+    };
+    await Promise.all(roots.map(promote));
+}
+
 type StoredNodeOverrides = Record<string, Record<string, ImportOverride>>;
 
 async function getStoredNodeOverrides(): Promise<StoredNodeOverrides> {
@@ -922,34 +960,13 @@ export async function buildAssets(
             || assets.has(child.id) || childDecision.nineSlice || isNamedSliceGroup(child) || isPatchCandidate(child))
             || (childDecision.action !== 'render' && protectedDescendant(child));
     });
-    const promoteLocalParents = async (node: FigmaNode): Promise<void> => {
-        if (assets.has(node.id) || analyzeMaskTint(node)) return;
-        const decision = decisionForNode(node, decisions);
-        if (decision.action !== 'generate') {
-            return;
-        }
-        if (node.children.length
-            && node.type !== 'TEXT'
-            && !decision.nineSlice
-            // Renaming this container does not change resource matching; only
-            // a strategy override on itself or any override below it blocks
-            // promotion because descendants would otherwise disappear.
-            && !subtreeHasExplicitOverride(node, decisions, false)
-            // A same-name ancestor is not permission to erase independent slice
-            // resources or a verified/fallback mask representation below it.
-            && !protectedDescendant(node)
-            // A local parent resource cannot represent independently inactive
-            // descendants. Keep the hierarchy whenever such a boundary exists.
-            && !hasHiddenDescendant(node)) {
-            const localMatch = await findLocal(node.name, false, node.id);
-            if (localMatch) {
-                decisions.set(node.id, { ...decision, action: 'render', nineSlice: false });
-                return;
-            }
-        }
-        await Promise.all(node.children.map(promoteLocalParents));
-    };
-    await Promise.all(session.roots.map(promoteLocalParents));
+    await applyLocalParentPromotion(
+        session.roots,
+        decisions,
+        async (node) => Boolean(await findLocal(node.name, false, node.id)),
+        protectedDescendant,
+        (nodeId) => assets.has(nodeId),
+    );
     const finalDecisions = resolveAutomaticMergeDecisions(session.roots, decisions);
     decisions.clear();
     finalDecisions.forEach((value, key) => decisions.set(key, value));
@@ -2417,8 +2434,40 @@ async function previewComponentSync(): Promise<SyncPreviewResult> {
     const previous = readPrefabSyncMarkers(await readFile(prefabDiskPath(prefabUrl)));
     const overrides = await nodeOverridesFor(document.fileKey);
     const decisions = decisionMap(overrides, document.tree);
-    // 与真实导入保持一致：先让自动折叠/收口决定生效，再编译计划。
-    // 否则被折叠或整层节点的子层会以"新增"出现，而导入时根本不会创建它们。
+    // 与真实导入保持一致的第一步：本地同名素材命中时把父容器整体提升为整层。
+    const localLibraries = settings.localResourceFolders
+        .map((folder) => {
+            try {
+                return new LocalResourceLibrary(folder);
+            } catch {
+                return null;
+            }
+        })
+        .filter((library): library is LocalResourceLibrary => library !== null);
+    if (localLibraries.length) {
+        await Promise.all(localLibraries.map((library) => library.initialize()));
+        const protectedPreview = (node: FigmaNode): boolean => node.children.some((child) => {
+            const childDecision = decisionForNode(child, decisions);
+            if (childDecision.action === 'ignore') return false;
+            return Boolean(child.isMask || child.children.some((part) => part.isMask)
+                || childDecision.nineSlice || isNamedSliceGroup(child) || isPatchCandidate(child))
+                || (childDecision.action !== 'render' && protectedPreview(child));
+        });
+        await applyLocalParentPromotion(
+            document.roots,
+            decisions,
+            async (node) => {
+                for (const library of localLibraries) {
+                    if (await library.find(node.name, 'png')) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+            protectedPreview,
+        );
+    }
+    // 与真实导入保持一致的第二步：自动折叠/收口决定生效后再编译计划。
     const resolved = resolveAutomaticMergeDecisions(document.roots, decisions);
     decisions.clear();
     resolved.forEach((value, key) => decisions.set(key, value));

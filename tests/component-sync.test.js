@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parseNode } = require('../dist/figma/parser');
 const { inferAction, inferKind } = require('../dist/figma/analyzer');
-const { makeSpec } = require('../dist/main');
+const { applyLocalParentPromotion, makeSpec } = require('../dist/main');
 const { SYNC_MARKER_SCRIPT_SOURCE, SYNC_MARKER_SCRIPT_URL, isSyncMarkerComponentValue } = require('../dist/importer/sync-marker');
 const { planSyncMarkerScript } = require('../dist/importer/sync-marker-asset');
 
@@ -49,6 +49,57 @@ function indexNodes(roots) {
     roots.forEach(visit);
     return map;
 }
+
+test('a local same-name asset promotes the container so its children are not created', async () => {
+    const root = figmaNode({
+        id: '1:1',
+        name: 'common_bg_touxiang_01',
+        type: 'FRAME',
+        children: [{
+            id: '1:2', name: 'inner', type: 'RECTANGLE', visible: true, children: [],
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+        }],
+    });
+    const decisions = new Map([
+        ['1:1', { action: 'generate', kind: 'node', nineSlice: false }],
+        ['1:2', { action: 'generate', kind: 'node', nineSlice: false }],
+    ]);
+    await applyLocalParentPromotion(
+        [root],
+        decisions,
+        async (node) => node.name === 'common_bg_touxiang_01',
+        () => false,
+    );
+    assert.equal(decisions.get('1:1').action, 'render');
+    assert.equal(decisions.get('1:2').action, 'generate');
+});
+
+test('hidden descendants and explicit overrides still block local promotion', async () => {
+    const makeRoot = () => figmaNode({
+        id: '1:1',
+        name: 'wrapper',
+        type: 'FRAME',
+        children: [{
+            id: '1:2', name: 'inner', type: 'RECTANGLE', visible: true, children: [],
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+        }],
+    });
+    const hiddenRoot = makeRoot();
+    hiddenRoot.children[0].visible = false;
+    const hiddenDecisions = new Map([
+        ['1:1', { action: 'generate', kind: 'node', nineSlice: false }],
+        ['1:2', { action: 'generate', kind: 'node', nineSlice: false }],
+    ]);
+    await applyLocalParentPromotion([hiddenRoot], hiddenDecisions, async () => true, () => false);
+    assert.equal(hiddenDecisions.get('1:1').action, 'generate');
+
+    const explicitDecisions = new Map([
+        ['1:1', { action: 'generate', kind: 'node', nineSlice: false }],
+        ['1:2', { action: 'ignore', kind: 'node', nineSlice: false, explicit: true }],
+    ]);
+    await applyLocalParentPromotion([makeRoot()], explicitDecisions, async () => true, () => false);
+    assert.equal(explicitDecisions.get('1:1').action, 'generate');
+});
 
 test('the marker component is recognised by fields, not by script uuid', () => {
     assert.equal(isSyncMarkerComponentValue({
