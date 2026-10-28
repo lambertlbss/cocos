@@ -616,6 +616,14 @@ export function subtreeHasExplicitOverride(
  * 本地同名素材把父容器整体提升为 PNG 整层：该父容器的子层不再单独建节点。
  * 导入与"改动预检"共用这段规则，避免预检把被吸收的子层报成"新增"。
  */
+/**
+ * 同步标记适用于插件的全部单节点链接：任意根类型（Frame / Group / Component / Instance…）
+ * 都生成 FigmaSyncNode；整份文件导入与多根来源不生成。
+ */
+export function syncMarkersEnabled(sourceNodeId: string | undefined, rootCount: number): boolean {
+    return Boolean(sourceNodeId) && rootCount === 1;
+}
+
 export async function applyLocalParentPromotion(
     roots: readonly FigmaNode[],
     decisions: Map<string, Decision>,
@@ -2460,9 +2468,6 @@ async function previewComponentSync(): Promise<SyncPreviewResult> {
         throw new Error('只有单个节点链接才能预览组件同步。');
     }
     const root = document.roots[0];
-    if (root.type !== 'COMPONENT' && root.type !== 'INSTANCE') {
-        throw new Error(`当前根节点是 ${root.type}，只有组件（COMPONENT/INSTANCE）链接支持组件同步。`);
-    }
     const settings = await getSettings();
     // AssetWriter 构造函数只规范化目录，不会创建文件夹。
     const writer = new AssetWriter(settings.prefabFolder);
@@ -2567,11 +2572,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         const reviewRecorder = new ImportReviewRecorder();
         // 组件同步（单节点 COMPONENT/INSTANCE 链接）：先用像素指纹算出哪些节点的
         // 图片内容确实变了，只有这些节点在资源准备阶段跳过本地同名素材复用。
-        const syncRootCandidate = document.sourceNodeId && document.roots.length === 1
-            ? document.roots[0]
-            : undefined;
-        const syncMode = Boolean(syncRootCandidate
-            && (syncRootCandidate.type === 'COMPONENT' || syncRootCandidate.type === 'INSTANCE'));
+        const syncMode = syncMarkersEnabled(document.sourceNodeId, document.roots.length);
         let regenerateNodeIds: ReadonlySet<string> | undefined;
         if (syncMode && importSettings.refreshAssets) {
             try {

@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.1.2`
+> 当前插件版本：`1.1.3`
 > 当前文档状态：持续维护  
 > 最近审计：2026-10-28
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -437,7 +437,7 @@ Frame 链接的 Prefab 流程是当前最重要的特殊路径：
 
 ### 6.6 组件同步（1.1.x）
 
-只有**单节点链接且根节点为 `COMPONENT` / `INSTANCE`** 才进入同步模式；Frame 链接与整份文件导入不生成标记，也不创建标记脚本。
+任意**单节点链接**（Frame / Group / Component / Instance 等）都进入同步模式；整份文件导入（无 `sourceNodeId`）与多根来源不生成标记，也不创建标记脚本。判定见 `syncMarkersEnabled()`。
 
 **标记**：`FigmaSyncNode` 脚本由插件生成到 `assets/figma-importer-runtime/FigmaSyncNode.ts`（无运行逻辑，只存数据），首次导入创建、之后每次校验，被其他脚本占用时 fail-closed。字段包括明文 `figmaNodeId`、file key 的 SHA-256、折叠子层集合、`figmaVisualHash`、`figmaPixelHash`、`figmaSubtreeHash`。删除某节点的标记等价于让它退出同步。
 
@@ -1069,6 +1069,14 @@ npm test
 - 添加清理服务/Scene 回归与真实浏览器面板交互脚本 `scripts/verify-import-review-ui.js`（通过 `CHROME_PATH` 可指定 Chrome/Edge）。清理专项测试 `14/14` 通过；构建、Cocos/MCP 分发和浏览器验证通过；完整回归 `289/290`，唯一失败仍为既有冻结文件 Windows CRLF 哈希差异，未修改冻结协议文件。
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
+
+### 2026-10-28 · `1.1.3` · 同步标记覆盖所有单节点链接
+
+- 新增 `syncMarkersEnabled(sourceNodeId, rootCount)`：任意单节点链接（Frame / Group / Component / Instance）都生成 `FigmaSyncNode` 标记，从而共享改动预检、定向重导与逐条勾选；整份文件导入与多根来源保持原行为。
+- `previewComponentSync` 不再限定根节点必须是组件或实例，与导入判定保持一致。
+- 首次对 Frame 链接导入会在项目里创建 `assets/figma-importer-runtime/FigmaSyncNode.ts` 并给节点挂标记；如不希望某些来源被跟踪，可在导入前不勾选对应改动或删除该节点的标记组件。
+- 已知未覆盖：Section/Frame 批量导入只逐个 Frame 处理，未在批量层做整体预检；组件实例仍按展开导入，嵌套 Prefab 与 override 映射留待后续。
+- 验证：完整 `npm test` 通过；分发检查通过。
 
 ### 2026-10-28 · `1.1.2` · MCP 暴露组件同步预检
 

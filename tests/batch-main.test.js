@@ -39,6 +39,7 @@ function fixture(t) {
     const messages = [];
     let dirty = false;
     let dirtyFailure = false;
+    let markerScriptCreated = false;
     global.Editor = {
         Project: { path: project, tmpDir: join(project, 'temp') },
         Profile: {
@@ -47,12 +48,23 @@ function fixture(t) {
         },
         Message: {
             send(_packageName, method, payload) { messages.push({ method, payload: JSON.parse(JSON.stringify(payload)) }); },
-            async request(channel, method) {
+            async request(channel, method, ...args) {
                 if (channel === 'scene' && method === 'query-dirty') {
                     if (dirtyFailure) throw new Error('scene state unavailable');
                     return dirty;
                 }
-                if (channel === 'asset-db' && ['query-asset-info', 'query-asset-meta'].includes(method)) return null;
+                // Frame 链接现在也生成同步标记脚本：模拟它的创建与就绪查询。
+                if (channel === 'asset-db' && method === 'query-asset-info') {
+                    return markerScriptCreated && String(args[0] ?? '').includes('FigmaSyncNode.ts')
+                        ? { uuid: 'marker-script-uuid' }
+                        : null;
+                }
+                if (channel === 'asset-db' && method === 'create-asset') {
+                    markerScriptCreated = true;
+                    return { uuid: 'marker-script-uuid' };
+                }
+                if (channel === 'asset-db' && method === 'save-asset') return null;
+                if (channel === 'asset-db' && method === 'query-asset-meta') return null;
                 throw new Error(`Unexpected Creator request: ${channel}/${method}`);
             },
         },

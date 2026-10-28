@@ -206,9 +206,9 @@ Cocos Creator 必须已经打开目标项目并启用本扩展，但 Figma Impor
 
 “本地同名资源目录”最多 3 个，按目录顺序递归匹配 Figma 原名的 PNG / JPG / JPEG。项目内命中直接引用原 SpriteFrame 和边距，三/九宫和平铺也适用；外部素材无 Cocos UUID，仍需导入，未命中才从 Figma 下载。目录可单独清空，下载缓存自动维护。
 
-## 组件同步（1.1.1）
+## 链接同步（1.1.3）
 
-顶层是 `COMPONENT` 或 `INSTANCE` 的节点链接会进入组件同步模式：除了生成独立 Prefab，还会给每个建出来的节点挂一个 `FigmaSyncNode` 标记组件。Frame 链接与整份文件导入完全不受影响，既不生成标记，也不会创建下面的脚本。
+任意**单节点链接**（`FRAME`、`GROUP`、`COMPONENT`、`INSTANCE` 等）都会进入同步模式：除了生成独立 Prefab，还会给每个建出来的节点挂一个 `FigmaSyncNode` 标记组件。整份文件导入（无 `node-id`）与多根来源不生成标记，也不会创建下面的脚本。
 
 ### 标记
 
