@@ -2417,6 +2417,11 @@ async function previewComponentSync(): Promise<SyncPreviewResult> {
     const previous = readPrefabSyncMarkers(await readFile(prefabDiskPath(prefabUrl)));
     const overrides = await nodeOverridesFor(document.fileKey);
     const decisions = decisionMap(overrides, document.tree);
+    // 与真实导入保持一致：先让自动折叠/收口决定生效，再编译计划。
+    // 否则被折叠或整层节点的子层会以"新增"出现，而导入时根本不会创建它们。
+    const resolved = resolveAutomaticMergeDecisions(document.roots, decisions);
+    decisions.clear();
+    resolved.forEach((value, key) => decisions.set(key, value));
     const plans = compileImportPlan(document.roots, decisions);
     const rootFrame = nodeFrame(root);
     const specs = document.roots
