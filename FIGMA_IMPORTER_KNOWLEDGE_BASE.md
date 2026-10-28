@@ -2,7 +2,7 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.1.0`
+> 当前插件版本：`1.1.1`
 > 当前文档状态：持续维护  
 > 最近审计：2026-10-28
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
@@ -434,6 +434,27 @@ Frame 链接的 Prefab 流程是当前最重要的特殊路径：
 9. 成功后清空节点选择并选中已打开的目标 Prefab。旧 `scene:create-prefab`、当前场景临时根、残影清理和 linked Frame runtime `nodeMaps` 路径已移除。
 
 迁移说明：旧版本创建但没有 `userData.figmaImporter` 来源记录的同名 Prefab 无法安全证明来源，当前版本会拒绝静默接管；需要先移动或重命名该旧资源，再执行首次导入。
+
+### 6.6 组件同步（1.1.x）
+
+只有**单节点链接且根节点为 `COMPONENT` / `INSTANCE`** 才进入同步模式；Frame 链接与整份文件导入不生成标记，也不创建标记脚本。
+
+**标记**：`FigmaSyncNode` 脚本由插件生成到 `assets/figma-importer-runtime/FigmaSyncNode.ts`（无运行逻辑，只存数据），首次导入创建、之后每次校验，被其他脚本占用时 fail-closed。字段包括明文 `figmaNodeId`、file key 的 SHA-256、折叠子层集合、`figmaVisualHash`、`figmaPixelHash`、`figmaSubtreeHash`。删除某节点的标记等价于让它退出同步。
+
+**像素指纹**（`syncPixelPayload`）是"哪些图片需要重新出图"的唯一判据：
+
+- 根节点相对于自身原点取坐标，后代取相对根节点的**比例**；整棵子树等比缩放不改变比例。
+- 可拉伸结构（纯图片节点、同框单图片包装层、`analyzeSliceGrid` 通过的 3/9 宫）整条链的几何都不参与比较，拉伸由 Sprite 完成。
+- 图片裁切矩阵按**节点自身尺寸**归一化：Figma Scale 工具改写矩阵不再触发重导，真实裁切调整仍然触发。
+- 归一化后仍会变化并触发重导的有：`imageRef`、裁切/滤镜、圆角、描边、特效、文字样式、后代结构，以及不满足可拉伸条件时的尺寸变化。
+
+**改动预检**（`sync-preview` 消息 + `importer/sync-preview.ts`）：只读目标 Prefab 与当前计划，不下载图片、不打开 Prefab、不写文件。为保证与真实导入一致，预检与 `buildAssets` 共用 `applyLocalParentPromotion`（本地同名素材把父容器提升为整层）与 `resolveAutomaticMergeDecisions`（自动折叠/收口），否则被吸收的子层会以「新增」出现。
+
+改动类别：名称、显隐、几何或外观、位置或尺寸、折叠结构、子层内容；图片过期的行标「图片需更新」并自动勾选「强制刷新资源」。**不比较 Cocos 侧 UITransform 尺寸**：Label 会被字体度量与描边扩边、引用本地素材的 Sprite 沿用原资源尺寸，与 Figma 参考框比较必然误报（1.1.0 曾有该比较，1.1.1 移除）。
+
+**逐条勾选**：未勾选的节点按 `ignore` 处理，连同子层一起跳过，不创建、不更新、不删除；标记不重写，旧指纹保留，下次导入仍会列出。`retainPrefabSyncEntries` 把节点 fileId 合并回新记录，`collectPrefabComponentFileIds`（从保存后的 Prefab 读取，节点用 `_prefab`、组件用 `__prefab`）把组件 fileId 一并保留，保证重新勾选时原地更新而不是新建副本；`retainNodeFileIds` 让 Scene 的陈旧清理保留这些节点。
+
+已知边界：折叠/整层节点只做聚合检测；整体缩放顶层组件会被判为子层几何变化并可能重导；没有 `figmaPixelHash` 的旧标记退回子树比较，首次导入后补齐；改组件名按新 Prefab 处理，组件重建导致 `nodeId` 全变时仍拒绝覆盖同名 Prefab。
 
 ## 7. Cocos 组件映射
 
@@ -1047,12 +1068,24 @@ npm test
 
 记录格式：`日期 · 版本/提交 · 变更 · 验证 · 影响/迁移说明`。
 
+### 2026-10-28 · `1.1.1` · 定向重导、改动清单勾选与误报修复
+
+- 新增像素指纹 `figmaPixelHash`：在视觉指纹基础上把坐标改为相对比例、图片裁切矩阵按节点尺寸归一化，用于回答"这张图需不需要重新生成"。整棵子树等比缩放、Figma Scale 工具改写裁切矩阵都不再触发重导；`imageRef`、裁切调整、滤镜、圆角、描边、特效、文字样式与后代结构变化仍会重导。
+- 可拉伸结构判定 `isStretchableImage`：纯图片节点、同框单图片包装层（`icon_x` → 子层图）、`analyzeSliceGrid` 通过的三/九宫节点，整条链的几何不参与像素指纹，拉伸由 Sprite / `SLICED` 完成。
+- `buildAssets` 新增 `regenerateNodeIds`：只有像素指纹判定变化的节点才跳过本地同名素材复用，其余节点继续引用项目素材，不再产生重复图片。该能力取代了 `a2df9b9`（勾选更新资源时对所有节点强制重导，已 `050aa03` 回退）的做法。
+- 面板改动清单改为指纹驱动：移除「Prefab UITransform 尺寸 vs Figma 参考框」的比较（Label 会被字体度量与描边扩边、本地素材 Sprite 沿用原资源尺寸，必然误报），也不再显示尺寸前后数值。
+- 改动清单新增逐条复选框与全选/全不选：未勾选的节点按 `ignore` 处理并连同子层跳过，标记不重写、旧指纹保留，下次导入仍会列出；`retainPrefabSyncEntries` 保留节点 fileId，`collectPrefabComponentFileIds`（节点用 `_prefab`、组件用 `__prefab`）保留组件 fileId，`retainNodeFileIds` 让 Scene 保留这些节点，避免下次重新勾选时报「UITransform 不是 Figma Importer 创建的」或产生重复节点。
+- 预检与真实导入共用规划：`previewComponentSync` 调用 `applyLocalParentPromotion`（本地同名素材提升父容器为整层）与 `resolveAutomaticMergeDecisions`，消除被吸收子层被报成「新增」的误报（真实案例 `common_bg_touxiang_01` 的实例内部子层）。
+- 修复继续存在的真实缺陷：`removeStalePrefabNodes` 跳过同步标记组件、`capturePrefabSync` 把标记纳入受管集合，旧 Meta 不再阻断旧节点删除。
+- 验证：完整 `npm test` 653 项全通过（新增 6 个测试文件，覆盖指纹、预检、勾选、记录保留、尺寸与裁切归一化）；真实项目 `PopChariotRaceTopItem.prefab` 实测 23 节点 / 23 标记，未改动设计的预检返回 0 条变化；面板已部署到项目 `extensions` 验收。
+- 已知边界：折叠与整层节点只做聚合检测；整体缩放**顶层组件**（容器尺寸变化、子层按比例排布）仍会按子层几何判为变化并可能重导；旧标记没有像素指纹时退回子树比较；组件重建导致 `nodeId` 全变时仍拒绝覆盖同名 Prefab；改动清单 UI 暂无自动化用例。
+
 ### 2026-10-28 · `1.1.0` · 组件级双边同步（标记 + 改动预检）
 
 - 新增组件同步标记协议 `importer/sync-marker.ts`：`FigmaSyncNode` 组件保存明文 `figmaNodeId`、file key 的 SHA-256、折叠子层 id、视觉指纹与子树指纹；指纹使用规范 JSON + SHA-256，几何按 `0.0001 px` 量化，与属性顺序无关。视觉指纹覆盖几何、显隐、填充/描边/特效、圆角、圆弧角度、文字样式、图片裁切矩阵与滤镜。
 - 只有单节点链接且根为 `COMPONENT` / `INSTANCE` 的导入才生成标记；Frame 与整份文件导入行为完全不变。首次导入自动创建 `assets/figma-importer-runtime/FigmaSyncNode.ts`，之后每次校验；被其他脚本占用时 fail-closed，内容不一致（且仍是本插件脚本）时按模板重建。
 - Scene 按类名挂载标记并写入字段；标记组件脚本尚未编译完成时整次导入降级为「无标记」并回传警告，不阻断建树。
-- 新增 `sync-preview` 消息与 `importer/sync-preview.ts`：只读目标 Prefab 与当前计划，按字段识别标记（不依赖脚本 UUID），逐节点比对名称、显隐、尺寸、几何或外观、折叠结构、子层内容，并按指纹判定哪些图片需要重新生成。不下载图片、不打开 Prefab、不写文件。
+- 新增 `sync-preview` 消息与 `importer/sync-preview.ts`：只读目标 Prefab 与当前计划，按字段识别标记（不依赖脚本 UUID），逐节点比对名称、显隐、尺寸、几何或外观、折叠结构、子层内容，并按指纹判定哪些图片需要重新生成。不下载图片、不打开 Prefab、不写文件。（其中的尺寸比较已在 `1.1.1` 移除。）
 - 面板第 3 步命中已有 Prefab 时显示「更新已有预制体」、`db://` 目标路径、「将更新 N 处（新增/修改/删除）· M 张图需更新」，并展开逐条清单；检测到图片过期时自动勾选「强制刷新资源」，用户手动取消后不会被覆盖。
 - 修复同步标记被误判为手工组件：`removeStalePrefabNodes` 跳过标记组件，`capturePrefabSync` 把标记纳入受管组件集合。旧 Prefab 的 Meta 写于没有标记的版本，其 `managedComponentFileIds` 不含标记，此前会阻断旧节点删除并停止整次同步。
 - 规则修订：知识库 §2.2「不把 file key、node id 写入项目资源」登记为显式例外——file key 仍只保存哈希，节点 id 明文与 Project Profile 中 `nodeMaps` 的既有明文一致，Token 永不落盘。
