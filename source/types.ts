@@ -296,6 +296,8 @@ export interface SyncMarkerSpec {
     aliasNodeIds: string[];
     aliasHash: string;
     visualHash: string;
+    /** 只包含影响像素的属性（不含节点在页面中的 x/y）；旧标记没有该字段。 */
+    pixelHash?: string;
     subtreeHash: string;
 }
 

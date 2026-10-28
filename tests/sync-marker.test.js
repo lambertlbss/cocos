@@ -16,6 +16,7 @@ const {
     normalizeSyncNodeId,
     syncAliasHash,
     syncNeedsAssetRefresh,
+    syncPixelHash,
     syncSubtreeHash,
     syncVisualHash,
 } = require('../dist/importer/sync-marker');
@@ -258,6 +259,35 @@ test('an image filter change is a pixel change', () => {
     const before = createSyncMarker({ fileKey: FILE_KEY, node: node({ type: 'RECTANGLE', fills: paint({ contrast: 1 }) }) });
     const after = createSyncMarker({ fileKey: FILE_KEY, node: node({ type: 'RECTANGLE', fills: paint({ contrast: 1.2 }) }) });
     assert.equal(compareSyncMarker(before, after).visualChanged, true);
+});
+
+test('the pixel hash ignores page position but keeps size, rotation and paint', () => {
+    const base = node();
+    const moved = node({ absoluteBoundingBox: { x: 310, y: 420, width: 300, height: 200 } });
+    assert.equal(syncVisualHash(base) === syncVisualHash(moved), false);
+    assert.equal(syncPixelHash(base), syncPixelHash(moved));
+
+    const resized = node({ absoluteBoundingBox: { x: 10, y: 20, width: 301, height: 200 } });
+    assert.equal(syncPixelHash(base) === syncPixelHash(resized), false);
+
+    const restyled = node({ fills: [{ type: 'SOLID', color: { r: 0, g: 0, b: 1, a: 1 }, opacity: 1 }] });
+    assert.equal(syncPixelHash(base) === syncPixelHash(restyled), false);
+});
+
+test('the marker round-trips the pixel hash', () => {
+    const marker = createSyncMarker({ fileKey: FILE_KEY, node: node() });
+    assert.match(marker.pixelHash, /^sha256:[0-9a-f]{64}$/);
+    const parsed = markerFromComponentValues(markerToComponentValues(marker));
+    assert.equal(parsed.pixelHash, marker.pixelHash);
+});
+
+test('an older marker without a pixel hash still parses', () => {
+    const marker = createSyncMarker({ fileKey: FILE_KEY, node: node() });
+    const values = markerToComponentValues(marker);
+    delete values.figmaPixelHash;
+    const parsed = markerFromComponentValues(values);
+    assert.equal(parsed.pixelHash, undefined);
+    assert.equal(parsed.visualHash, marker.visualHash);
 });
 
 test('the generated marker script is minimal, valid and detectable', () => {

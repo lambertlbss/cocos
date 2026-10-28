@@ -26,6 +26,7 @@ export interface SyncMarkerComponentValues {
     figmaAliasNodeIds: string;
     figmaAliasHash: string;
     figmaVisualHash: string;
+    figmaPixelHash: string;
     figmaSubtreeHash: string;
 }
 
@@ -215,6 +216,25 @@ export function syncVisualHash(node: FigmaNode): string {
     return sha256(canonicalStringify(syncVisualPayload(node)));
 }
 
+/**
+ * 只保留影响像素的属性：把页面坐标（x/y）从 frame 与 renderBounds 中剔除。
+ * 移动节点只改位置，不应被判定为"图片过期"；尺寸、旋转、外观仍然计入。
+ */
+export function syncPixelPayload(node: FigmaNode): Record<string, unknown> {
+    const visual = syncVisualPayload(node);
+    const frame = visual.frame as number[] | null;
+    const render = visual.renderBounds as number[] | null;
+    return {
+        ...visual,
+        frame: frame ? [frame[2], frame[3]] : null,
+        renderBounds: render ? [render[2], render[3]] : null,
+    };
+}
+
+export function syncPixelHash(node: FigmaNode): string {
+    return sha256(canonicalStringify(syncPixelPayload(node)));
+}
+
 export function syncSubtreeHash(node: FigmaNode): string {
     return sha256(canonicalStringify(syncSubtreePayload(node)));
 }
@@ -247,6 +267,7 @@ export function createSyncMarker(input: SyncMarkerInput): SyncMarkerSpec {
         aliasNodeIds,
         aliasHash: syncAliasHash(aliasNodeIds),
         visualHash: syncVisualHash(input.node),
+        pixelHash: syncPixelHash(input.node),
         subtreeHash: syncSubtreeHash(input.node),
     };
 }
@@ -290,6 +311,7 @@ export function markerToComponentValues(marker: SyncMarkerSpec): SyncMarkerCompo
         figmaAliasNodeIds: marker.aliasNodeIds.join(','),
         figmaAliasHash: marker.aliasHash,
         figmaVisualHash: marker.visualHash,
+        figmaPixelHash: marker.pixelHash ?? '',
         figmaSubtreeHash: marker.subtreeHash,
     };
 }
@@ -349,6 +371,9 @@ export function isSyncMarkerComponentValue(value: unknown): boolean {
         aliasNodeIds,
         aliasHash,
         visualHash,
+        pixelHash: typeof values.figmaPixelHash === 'string' && SHA256_PATTERN.test(values.figmaPixelHash)
+            ? values.figmaPixelHash
+            : undefined,
         subtreeHash,
     };
 }
@@ -400,6 +425,9 @@ export class ${SYNC_MARKER_CLASS} extends Component {
 
     @property({ tooltip: '本次导入时的节点视觉指纹' })
     public figmaVisualHash: string = '';
+
+    @property({ tooltip: '本次导入时的像素指纹（不含页面坐标）' })
+    public figmaPixelHash: string = '';
 
     @property({ tooltip: '本次导入时的子树指纹' })
     public figmaSubtreeHash: string = '';
