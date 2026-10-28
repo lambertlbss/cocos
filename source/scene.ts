@@ -14,7 +14,7 @@ import type {
     SceneNodeSpec,
 } from './types';
 import { sanitizeNodeName } from './node-name';
-import { SYNC_MARKER_CLASS, markerToComponentValues } from './importer/sync-marker';
+import { SYNC_MARKER_CLASS, isSyncMarkerComponentValue, markerToComponentValues } from './importer/sync-marker';
 import { shouldGenerateMask, setMaskShapeSafely } from './mask-policy';
 import type { MaskTarget } from './mask-policy';
 import { captureReviewScene, registerSceneReview, reviewManagedComponentIds,
@@ -918,6 +918,20 @@ function configureSyncMarker(node: any, spec: SceneNodeSpec): void {
     }
 }
 
+/**
+ * 标记组件永远属于插件：旧 Prefab 的 Meta 可能是在没有标记的版本写下的，
+ * 其 `managedComponentFileIds` 里没有标记，不能因此把它当成"手工组件"。
+ */
+function isSyncMarkerComponent(component: any): boolean {
+    if (!component) {
+        return false;
+    }
+    if (component.constructor?.name === SYNC_MARKER_CLASS) {
+        return true;
+    }
+    return isSyncMarkerComponentValue(component);
+}
+
 function configureLabel(node: any, spec: SceneNodeSpec, scale: number, cc: any): void {
     const { Label } = cc;
     const label = node.getComponent(Label) ?? node.addComponent(Label);
@@ -1602,6 +1616,10 @@ function removeStalePrefabNodes(
     const staleIds = new Set(stale.keys());
     for (const node of stale.values()) {
         for (const component of nodeComponents(node)) {
+            if (isSyncMarkerComponent(component)) {
+                // 插件自己的同步标记不算手工组件；旧 Meta 未记录它也允许删除。
+                continue;
+            }
             const componentFileId = componentPrefabFileId(component);
             if (!componentFileId || !previousComponentFileIds.has(componentFileId)) {
                 throw new Error(
@@ -1680,7 +1698,7 @@ function capturePrefabSync(
     const managedComponentTypes = new Set([cc.UITransform, ...generatedClasses]);
     for (const node of managedRuntimeNodes.values()) {
         for (const component of nodeComponents(node)) {
-            if (!managedComponentTypes.has(component.constructor)) {
+            if (!managedComponentTypes.has(component.constructor) && !isSyncMarkerComponent(component)) {
                 continue;
             }
             const existingFileId = componentPrefabFileId(component);

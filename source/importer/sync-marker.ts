@@ -294,8 +294,23 @@ export function markerToComponentValues(marker: SyncMarkerSpec): SyncMarkerCompo
     };
 }
 
-/** 从 Cocos 组件读回标记；字段缺失或损坏时返回 null，由调用方 fail-closed。 */
-export function markerFromComponentValues(
+/**
+ * 判断一个组件实例是否是本插件生成的同步标记。
+ * 用于所有权判定：标记永远属于插件，不能算作"手工组件"阻止节点删除。
+ * 按字段识别，不依赖脚本 UUID —— 脚本重新导入或 UUID 变化时仍然成立。
+ */
+export function isSyncMarkerComponentValue(value: unknown): boolean {
+    if (!value || typeof value !== 'object') {
+        return false;
+    }
+    const record = value as Record<string, unknown>;
+    return record.figmaMarkerSchema === SYNC_MARKER_SCHEMA
+        && typeof record.figmaNodeId === 'string'
+        && record.figmaNodeId.length > 0
+        && typeof record.figmaVisualHash === 'string';
+}
+
+/** 从 Cocos 组件读回标记；字段缺失或损坏时返回 null，由调用方 fail-closed。 */export function markerFromComponentValues(
     values: Partial<SyncMarkerComponentValues> | null | undefined,
 ): SyncMarkerSpec | null {
     if (!values || typeof values !== 'object') {

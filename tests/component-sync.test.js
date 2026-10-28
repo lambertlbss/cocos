@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { parseNode } = require('../dist/figma/parser');
 const { inferAction, inferKind } = require('../dist/figma/analyzer');
 const { makeSpec } = require('../dist/main');
-const { SYNC_MARKER_SCRIPT_SOURCE, SYNC_MARKER_SCRIPT_URL } = require('../dist/importer/sync-marker');
+const { SYNC_MARKER_SCRIPT_SOURCE, SYNC_MARKER_SCRIPT_URL, isSyncMarkerComponentValue } = require('../dist/importer/sync-marker');
 const { planSyncMarkerScript } = require('../dist/importer/sync-marker-asset');
 
 const FILE_KEY = 'VxeomJZczEotAMsETIlXWl';
@@ -49,6 +49,19 @@ function indexNodes(roots) {
     roots.forEach(visit);
     return map;
 }
+
+test('the marker component is recognised by fields, not by script uuid', () => {
+    assert.equal(isSyncMarkerComponentValue({
+        figmaMarkerSchema: 1,
+        figmaNodeId: '164:4718',
+        figmaVisualHash: 'sha256:x',
+    }), true);
+    assert.equal(isSyncMarkerComponentValue({ figmaMarkerSchema: 1, figmaNodeId: '164:4718' }), false);
+    assert.equal(isSyncMarkerComponentValue({ figmaMarkerSchema: 2, figmaNodeId: '164:4718', figmaVisualHash: 'x' }), false);
+    assert.equal(isSyncMarkerComponentValue({ figmaNodeId: '', figmaVisualHash: 'x', figmaMarkerSchema: 1 }), false);
+    assert.equal(isSyncMarkerComponentValue({ label: 'some user component' }), false);
+    assert.equal(isSyncMarkerComponentValue(null), false);
+});
 
 test('marker script plan creates a missing script', () => {
     const plan = planSyncMarkerScript(null);
