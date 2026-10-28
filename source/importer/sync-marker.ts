@@ -230,6 +230,7 @@ export function syncPixelPayload(
     origin?: { x: number; y: number },
     root = true,
     stripGeometry = false,
+    stripScale?: { width: number; height: number },
 ): Record<string, unknown> {
     const visual = syncVisualPayload(node);
     const box = node.absoluteBoundingBox;
@@ -246,14 +247,45 @@ export function syncPixelPayload(
     // 尺寸变化不改变像素内容，因此整条链的几何都不参与像素指纹。
     // 其他情况（有圆角/描边/特效、或图片不满框）仍按原规则计算。
     const strip = stripGeometry || (root && isStretchableImage(node));
+    const scale = stripScale ?? (strip && box && box.width > 0 && box.height > 0
+        ? { width: box.width, height: box.height }
+        : undefined);
+    // Figma 的 Scale 工具在缩放图片节点时会改写填充里的裁切矩阵。按节点尺寸归一化后，
+    // 等比/按轴缩放不再算变化；真正的裁切调整仍然会改变指纹。
+    const visualFills = scale
+        ? {
+            ...visual,
+            fills: (visual.fills as Array<Record<string, unknown>>).map((fill) =>
+                normalizePaintScale(fill, scale)),
+            strokes: (visual.strokes as Array<Record<string, unknown>>).map((fill) =>
+                normalizePaintScale(fill, scale)),
+        }
+        : visual;
     return {
-        ...visual,
-        size: strip ? null : visual.size,
-        rotation: strip ? null : visual.rotation,
-        frame: strip ? null : relative(visual.frame as number[] | null),
-        renderBounds: strip ? null : relative(visual.renderBounds as number[] | null),
-        children: (node.children ?? []).map((child) => syncPixelPayload(child, base, false, strip)),
+        ...visualFills,
+        size: strip ? null : visualFills.size,
+        rotation: strip ? null : visualFills.rotation,
+        frame: strip ? null : relative(visualFills.frame as number[] | null),
+        renderBounds: strip ? null : relative(visualFills.renderBounds as number[] | null),
+        children: (node.children ?? []).map((child) => syncPixelPayload(child, base, false, strip, scale)),
     };
+}
+
+/** 把图片裁切矩阵按节点尺寸归一化，使等比缩放不改变结果。 */
+function normalizePaintScale(
+    fill: Record<string, unknown>,
+    scale: { width: number; height: number },
+): Record<string, unknown> {
+    const transform = fill.imageTransform;
+    if (!Array.isArray(transform) || transform.length !== 2) {
+        return fill;
+    }
+    const scaled = transform.map((row, rowIndex) => (Array.isArray(row)
+        ? row.map((value) => (typeof value === 'number' && Number.isFinite(value)
+            ? quantizeDecimal(value / (rowIndex === 0 ? scale.width : scale.height), 4)
+            : value))
+        : row));
+    return { ...fill, imageTransform: scaled };
 }
 
 function framesEqual(left: Rect | undefined, right: Rect | undefined): boolean {
