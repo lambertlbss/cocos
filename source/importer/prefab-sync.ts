@@ -195,6 +195,53 @@ export function retainPrefabSyncEntries(
     };
 }
 
+/**
+ * 读取指定节点（按 fileId）在 Prefab 中的组件 fileId。
+ * 未勾选节点本次不参与重建，但它们的 UITransform/标记等组件仍属插件所有，
+ * 不合并回记录的话，下次重新勾选会被归属校验拦下。
+ */
+export function collectPrefabComponentFileIds(
+    contents: string | Buffer,
+    nodeFileIds: Iterable<string>,
+): string[] {
+    const wanted = new Set(nodeFileIds);
+    if (!wanted.size) {
+        return [];
+    }
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(typeof contents === 'string' ? contents : contents.toString('utf8'));
+    } catch {
+        return [];
+    }
+    if (!Array.isArray(parsed)) {
+        return [];
+    }
+    const objects = parsed as Array<Record<string, any>>;
+    /** 一个对象自身（node 或 component）的 fileId：节点用 `_prefab`，组件用 `__prefab`。 */
+    const ownFileId = (object: Record<string, any> | undefined): string => {
+        const reference = object?.__prefab ?? object?._prefab;
+        const index = typeof reference?.__id__ === 'number' ? reference.__id__ : -1;
+        const info = index >= 0 ? objects[index] : undefined;
+        return typeof info?.fileId === 'string' ? info.fileId : '';
+    };
+    const result = new Set<string>();
+    for (const item of objects) {
+        if (!item || item.__type__ !== 'cc.Node' || !wanted.has(ownFileId(item))) {
+            continue;
+        }
+        for (const reference of (item._components as Array<{ __id__?: number }> | undefined) ?? []) {
+            const index = typeof reference?.__id__ === 'number' ? reference.__id__ : -1;
+            const component = index >= 0 ? objects[index] : undefined;
+            const fileId = ownFileId(component);
+            if (fileId) {
+                result.add(fileId);
+            }
+        }
+    }
+    return [...result].sort();
+}
+
 export function readPrefabSyncRecord(meta: unknown): PrefabSyncRecord | null {    if (!meta || typeof meta !== 'object') {
         return null;
     }

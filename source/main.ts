@@ -66,6 +66,7 @@ import {
     collectSceneSpecFigmaIds,
     createMinimalPrefabJson,
     createPrefabSyncRecord,
+    collectPrefabComponentFileIds,
     figmaFrameSourceHash,
     mergePrefabSyncRecord,
     planPrefabRecoveryTarget,
@@ -2391,12 +2392,36 @@ async function importLinkedFramePrefab(args: {
         if (!await storedPrefabMatchesRecord(currentInfo, retainedRecord)) {
             throw new Error('Prefab 文件未包含本次同步生成的全部 fileId，已停止更新 Meta。');
         }
+        // 未勾选节点的组件（UITransform、标记等）仍属插件所有：从保存后的
+        // Prefab 里读回它们的 fileId 并合并进记录，否则下次重新勾选会被归属校验拦下。
+        let finalRecord = retainedRecord;
+        if (args.skipSyncNodeIds?.size) {
+            const skippedFileIds = Object.values(
+                resolveExistingNodeFileIds(prepared.record, args.skipSyncNodeIds),
+            );
+            if (skippedFileIds.length) {
+                const extras = collectPrefabComponentFileIds(
+                    await readFile(prefabDiskPath(currentInfo.url)),
+                    skippedFileIds,
+                ).filter((fileId) => !retainedRecord.managedComponentFileIds.includes(fileId));
+                if (extras.length) {
+                    finalRecord = {
+                        ...retainedRecord,
+                        managedComponentFileIds: [
+                            ...retainedRecord.managedComponentFileIds,
+                            ...extras,
+                        ].sort(),
+                    };
+                }
+            }
+        }
         const currentMeta = await queryPrefabMeta(currentInfo.uuid);
         const currentRecord = readPrefabSyncRecord(currentMeta);
         if (!currentRecord || currentRecord.sourceHash !== sourceHash) {
             throw new Error('Prefab 来源记录在保存期间发生变化，已拒绝提交。');
         }
-        await writeVerifiedPrefabRecord(currentInfo, sourceHash, retainedRecord);
+        await setPendingPrefabSync(sourceHash, { prefabUuid: prepared.info.uuid, record: finalRecord });
+        await writeVerifiedPrefabRecord(currentInfo, sourceHash, finalRecord);
         await setPendingPrefabSync(sourceHash, null);
         const verified = await queryPrefabAsset(prepared.info.url);
         if (!verified) {
