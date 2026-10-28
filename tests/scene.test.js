@@ -689,7 +689,7 @@ async function importWithFakeCocos(spec, scale = 1, reviewId) {
     }
 }
 
-async function importWithPrefabContext(environment, spec, prefabContext) {
+async function importWithPrefabContext(environment, spec, prefabContext, extra = {}) {
     const originalLoad = Module._load;
     const originalCce = global.cce;
     const prefabRoot = environment.canvas;
@@ -736,6 +736,7 @@ async function importWithPrefabContext(environment, spec, prefabContext) {
             existingMap: {},
             roots: [spec],
             prefabContext,
+            ...extra,
         });
         environment.nextFileId = nextFileId;
         return result;
@@ -4283,4 +4284,98 @@ test('Sprite tint belongs to each instance, preserves SLICED/CUSTOM and resets w
     assert.equal(a.getComponent(Sprite), first);
     assert.deepEqual({ ...first.color }, { r: 255, g: 255, b: 255, a: 255 });
     assert.deepEqual({ ...second.color }, { r: 255, g: 0, b: 0, a: 255 });
+});
+
+test('a sync marker component never blocks deleting a stale managed node', async () => {
+    const environment = fakeCocos();
+    environment.autoAssignPrefabInfo = true;
+    const prefabUuid = 'prefab-marker-guard-uuid';
+    const rootFileId = 'markerGuardRootFileId';
+    const rootTransformFileId = 'markerGuardRootTransformFileId';
+    environment.canvas._prefab = { fileId: rootFileId, root: environment.canvas, asset: { uuid: prefabUuid } };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+
+    const first = await importWithPrefabContext(environment, makeSpec({
+        figmaId: 'marker-root',
+        name: 'Marker Root',
+        children: [makeSpec({ figmaId: 'marker-child', name: 'Img Bang', figmaType: 'RECTANGLE' })],
+    }), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'marker-root': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+
+    const child = environment.canvas.getChildByName('Img Bang');
+    assert.ok(child, 'child imported');
+    // 旧版本 Meta 里没有这个标记组件的 fileId，它必须被认成插件自己的组件。
+    class ManualMarkerScript extends Component {}
+    const marker = child.addComponent(ManualMarkerScript);
+    marker.figmaMarkerSchema = 1;
+    marker.figmaNodeId = '1:20';
+    marker.figmaVisualHash = 'sha256:' + 'a'.repeat(64);
+
+    const result = await importWithPrefabContext(environment, makeSpec({
+        figmaId: 'marker-root',
+        name: 'Marker Root',
+        children: [],
+    }), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: first.prefabSync.nodeFileIds,
+        managedNodeFileIds: [...first.prefabSync.managedNodeFileIds, child._prefab.fileId],
+        managedComponentFileIds: [
+            ...first.prefabSync.managedComponentFileIds,
+            ...child.components.filter((component) => component !== marker).map((component) => component.__prefab?.fileId).filter(Boolean),
+        ],
+        managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+    });
+
+    assert.ok(result);
+    assert.equal(environment.canvas.getChildByName('Img Bang'), null, 'stale node removed');
+});
+
+test('retainNodeFileIds keeps an unchecked node alive during stale cleanup', async () => {
+    const environment = fakeCocos();
+    environment.autoAssignPrefabInfo = true;
+    const prefabUuid = 'prefab-retain-uuid';
+    const rootFileId = 'retainRootFileId';
+    const rootTransformFileId = 'retainRootTransformFileId';
+    environment.canvas._prefab = { fileId: rootFileId, root: environment.canvas, asset: { uuid: prefabUuid } };
+    environment.canvas.getComponent(UITransform).__prefab = { fileId: rootTransformFileId };
+
+    const first = await importWithPrefabContext(environment, makeSpec({
+        figmaId: 'retain-root',
+        name: 'Retain Root',
+        children: [makeSpec({ figmaId: 'retain-child', name: 'Kept Node', figmaType: 'RECTANGLE' })],
+    }), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: { 'retain-root': rootFileId },
+        managedNodeFileIds: [rootFileId],
+        managedComponentFileIds: [rootTransformFileId],
+        managedHelperFileIds: [],
+    });
+    const child = environment.canvas.getChildByName('Kept Node');
+    assert.ok(child);
+    const childFileId = child._prefab.fileId;
+
+    const kept = await importWithPrefabContext(environment, makeSpec({
+        figmaId: 'retain-root',
+        name: 'Retain Root',
+        children: [],
+    }), {
+        prefabUuid,
+        rootFileId,
+        existingNodeFileIds: first.prefabSync.nodeFileIds,
+        managedNodeFileIds: [...first.prefabSync.managedNodeFileIds, childFileId],
+        managedComponentFileIds: first.prefabSync.managedComponentFileIds,
+        managedHelperFileIds: first.prefabSync.managedHelperFileIds,
+    }, { retainNodeFileIds: [childFileId] });
+
+    assert.ok(kept);
+    assert.equal(environment.canvas.getChildByName('Kept Node'), child, 'unchecked node retained');
+    assert.notEqual(child.destroyed, true);
 });
