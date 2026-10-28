@@ -228,6 +228,7 @@ export function syncPixelPayload(
     node: FigmaNode,
     origin?: { x: number; y: number },
     root = true,
+    stripGeometry = false,
 ): Record<string, unknown> {
     const visual = syncVisualPayload(node);
     const box = node.absoluteBoundingBox;
@@ -240,17 +241,78 @@ export function syncPixelPayload(
             frame[3],
         ]
         : null);
-    // 纯图片节点的位图可以被 Sprite 直接拉伸：自身尺寸/旋转不改变像素内容，
-    // 因此不参与像素指纹（后代仍然参与，缩放子层会改变整层渲染结果）。
-    const stretchable = root && isPlainImageNode(node);
+    // 纯图片节点，或"只包着一张同框图片"的包装层：位图可以被 Sprite 直接拉伸，
+    // 尺寸变化不改变像素内容，因此整条链的几何都不参与像素指纹。
+    // 其他情况（有圆角/描边/特效、或图片不满框）仍按原规则计算。
+    const strip = stripGeometry || (root && isStretchableImage(node));
     return {
         ...visual,
-        size: stretchable ? null : visual.size,
-        rotation: stretchable ? null : visual.rotation,
-        frame: stretchable ? null : relative(visual.frame as number[] | null),
-        renderBounds: stretchable ? null : relative(visual.renderBounds as number[] | null),
-        children: (node.children ?? []).map((child) => syncPixelPayload(child, base, false)),
+        size: strip ? null : visual.size,
+        rotation: strip ? null : visual.rotation,
+        frame: strip ? null : relative(visual.frame as number[] | null),
+        renderBounds: strip ? null : relative(visual.renderBounds as number[] | null),
+        children: (node.children ?? []).map((child) => syncPixelPayload(child, base, false, strip)),
     };
+}
+
+function framesEqual(left: Rect | undefined, right: Rect | undefined): boolean {
+    if (!left || !right) {
+        return false;
+    }
+    const near = (a: number, b: number) => Math.abs(a - b) <= 0.01;
+    return near(left.x, right.x) && near(left.y, right.y)
+        && near(left.width, right.width) && near(left.height, right.height);
+}
+
+function hasOwnVisual(node: FigmaNode): boolean {
+    if ((node.fills ?? []).some((fill) => fill.visible !== false)) {
+        return true;
+    }
+    if ((node.strokes ?? []).some((stroke) => stroke.visible !== false)) {
+        return true;
+    }
+    if ((node.effects ?? []).some((effect) => effect.visible !== false)) {
+        return true;
+    }
+    if ((node.cornerRadius ?? 0) > 0) {
+        return true;
+    }
+    return (node.rectangleCornerRadii ?? []).some((radius) => radius > 0);
+}
+
+/**
+ * 可被 Sprite 直接拉伸的图片结构：
+ * - 自身就是纯图片节点；或
+ * - 自身没有任何填充/描边/特效/圆角，只包着一层或多层空容器，
+ *   最内层是纯图片节点，且与最外层完全同框（这正是单图片折叠的形态）。
+ */
+export function isStretchableImage(node: FigmaNode): boolean {
+    if (isPlainImageNode(node)) {
+        return true;
+    }
+    const rootBox = node.absoluteBoundingBox;
+    if (!rootBox || hasOwnVisual(node)) {
+        return false;
+    }
+    let current: FigmaNode = node;
+    for (let depth = 0; depth < 8; depth += 1) {
+        const children = current.children ?? [];
+        if (!children.length) {
+            return false;
+        }
+        if (children.length > 1) {
+            return false;
+        }
+        const child = children[0];
+        if (isPlainImageNode(child)) {
+            return framesEqual(rootBox, child.absoluteBoundingBox);
+        }
+        if (hasOwnVisual(child) || child.arcData || child.clipsContent) {
+            return false;
+        }
+        current = child;
+    }
+    return false;
 }
 
 /**

@@ -357,6 +357,62 @@ test('a child image resized inside a rendered parent still changes pixels', () =
     assert.equal(syncPixelHash(parent(40)) === syncPixelHash(parent(80)), false);
 });
 
+test('a wrapper that only holds one same-frame image can be scaled without re-rendering', () => {
+    const wrapper = (size) => node({
+        id: '1:20',
+        type: 'FRAME',
+        name: 'icon_phb_bang2',
+        fills: [],
+        absoluteBoundingBox: { x: 10, y: 20, width: size, height: size },
+        children: [imgNode({
+            id: '1:21',
+            absoluteBoundingBox: { x: 10, y: 20, width: size, height: size },
+        })],
+    });
+    const before = createSyncMarker({ fileKey: FILE_KEY, node: wrapper(100) });
+    const scaled = createSyncMarker({ fileKey: FILE_KEY, node: wrapper(200) });
+    const comparison = compareSyncMarker(before, scaled);
+    assert.equal(comparison.visualChanged, true);
+    assert.equal(comparison.pixelChanged, false);
+    assert.equal(comparison.assetStale, false);
+
+    // 换了图片内容仍然要重导。
+    const replaced = createSyncMarker({
+        fileKey: FILE_KEY,
+        node: node({
+            id: '1:20',
+            type: 'FRAME',
+            name: 'icon_phb_bang2',
+            fills: [],
+            absoluteBoundingBox: { x: 10, y: 20, width: 100, height: 100 },
+            children: [imgNode({
+                id: '1:21',
+                absoluteBoundingBox: { x: 10, y: 20, width: 100, height: 100 },
+                fills: [{ type: 'IMAGE', imageRef: 'image-ref-2', scaleMode: 'FILL' }],
+            })],
+        }),
+    });
+    assert.equal(compareSyncMarker(before, replaced).assetStale, true);
+});
+
+test('a wrapper with padding inside still treats the image as part of its pixels', () => {
+    const wrapper = (size) => node({
+        id: '1:30',
+        type: 'FRAME',
+        name: 'img_padded',
+        fills: [],
+        absoluteBoundingBox: { x: 0, y: 0, width: size, height: size },
+        children: [imgNode({
+            id: '1:31',
+            absoluteBoundingBox: { x: 10, y: 10, width: size - 20, height: size - 20 },
+        })],
+    });
+    assert.equal(compareSyncMarker(
+        createSyncMarker({ fileKey: FILE_KEY, node: wrapper(100) }),
+        createSyncMarker({ fileKey: FILE_KEY, node: wrapper(200) }),
+    ).assetStale, true);
+});
+
 test('the generated marker script is minimal, valid and detectable', () => {
     assert.equal(SYNC_MARKER_SCRIPT_URL, 'db://assets/figma-importer-runtime/FigmaSyncNode.ts');
     assert.equal(isSyncMarkerScript(SYNC_MARKER_SCRIPT_SOURCE), true);
