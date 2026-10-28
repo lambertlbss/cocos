@@ -1,0 +1,401 @@
+import type { FigmaEffect, FigmaNode, FigmaPaint, FigmaTextStyle, Rect, SyncMarkerSpec } from '../types';
+import { canonicalStringify, quantizeDecimal, sha256 } from '../roundtrip/canonical-json';
+
+/**
+ * 组件级双边同步（Component Sync）的标记协议。
+ *
+ * 标记组件 `FigmaSyncNode` 挂在每个由同步模式生成的 Cocos 节点上，
+ * 既提供可见身份（Figma 节点 id），也保存上次导入时的视觉/子树指纹，
+ * 使重新导入能在不打开 Prefab 的情况下判断"设计改了什么"。
+ *
+ * 安全边界：file key 只以 SHA-256 形式保存；node id 按需求明文保存，
+ * 与 Project Profile 中 nodeMaps / nodeOverrides 的既有明文一致。
+ */
+export const SYNC_MARKER_SCHEMA = 1 as const;
+export const SYNC_MARKER_CLASS = 'FigmaSyncNode';
+export const SYNC_MARKER_FOLDER = 'figma-importer-runtime';
+export const SYNC_MARKER_FILE = 'FigmaSyncNode.ts';
+export const SYNC_MARKER_SCRIPT_URL = `db://assets/${SYNC_MARKER_FOLDER}/${SYNC_MARKER_FILE}`;
+export const SYNC_MARKER_CATEGORY = 'Figma Importer';
+
+/** 标记组件在 Prefab 中保存的字段。 */
+export interface SyncMarkerComponentValues {
+    figmaMarkerSchema: number;
+    figmaFileHash: string;
+    figmaNodeId: string;
+    figmaAliasNodeIds: string;
+    figmaAliasHash: string;
+    figmaVisualHash: string;
+    figmaSubtreeHash: string;
+}
+
+export type { SyncMarkerSpec } from '../types';
+
+export interface SyncMarkerInput {
+    fileKey: string;
+    node: FigmaNode;
+    /** 被折叠吸收的子层 id（不含 node 自身）。 */
+    aliasNodeIds?: string[];
+    schema?: number;
+}
+
+export interface SyncMarkerComparison {
+    /** 本节点的几何、显隐、外观、文字或组件类型发生变化。 */
+    visualChanged: boolean;
+    /** Figma 子树内任意后代发生变化（含新增/删除/同名替换）。 */
+    subtreeChanged: boolean;
+    /** 折叠子层集合发生变化（子层新增、删除或被替换）。 */
+    structureChanged: boolean;
+    /** 需要重新生成图片资源才能反映设计变化。 */
+    assetStale: boolean;
+}
+
+const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+
+export function normalizeSyncNodeId(value: string): string {
+    return value.trim().replace(/-/g, ':');
+}
+
+function finiteOrNull(value: number | undefined): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? quantizeDecimal(value, 4) : null;
+}
+
+function framePayload(frame: Rect | undefined): number[] | null {
+    if (!frame) {
+        return null;
+    }
+    return [
+        finiteOrNull(frame.x) ?? 0,
+        finiteOrNull(frame.y) ?? 0,
+        finiteOrNull(frame.width) ?? 0,
+        finiteOrNull(frame.height) ?? 0,
+    ];
+}
+
+function paintPayload(paint: FigmaPaint): Record<string, unknown> {
+    return {
+        type: paint.type,
+        visible: paint.visible !== false,
+        opacity: finiteOrNull(paint.opacity ?? 1),
+        blendMode: paint.blendMode ?? null,
+        color: paint.color
+            ? {
+                r: finiteOrNull(paint.color.r),
+                g: finiteOrNull(paint.color.g),
+                b: finiteOrNull(paint.color.b),
+                a: finiteOrNull(paint.color.a ?? 1),
+            }
+            : null,
+        imageRef: paint.imageRef ?? null,
+        scaleMode: paint.scaleMode ?? null,
+        rotation: finiteOrNull(paint.rotation),
+        sourceNodeId: paint.sourceNodeId ?? null,
+        tileType: paint.tileType ?? null,
+        scalingFactor: finiteOrNull(paint.scalingFactor),
+        spacing: paint.spacing
+            ? [finiteOrNull(paint.spacing.x), finiteOrNull(paint.spacing.y)]
+            : null,
+        horizontalAlignment: paint.horizontalAlignment ?? null,
+        verticalAlignment: paint.verticalAlignment ?? null,
+        gradientHandlePositions: Array.isArray(paint.gradientHandlePositions)
+            ? paint.gradientHandlePositions.map((handle) => [finiteOrNull(handle.x), finiteOrNull(handle.y)])
+            : null,
+        gradientStops: Array.isArray(paint.gradientStops)
+            ? paint.gradientStops.map((stop) => [finiteOrNull(stop.position), stop.color
+                ? {
+                    r: finiteOrNull(stop.color.r),
+                    g: finiteOrNull(stop.color.g),
+                    b: finiteOrNull(stop.color.b),
+                    a: finiteOrNull(stop.color.a ?? 1),
+                }
+                : null])
+            : null,
+        // 图片裁切矩阵与滤镜同样改变像素，但不会改变 imageRef；漏掉它们会让
+        // 整层节点在重导入后继续显示旧图。
+        imageTransform: Array.isArray(paint.imageTransform)
+            ? paint.imageTransform.map((row) => (Array.isArray(row)
+                ? row.map((value) => finiteOrNull(value))
+                : null))
+            : null,
+        filters: paint.filters
+            ? Object.fromEntries(Object.entries(paint.filters)
+                .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
+                .map(([key, value]) => [key, finiteOrNull(value)]))
+            : null,
+    };
+}
+
+function effectPayload(effect: FigmaEffect): Record<string, unknown> {
+    return {
+        type: effect.type,
+        visible: effect.visible !== false,
+        radius: finiteOrNull(effect.radius),
+        spread: finiteOrNull(effect.spread),
+        offsetX: finiteOrNull(effect.offset?.x),
+        offsetY: finiteOrNull(effect.offset?.y),
+        color: effect.color
+            ? {
+                r: finiteOrNull(effect.color.r),
+                g: finiteOrNull(effect.color.g),
+                b: finiteOrNull(effect.color.b),
+                a: finiteOrNull(effect.color.a ?? 1),
+            }
+            : null,
+    };
+}
+
+function textPayload(style: FigmaTextStyle | undefined): Record<string, unknown> | null {
+    if (!style) {
+        return null;
+    }
+    return {
+        fontFamily: style.fontFamily ?? null,
+        fontPostScriptName: style.fontPostScriptName ?? null,
+        fontWeight: finiteOrNull(style.fontWeight),
+        fontSize: finiteOrNull(style.fontSize),
+        textAlignHorizontal: style.textAlignHorizontal ?? null,
+        textAlignVertical: style.textAlignVertical ?? null,
+        letterSpacing: finiteOrNull(style.letterSpacing),
+        lineHeightPx: finiteOrNull(style.lineHeightPx),
+        textAutoResize: style.textAutoResize ?? null,
+        textTruncation: style.textTruncation ?? null,
+        maxLines: finiteOrNull(style.maxLines),
+    };
+}
+
+/**
+ * 本节点自身的视觉贡献：几何、显隐、填充/描边/特效、圆角、文字与样式。
+ * 不包含子节点，因此折叠父节点的指纹不会因子层移动而变化。
+ */
+export function syncVisualPayload(node: FigmaNode): Record<string, unknown> {
+    return {
+        id: normalizeSyncNodeId(node.id),
+        type: node.type,
+        frame: framePayload(node.absoluteBoundingBox),
+        renderBounds: framePayload(node.absoluteRenderBounds),
+        size: node.size
+            ? [finiteOrNull(node.size.width), finiteOrNull(node.size.height)]
+            : null,
+        rotation: finiteOrNull(node.rotation),
+        visible: node.visible !== false,
+        opacity: finiteOrNull(node.opacity ?? 1),
+        blendMode: node.blendMode ?? null,
+        clipsContent: node.clipsContent === true,
+        cornerRadius: finiteOrNull(node.cornerRadius),
+        rectangleCornerRadii: Array.isArray(node.rectangleCornerRadii)
+            ? node.rectangleCornerRadii.map((radius) => finiteOrNull(radius))
+            : null,
+        // 圆弧的起止角与内半径只改像素，不改外框；不纳入指纹会漏掉整层节点的新形状。
+        arcData: node.arcData
+            ? {
+                startingAngle: finiteOrNull(node.arcData.startingAngle),
+                endingAngle: finiteOrNull(node.arcData.endingAngle),
+                innerRadius: finiteOrNull(node.arcData.innerRadius),
+            }
+            : null,
+        fills: (node.fills ?? []).map(paintPayload),
+        strokes: (node.strokes ?? []).map(paintPayload),
+        strokeWeight: finiteOrNull(node.strokeWeight),
+        strokeAlign: node.strokeAlign ?? null,
+        effects: (node.effects ?? []).map(effectPayload),
+        characters: typeof node.characters === 'string' ? node.characters : null,
+        textStyle: textPayload(node.style),
+    };
+}
+
+/** 子树结构：本节点指纹 + 逐层子节点指纹，用于判断渲染型节点是否需要重新出图。 */
+export function syncSubtreePayload(node: FigmaNode): Record<string, unknown> {
+    return {
+        visual: syncVisualPayload(node),
+        children: (node.children ?? []).map((child) => syncSubtreePayload(child)),
+    };
+}
+
+export function syncVisualHash(node: FigmaNode): string {
+    return sha256(canonicalStringify(syncVisualPayload(node)));
+}
+
+export function syncSubtreeHash(node: FigmaNode): string {
+    return sha256(canonicalStringify(syncSubtreePayload(node)));
+}
+
+export function syncAliasHash(aliasNodeIds: readonly string[]): string {
+    const ids = [...new Set(aliasNodeIds.map(normalizeSyncNodeId).filter(Boolean))].sort();
+    return sha256(canonicalStringify(ids));
+}
+
+export function syncFileHash(fileKey: string): string {
+    const normalized = fileKey.trim();
+    if (!normalized) {
+        throw new Error('组件同步缺少 Figma file key。');
+    }
+    return sha256(`figma-importer:sync-file:v1\0${normalized}`);
+}
+
+export function createSyncMarker(input: SyncMarkerInput): SyncMarkerSpec {
+    const nodeId = normalizeSyncNodeId(input.node.id);
+    if (!nodeId) {
+        throw new Error('组件同步节点缺少 Figma 节点 id。');
+    }
+    const aliasNodeIds = [...new Set((input.aliasNodeIds ?? [])
+        .map(normalizeSyncNodeId)
+        .filter((id) => Boolean(id) && id !== nodeId))].sort();
+    return {
+        schema: input.schema ?? SYNC_MARKER_SCHEMA,
+        figmaFileHash: syncFileHash(input.fileKey),
+        figmaNodeId: nodeId,
+        aliasNodeIds,
+        aliasHash: syncAliasHash(aliasNodeIds),
+        visualHash: syncVisualHash(input.node),
+        subtreeHash: syncSubtreeHash(input.node),
+    };
+}
+
+export function compareSyncMarker(
+    previous: SyncMarkerSpec,
+    next: SyncMarkerSpec,
+): SyncMarkerComparison {
+    const visualChanged = previous.visualHash !== next.visualHash;
+    const subtreeChanged = previous.subtreeHash !== next.subtreeHash;
+    const structureChanged = previous.aliasHash !== next.aliasHash
+        || previous.aliasNodeIds.join(',') !== next.aliasNodeIds.join(',');
+    const sourceChanged = previous.figmaFileHash !== next.figmaFileHash
+        || previous.figmaNodeId !== next.figmaNodeId;
+    return {
+        visualChanged,
+        subtreeChanged,
+        structureChanged,
+        // 换了来源、几何、子树或折叠集合，都意味着这张图不再是上次导出的那张。
+        assetStale: visualChanged || subtreeChanged || structureChanged || sourceChanged,
+    };
+}
+
+/** 判断一个不透明视觉节点（矢量/整层 PNG/折叠包装）是否需要重新生成图片。 */
+export function syncNeedsAssetRefresh(options: {
+    comparison: SyncMarkerComparison;
+    /** 当前节点是否以 PNG 形式落地（整层 render、矢量、折叠 Sprite/Label）。 */
+    rasterized: boolean;
+}): boolean {
+    if (!options.rasterized) {
+        return false;
+    }
+    return options.comparison.assetStale;
+}
+
+export function markerToComponentValues(marker: SyncMarkerSpec): SyncMarkerComponentValues {
+    return {
+        figmaMarkerSchema: marker.schema,
+        figmaFileHash: marker.figmaFileHash,
+        figmaNodeId: marker.figmaNodeId,
+        figmaAliasNodeIds: marker.aliasNodeIds.join(','),
+        figmaAliasHash: marker.aliasHash,
+        figmaVisualHash: marker.visualHash,
+        figmaSubtreeHash: marker.subtreeHash,
+    };
+}
+
+/** 从 Cocos 组件读回标记；字段缺失或损坏时返回 null，由调用方 fail-closed。 */
+export function markerFromComponentValues(
+    values: Partial<SyncMarkerComponentValues> | null | undefined,
+): SyncMarkerSpec | null {
+    if (!values || typeof values !== 'object') {
+        return null;
+    }
+    const schema = values.figmaMarkerSchema;
+    if (schema !== SYNC_MARKER_SCHEMA) {
+        return null;
+    }
+    const fileHash = values.figmaFileHash;
+    const nodeId = typeof values.figmaNodeId === 'string' ? normalizeSyncNodeId(values.figmaNodeId) : '';
+    const visualHash = values.figmaVisualHash;
+    const subtreeHash = values.figmaSubtreeHash;
+    if (typeof fileHash !== 'string' || !SHA256_PATTERN.test(fileHash)) {
+        return null;
+    }
+    if (!nodeId || typeof visualHash !== 'string' || !SHA256_PATTERN.test(visualHash)) {
+        return null;
+    }
+    if (typeof subtreeHash !== 'string' || !SHA256_PATTERN.test(subtreeHash)) {
+        return null;
+    }
+    const aliasNodeIds = typeof values.figmaAliasNodeIds === 'string'
+        ? values.figmaAliasNodeIds.split(',')
+            .map((id) => normalizeSyncNodeId(id))
+            .filter(Boolean)
+            .sort()
+        : [];
+    const aliasHash = typeof values.figmaAliasHash === 'string' && SHA256_PATTERN.test(values.figmaAliasHash)
+        ? values.figmaAliasHash
+        : syncAliasHash(aliasNodeIds);
+    return {
+        schema,
+        figmaFileHash: fileHash,
+        figmaNodeId: nodeId,
+        aliasNodeIds,
+        aliasHash,
+        visualHash,
+        subtreeHash,
+    };
+}
+
+/**
+ * 一个 Figma 节点只能被一个 Cocos 节点声明（自己或作为别名）。
+ * 折叠父子同时声明同源节点会让"改哪个节点"变得不可判定。
+ */
+export function assertUniqueSyncOwnership(markers: readonly SyncMarkerSpec[]): void {
+    const owners = new Map<string, string>();
+    for (const marker of markers) {
+        for (const nodeId of [marker.figmaNodeId, ...marker.aliasNodeIds]) {
+            const owner = owners.get(nodeId);
+            if (owner && owner !== marker.figmaNodeId) {
+                throw new Error(
+                    `Figma 节点 ${nodeId} 同时被 ${owner} 和 ${marker.figmaNodeId} 声明，已拒绝生成同步标记。`,
+                );
+            }
+            owners.set(nodeId, marker.figmaNodeId);
+        }
+    }
+}
+
+/** 需要在项目 assets 中生成的最小标记组件源码（无业务逻辑，只保存来源与指纹）。 */
+export const SYNC_MARKER_SCRIPT_SOURCE = `import { _decorator, Component } from 'cc';
+
+const { ccclass, property, menu } = _decorator;
+
+/**
+ * Figma Importer 生成的同步标记。字段由插件维护，手工修改会导致下次同步被拒绝。
+ * 删除本组件即表示该节点退出 Figma 同步：插件不会再移动、缩放或删除它。
+ */
+@ccclass('${SYNC_MARKER_CLASS}')
+@menu('${SYNC_MARKER_CATEGORY}/${SYNC_MARKER_CLASS}')
+export class ${SYNC_MARKER_CLASS} extends Component {
+    @property({ tooltip: '标记协议版本' })
+    public figmaMarkerSchema: number = ${SYNC_MARKER_SCHEMA};
+
+    @property({ tooltip: 'Figma 文件 key 的 SHA-256' })
+    public figmaFileHash: string = '';
+
+    @property({ tooltip: 'Figma 节点 id' })
+    public figmaNodeId: string = '';
+
+    @property({ tooltip: '被折叠到本节点的 Figma 子层 id，逗号分隔' })
+    public figmaAliasNodeIds: string = '';
+
+    @property({ tooltip: '折叠子层集合指纹' })
+    public figmaAliasHash: string = '';
+
+    @property({ tooltip: '本次导入时的节点视觉指纹' })
+    public figmaVisualHash: string = '';
+
+    @property({ tooltip: '本次导入时的子树指纹' })
+    public figmaSubtreeHash: string = '';
+}
+`;
+
+/** 验证生成到项目里的脚本没有被截断或被改成别的类。 */
+export function isSyncMarkerScript(source: string): boolean {
+    return typeof source === 'string'
+        && source.includes(`@ccclass('${SYNC_MARKER_CLASS}')`)
+        && source.includes(`class ${SYNC_MARKER_CLASS} extends Component`)
+        && source.includes('figmaSubtreeHash');
+}

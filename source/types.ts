@@ -282,6 +282,23 @@ export interface SpriteAssetSpec {
     renderFrame?: Rect;
 }
 
+/**
+ * 组件级双边同步的节点标记。由 `importer/sync-marker.ts` 生成，
+ * 随 `SceneNodeSpec` 下发并在建树时写入 `FigmaSyncNode` 组件。
+ */
+export interface SyncMarkerSpec {
+    schema: number;
+    /** `sha256:<hex>` of the Figma file key. */
+    figmaFileHash: string;
+    /** 明文 Figma 节点 id（冒号形式）。 */
+    figmaNodeId: string;
+    /** 被折叠进本节点的 Figma 子层 id，已去重排序。 */
+    aliasNodeIds: string[];
+    aliasHash: string;
+    visualHash: string;
+    subtreeHash: string;
+}
+
 export interface SceneNodeSpec {
     figmaId: string;
     name: string;
@@ -333,6 +350,8 @@ export interface SceneNodeSpec {
     aliasFigmaIds?: string[];
     /** 当前节点是层级收口边界，更新时需清理旧的已映射后代。 */
     flattenBoundary?: boolean;
+    /** 组件同步模式下的节点标记；普通导入与旧数据为 undefined。 */
+    syncMarker?: SyncMarkerSpec;
     planReason?: ImportPlanReason;
     children: SceneNodeSpec[];
 }
