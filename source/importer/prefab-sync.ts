@@ -163,8 +163,39 @@ export function recordPrefabSyncCapture(
     };
 }
 
-export function readPrefabSyncRecord(meta: unknown): PrefabSyncRecord | null {
-    if (!meta || typeof meta !== 'object') {
+/**
+ * 本次跳过（未勾选）的节点不参与重建，但它们仍是被插件管理的节点。
+ * 把上一份记录里的 fileId 合并回新记录，保证下次导入能原地更新而不是新建副本。
+ */
+export function retainPrefabSyncEntries(
+    previous: PrefabSyncRecord,
+    next: PrefabSyncRecord,
+    figmaNodeIds: Iterable<string>,
+): PrefabSyncRecord {
+    const nodeFileIds = new Map(Object.entries(next.nodeFileIds));
+    const managedNodes = new Set(next.managedNodeFileIds);
+    let changed = false;
+    for (const rawId of figmaNodeIds) {
+        const key = figmaNodeIdentityKey(previous.sourceHash, rawId);
+        const fileId = previous.nodeFileIds[key];
+        if (!fileId) {
+            continue;
+        }
+        nodeFileIds.set(key, fileId);
+        managedNodes.add(fileId);
+        changed = true;
+    }
+    if (!changed) {
+        return next;
+    }
+    return {
+        ...next,
+        nodeFileIds: Object.fromEntries([...nodeFileIds.entries()].sort(([a], [b]) => a.localeCompare(b))),
+        managedNodeFileIds: [...managedNodes].sort(),
+    };
+}
+
+export function readPrefabSyncRecord(meta: unknown): PrefabSyncRecord | null {    if (!meta || typeof meta !== 'object') {
         return null;
     }
     const userData = (meta as { userData?: unknown }).userData;

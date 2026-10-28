@@ -43,6 +43,8 @@ export class PanelWorkflow {
     private result: WorkflowResult | null = null;
     private reviewAvailable = false;
     private autoRefreshApplied = false;
+    /** 改动清单里取消勾选的节点；导入时连同其子层一起跳过。 */
+    private readonly skippedSyncNodeIds = new Set<string>();
     private operationControls: Array<{ control: HTMLInputElement | HTMLSelectElement | HTMLButtonElement; disabled: boolean }> = [];
 
     constructor(
@@ -60,6 +62,17 @@ export class PanelWorkflow {
             if (this.locked || !this.context().document || this.selectedCount() === 0) return;
             this.unlocked = Math.max(3, this.unlocked);
             this.navigate(3);
+        });
+        this.host.querySelector('#sync-toggle-all')?.addEventListener('click', () => {
+            const sync = this.context().syncPreview;
+            const items = sync?.exists ? sync.items : [];
+            if (!items.length) return;
+            if (this.skippedSyncNodeIds.size === 0) {
+                items.forEach((item) => this.skippedSyncNodeIds.add(item.nodeId));
+            } else {
+                this.skippedSyncNodeIds.clear();
+            }
+            this.render();
         });
         this.get('#manage-credentials').addEventListener('click', () => this.openCredentials());
         this.get('#configure-credentials').addEventListener('click', () => this.openCredentials());
@@ -383,7 +396,13 @@ export class PanelWorkflow {
         box.hidden = items.length === 0;
         if (!items.length) {
             list.replaceChildren();
+            this.skippedSyncNodeIds.clear();
             return;
+        }
+        // 只保留仍然出现在清单里的取消项，避免旧选择影响新一次预检。
+        const available = new Set(items.map((item) => item.nodeId));
+        for (const nodeId of [...this.skippedSyncNodeIds]) {
+            if (!available.has(nodeId)) this.skippedSyncNodeIds.delete(nodeId);
         }
         const count = this.host.querySelector('#sync-changes-count');
         if (count) {
@@ -393,7 +412,19 @@ export class PanelWorkflow {
         const visible = items.slice(0, 40);
         const rows = visible.map((item) => {
             const row = document.createElement('li');
-            row.className = `sync-change-row is-${item.status}`;
+            const skipped = this.skippedSyncNodeIds.has(item.nodeId);
+            row.className = `sync-change-row is-${item.status}${skipped ? ' is-skipped' : ''}`;
+            const select = document.createElement('input');
+            select.type = 'checkbox';
+            select.className = 'sync-change-select';
+            select.checked = !skipped;
+            select.setAttribute('aria-label', `应用 ${item.name} 的改动`);
+            select.addEventListener('change', () => {
+                if (select.checked) this.skippedSyncNodeIds.delete(item.nodeId);
+                else this.skippedSyncNodeIds.add(item.nodeId);
+                row.classList.toggle('is-skipped', !select.checked);
+                this.renderSyncSelection();
+            });
             const name = document.createElement('span');
             name.className = 'sync-change-name';
             name.textContent = item.status === 'removed' ? `− ${item.name}` : item.name;
@@ -401,7 +432,7 @@ export class PanelWorkflow {
             const detail = document.createElement('span');
             detail.className = 'sync-change-fields';
             detail.textContent = item.fields.join(' · ');
-            row.append(name, detail);
+            row.append(select, name, detail);
             if (item.assetStale) {
                 const badge = document.createElement('span');
                 badge.className = 'sync-change-asset';
@@ -417,6 +448,28 @@ export class PanelWorkflow {
             rows.push(more);
         }
         list.replaceChildren(...rows);
+        this.renderSyncSelection();
+    }
+
+    /** 本次要跳过的节点（改动清单里取消勾选的项）。 */
+    get skippedSyncNodes(): string[] {
+        return [...this.skippedSyncNodeIds];
+    }
+
+    private renderSyncSelection(): void {
+        const summary = this.host.querySelector('#sync-selection-summary');
+        const toggle = this.host.querySelector<HTMLButtonElement>('#sync-toggle-all');
+        const sync = this.context().syncPreview;
+        const total = sync?.exists ? sync.items.length : 0;
+        const skipped = this.skippedSyncNodeIds.size;
+        if (summary) {
+            summary.textContent = skipped === 0
+                ? '全部勾选'
+                : `已勾选 ${Math.max(0, total - skipped)} / ${total} 处`;
+        }
+        if (toggle) {
+            toggle.textContent = skipped === 0 ? '全不选' : '全选';
+        }
     }
 
     private renderResult(result: WorkflowResult): void {

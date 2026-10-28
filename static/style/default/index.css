@@ -540,3 +540,9 @@ button.review-tree-cell { cursor: pointer; }
 .sync-change-fields { flex: none; color: var(--muted); font-size: 11px; }
 .sync-change-asset { flex: none; color: var(--amber); font-size: 11px; }
 .sync-change-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
+
+/* ---- 组件同步：改动清单勾选 ---- */
+.sync-change-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; color: var(--muted); font-size: 11px; }
+.sync-change-select { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.sync-change-row.is-skipped { opacity: 0.45; }
+.sync-change-row.is-skipped .sync-change-name { text-decoration: line-through; }

@@ -35,6 +35,8 @@ interface SceneImportPayload {
     prefabUrl?: string;
     centerInCanvas?: boolean;
     prefabContext?: PrefabSceneSyncContext;
+    /** 未勾选节点在 Prefab 中已有的 fileId；清理旧节点时必须保留。 */
+    retainNodeFileIds?: string[];
     roots: SceneNodeSpec[];
 }
 
@@ -2261,7 +2263,7 @@ export const methods = {
         }
         let prefabSync: PrefabSceneSyncCapture | undefined;
         if (prefabContext) {
-            const retainedNodeFileIds = new Set<string>();
+            const retainedNodeFileIds = new Set<string>(payload.retainNodeFileIds ?? []);
             for (const [figmaId, uuid] of Object.entries(nodeMap)) {
                 if (figmaId === '__root__') {
                     continue;

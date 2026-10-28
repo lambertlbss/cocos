@@ -71,6 +71,7 @@ import {
     planPrefabRecoveryTarget,
     prefabJsonContainsSyncRecord,
     readPrefabSyncRecord,
+    retainPrefabSyncEntries,
     recordPrefabSyncCapture,
     resolveExistingNodeFileIds,
     type PrefabSyncRecord,
@@ -161,6 +162,8 @@ interface SceneImportPayload {
     prefabUrl?: string;
     centerInCanvas?: boolean;
     prefabContext?: PrefabSceneSyncContext;
+    /** 未勾选节点在 Prefab 中已有的 fileId；清理旧节点时必须保留。 */
+    retainNodeFileIds?: string[];
     roots: SceneNodeSpec[];
 }
 
@@ -2300,6 +2303,8 @@ async function importLinkedFramePrefab(args: {
     rootFrame: Rect;
     scale: number;
     roots: SceneNodeSpec[];
+    /** 未勾选的节点：保留它们在 Prefab 里的现有节点，不参与本次清理。 */
+    skipSyncNodeIds?: ReadonlySet<string>;
 }): Promise<SceneImportResult> {
     const sourceHash = figmaFrameSourceHash(args.fileKey, args.sourceNodeId);
     const prepared = await prepareLinkedFramePrefab(
@@ -2323,6 +2328,11 @@ async function importLinkedFramePrefab(args: {
         prepared.record,
         collectSceneSpecFigmaIds(args.roots),
     );
+    // 未勾选的节点在本次计划里不存在，但它们仍属于受管节点：把已知 fileId 传给
+    // Scene 作为保留集合，避免"删除"分支把它们清掉。
+    const retainNodeFileIds = args.skipSyncNodeIds?.size
+        ? Object.values(resolveExistingNodeFileIds(prepared.record, args.skipSyncNodeIds))
+        : [];
     const payload: SceneImportPayload = {
         reviewId: args.reviewId,
         packageName: packageJSON.name,
@@ -2333,6 +2343,7 @@ async function importLinkedFramePrefab(args: {
         updateExisting: true,
         existingMap: {},
         prefabUrl: prepared.info.url,
+        retainNodeFileIds,
         roots: args.roots,
         prefabContext: {
             prefabUuid: prepared.info.uuid,
@@ -2361,9 +2372,13 @@ async function importLinkedFramePrefab(args: {
             throw new Error('Prefab 增量同步未返回 fileId 记录，已停止保存。');
         }
         const nextRecord = recordPrefabSyncCapture(prepared.record, result.prefabSync);
+        // 未勾选的节点不在本次重建结果里，保留它们原有的 fileId 映射。
+        const retainedRecord = args.skipSyncNodeIds?.size
+            ? retainPrefabSyncEntries(prepared.record, nextRecord, args.skipSyncNodeIds)
+            : nextRecord;
         await setPendingPrefabSync(sourceHash, {
             prefabUuid: prepared.info.uuid,
-            record: nextRecord,
+            record: retainedRecord,
         });
         await assertOpenedPrefab(prepared.info.uuid, prepared.record.rootFileId);
         // Once the save request is sent its result is ambiguous until the
@@ -2373,7 +2388,7 @@ async function importLinkedFramePrefab(args: {
         await Editor.Message.request('scene', 'save-scene');
         await waitForSceneSaved();
         const currentInfo = await waitForPrefabAsset(prepared.info.url, prepared.info.uuid);
-        if (!await storedPrefabMatchesRecord(currentInfo, nextRecord)) {
+        if (!await storedPrefabMatchesRecord(currentInfo, retainedRecord)) {
             throw new Error('Prefab 文件未包含本次同步生成的全部 fileId，已停止更新 Meta。');
         }
         const currentMeta = await queryPrefabMeta(currentInfo.uuid);
@@ -2381,7 +2396,7 @@ async function importLinkedFramePrefab(args: {
         if (!currentRecord || currentRecord.sourceHash !== sourceHash) {
             throw new Error('Prefab 来源记录在保存期间发生变化，已拒绝提交。');
         }
-        await writeVerifiedPrefabRecord(currentInfo, sourceHash, nextRecord);
+        await writeVerifiedPrefabRecord(currentInfo, sourceHash, retainedRecord);
         await setPendingPrefabSync(sourceHash, null);
         const verified = await queryPrefabAsset(prepared.info.url);
         if (!verified) {
@@ -2509,6 +2524,19 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         await saveSettings(importSettings);
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
         const decisions = decisionMap(request.overrides, document.tree);
+        // 改动清单里未勾选的节点：本次按"忽略"处理，既不更新也不创建；它们的旧标记
+        // 不会被重写，因此下次导入仍会作为待更新项出现。
+        const skipSyncNodeIds = new Set((request.skipSyncNodeIds ?? [])
+            .filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))
+            .map((id) => id.trim().replace(/-/g, ':')));
+        for (const nodeId of skipSyncNodeIds) {
+            decisions.set(nodeId, {
+                action: 'ignore',
+                kind: 'auto',
+                nineSlice: false,
+                explicit: true,
+            });
+        }
         const reviewDocument = document;
         importReviews.invalidate(options.preserveReviews ? { preserveHistory: true } : undefined);
         const reviewRecorder = new ImportReviewRecorder();
@@ -2674,6 +2702,7 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
                 rootFrame,
                 scale: importSettings.scale,
                 roots,
+                skipSyncNodeIds,
             });
             if (result.syncMarkerWarning) {
                 warnings.push(`组件同步标记未写入：${result.syncMarkerWarning}`);

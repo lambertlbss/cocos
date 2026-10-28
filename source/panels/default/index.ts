@@ -1359,7 +1359,7 @@ async function importToScene(): Promise<void> {
     try {
         const result = await request<WorkflowResult>(
             'import-selection',
-            { overrides, settings },
+            { overrides, settings, skipSyncNodeIds: workflow?.skippedSyncNodes ?? [] },
         );
         const fallbackNote = result?.warnings?.length
             ? `；${result.warnings.length} 条导入/收尾提示（详见结果检查）`

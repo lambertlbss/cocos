@@ -261,6 +261,11 @@ export interface ImportSettings {
 export interface ImportRequest {
     overrides: ImportOverride[];
     settings: ImportSettings;
+    /**
+     * 改动清单里未勾选的节点：本次不更新几何/显隐/图片，也不创建或删除，
+     * 同时保留旧指纹，下次导入仍会被识别为待更新。
+     */
+    skipSyncNodeIds?: string[];
 }
 
 export interface SpriteAssetSpec {
