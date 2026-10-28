@@ -2899,7 +2899,7 @@ async function resolveBatchSource(sourceUrl: string): Promise<BatchSourceResult>
                 document: await batchDocumentDto(document, fontAssets) };
         }
         const frames = collectSectionFrames(root);
-        if (!frames.length) throw new Error('这个 Section 下没有可独立导入的外层 Frame。');
+        if (!frames.length) throw new Error('这个 Section 下没有可独立导入的外层 Frame 或 Component。');
         const prepared: Array<{ item: BatchFrameItem; document: DocumentSession }> = [];
         let duplicates = 0;
         for (const frame of frames) {

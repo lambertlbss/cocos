@@ -4,6 +4,13 @@ import { sanitizeAssetName } from './importer/assets';
 import type { DocumentSession, FigmaNode } from './types';
 
 /** Collect screen roots in Figma order, without entering frames or components. */
+/**
+ * 批量导入时被当作独立 Prefab 的节点类型。
+ * Frame 是屏幕边界；Component 自 1.1.3 起同样是单节点来源，可独立生成/更新 Prefab。
+ * Instance 与 ComponentSet 仍不作为边界：前者是引用，后者是多变体容器。
+ */
+const BATCH_SOURCE_TYPES = new Set(['FRAME', 'COMPONENT']);
+
 export function collectSectionFrames(section: FigmaNode): FigmaNode[] {
     const frames: FigmaNode[] = [];
     const visited = new Set<string>();
@@ -11,7 +18,7 @@ export function collectSectionFrames(section: FigmaNode): FigmaNode[] {
         if (visited.has(node.id)) return;
         visited.add(node.id);
         const hidden = ancestorHidden || node.visible === false;
-        if (node.type === 'FRAME') {
+        if (BATCH_SOURCE_TYPES.has(node.type)) {
             // A frame session no longer contains its Section/Group ancestors.
             // Carry their visibility onto a cloned root without mutating the
             // original document, changing source identity or copying children.

@@ -23,7 +23,7 @@ test('section discovery keeps Figma order and stops at outer frames', () => {
     assert.equal(JSON.stringify(section), original);
 });
 
-test('section discovery includes hidden screens and excludes component, instance, and other descendants', () => {
+test('section discovery includes hidden screens and components, excludes instances and nested containers', () => {
     const section = parseNode({ id: '1:1', type: 'SECTION', children: [
         rawFrame('2:1', 'Hidden', [], { visible: false }),
         { id: '3:1', type: 'COMPONENT', children: [rawFrame('3:2', 'Component internals')] },
@@ -32,9 +32,11 @@ test('section discovery includes hidden screens and excludes component, instance
         { id: '6:1', type: 'CANVAS', children: [rawFrame('6:2', 'Not in a section or group')] },
         { id: '7:1', type: 'GROUP', visible: false, children: [rawFrame('7:2', 'Hidden group screen')] },
     ] });
-    assert.deepEqual(collectSectionFrames(section).map((frame) => frame.id), ['2:1', '7:2']);
+    assert.deepEqual(collectSectionFrames(section).map((frame) => frame.id), ['2:1', '3:1', '7:2']);
     assert.equal(collectSectionFrames(section)[0].visible, false);
-    assert.equal(collectSectionFrames(section)[1].visible, false, 'hidden Group visibility survives frame extraction');
+    assert.equal(collectSectionFrames(section)[1].type, 'COMPONENT', '组件本身作为独立来源');
+    assert.equal(collectSectionFrames(section)[1].children.length, 1, '组件内部不再拆分成条目');
+    assert.equal(collectSectionFrames(section)[2].visible, false, 'hidden Group visibility survives frame extraction');
 });
 
 test('nested hidden Section and Group ancestors become inactive frame roots without mutating the source', () => {
