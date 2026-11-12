@@ -11,6 +11,8 @@ AI 客户端
 
 没有监听 TCP 端口，也不需要让 Figma Importer 面板保持打开。
 
+Figma 节点上的 `prefab` TEXT 组件参数会自动参与现有导入流程，无需新增 MCP 参数。值按项目内唯一 Prefab 名称匹配，引用后跳过原设计子树；普通引用保留原尺寸，仅精确匹配 `Popup` 时按 Figma 调整宽高。缺失、重名和自身嵌套会在写入前报错，节点仍可显式忽略。
+
 MCP 不调用浏览器，也不使用浏览器自动化。读取设计和预览时，由 Cocos 插件使用已经保存的 Token 直接请求固定的 Figma REST API；因此仍需要能够访问 `api.figma.com` 的 HTTPS 网络，但不需要浏览器权限。全部 MCP 工具都声明为 `openWorldHint=false`，导入工具只保留“会修改本地 Cocos 项目”的明确确认。
 
 ## 使用条件

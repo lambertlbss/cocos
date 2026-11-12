@@ -4,6 +4,65 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parseDocument, parseNode } = require('../dist/figma/parser');
 
+test('reads only the current node typed prefab component parameter and trims its value', () => {
+    const instance = parseNode({ id: 'prefab:instance', type: 'INSTANCE', name: 'Button',
+        componentProperties: { 'prefab#123:456': { type: 'TEXT', value: '  CommonButton  ' } },
+        children: [{ id: 'prefab:text', type: 'TEXT', name: 'prefab', characters: 'WrongPrefab' }] });
+    assert.equal(instance.prefabName, 'CommonButton');
+    assert.equal(instance.children[0].prefabName, undefined);
+    assert.equal(parseNode({ id: 'plain:key', type: 'INSTANCE',
+        componentProperties: { prefab: { type: 'TEXT', value: 'PlainButton' } } }).prefabName, 'PlainButton');
+    const parent = parseNode({ id: 'prefab:parent', type: 'FRAME', children: [{
+        id: 'prefab:child', type: 'INSTANCE',
+        componentProperties: { prefab: { type: 'TEXT', value: 'ChildOnly' } },
+    }] });
+    assert.equal(parent.prefabName, undefined);
+    assert.equal(parent.children[0].prefabName, 'ChildOnly');
+});
+
+test('reads prefab defaults only from component definitions and honors an empty actual value', () => {
+    for (const type of ['COMPONENT', 'COMPONENT_SET']) {
+        const definition = { id: `prefab:${type}`, type,
+            componentPropertyDefinitions: { 'prefab#1:2': { type: 'TEXT', defaultValue: 'DefaultButton' } } };
+        assert.equal(parseNode(definition).prefabName, 'DefaultButton');
+        assert.equal(parseNode({ ...definition,
+            componentProperties: { 'prefab#1:2': { type: 'TEXT', value: 'ActualButton' } } }).prefabName, 'ActualButton');
+        assert.equal(parseNode({ ...definition,
+            componentProperties: { 'prefab#1:2': { type: 'TEXT', value: '  ' } } }).prefabName, undefined);
+    }
+    assert.equal(parseNode({ id: 'prefab:empty-instance', type: 'INSTANCE',
+        componentProperties: { prefab: { type: 'TEXT', value: '' } },
+        componentPropertyDefinitions: { prefab: { type: 'TEXT', defaultValue: 'DoNotInherit' } },
+    }).prefabName, undefined);
+    assert.equal(parseNode({ id: 'prefab:default-instance', type: 'INSTANCE',
+        componentPropertyDefinitions: { prefab: { type: 'TEXT', defaultValue: 'DoNotInherit' } },
+    }).prefabName, undefined);
+});
+
+test('ignores untyped, non-TEXT and similarly named prefab parameters', () => {
+    for (const property of [{ type: 'BOOLEAN', value: true }, { type: 'VARIANT', value: 'Button' },
+        { type: 'INSTANCE_SWAP', value: 'Button' }, { value: 'Button' }, { type: 'TEXT', value: 42 }]) {
+        assert.equal(parseNode({ id: 'prefab:wrong-type', type: 'INSTANCE',
+            componentProperties: { prefab: property } }).prefabName, undefined);
+    }
+    for (const key of ['prefabs', 'Prefab', 'prefab#abc', 'prefab#1:2:3', 'notprefab#1:2']) {
+        assert.equal(parseNode({ id: 'prefab:wrong-name', type: 'INSTANCE',
+            componentProperties: { [key]: { type: 'TEXT', value: 'Button' } } }).prefabName, undefined);
+    }
+    assert.equal(parseNode({ id: 'prefab:ordinary-text', name: 'prefab', type: 'TEXT', characters: 'Button' }).prefabName, undefined);
+});
+
+test('rejects conflicting prefab parameter values instead of choosing by property order', () => {
+    const properties = { 'prefab#1:1': { type: 'TEXT', value: 'ButtonA' },
+        'prefab#1:2': { type: 'TEXT', value: 'ButtonB' } };
+    assert.throws(() => parseNode({ id: 'prefab:conflict', type: 'INSTANCE', name: 'Conflicted',
+        componentProperties: properties }), /Conflicted.*冲突.*prefab/);
+    assert.throws(() => parseNode({ id: 'prefab:empty-conflict', type: 'INSTANCE',
+        componentProperties: { ...properties, 'prefab#1:2': { type: 'TEXT', value: '' } } }), /冲突/);
+    assert.equal(parseNode({ id: 'prefab:same', type: 'INSTANCE',
+        componentProperties: { ...properties, 'prefab#1:2': { type: 'TEXT', value: ' ButtonA ' } } }).prefabName, 'ButtonA');
+});
+
 test('parses every Figma page instead of silently using the first page', () => {
     const payload = {
         name: 'All Pages',

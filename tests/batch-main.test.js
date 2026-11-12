@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Module = require('node:module');
-const { readFileSync, mkdtempSync, mkdirSync, rmSync } = require('node:fs');
+const { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } = require('node:fs');
 const { join, dirname, relative, resolve, isAbsolute } = require('node:path');
 const { tmpdir } = require('node:os');
 const { FigmaClient } = require('../dist/figma/client');
@@ -153,6 +153,58 @@ test('main resolves section screens as frame sources and deduplicates direct lin
     assert.equal(items[0].id, originalId);
     assert.notEqual(items[0].id, items[3].id);
     assert.equal(items[3].fileKey, OTHER);
+});
+
+test('batch preflights prefab references in every screen before the first screen writes assets', async (t) => {
+    const f = fixture(t);
+    f.nodes.get('20:2').children = [{ id: '20:21', name: 'BoundWidget', type: 'INSTANCE',
+        componentProperties: { 'prefab#2003:2': { type: 'TEXT', value: 'MissingWidget' } } }];
+    await f.methods.resolveBatchSource(link('10:1'));
+    const items = (await f.methods.getBatchState()).items;
+    let assetBuilds = 0;
+    f.hooks.setAssetBuilder(async () => { assetBuilds++; return { assets: new Map(), warnings: [] }; });
+    await assert.rejects(f.methods.importBatch(f.request(items)), /MissingWidget.*不存在/);
+    assert.equal(assetBuilds, 0);
+    assert.deepEqual(f.imports, []);
+    assert.equal(f.hooks.busy(), false);
+    assert.equal((await f.methods.getBatchState()).running, undefined);
+});
+
+test('single import preflights a prefab parameter before asset processing and scene mutation', async (t) => {
+    const f = fixture(t);
+    f.nodes.get('20:1').children = [{ id: '20:12', name: 'BoundWidget', type: 'INSTANCE',
+        componentProperties: { prefab: { type: 'TEXT', value: 'MissingWidget' } } }];
+    await f.methods.resolveBatchSource(link('20:1'));
+    const item = (await f.methods.getBatchState()).items[0];
+    await f.methods.activateBatchItem(item.id);
+    let assetBuilds = 0;
+    f.hooks.setAssetBuilder(async () => { assetBuilds++; return { assets: new Map(), warnings: [] }; });
+    await assert.rejects(f.hooks.performImport({ settings: { ...DEFAULT_SETTINGS }, overrides: [] }), /MissingWidget.*不存在/);
+    assert.equal(assetBuilds, 0);
+    assert.deepEqual(f.imports, []);
+    assert.equal(f.hooks.busy(), false);
+});
+
+test('whole-file import rejects referencing the currently edited Prefab before any asset processing', async (t) => {
+    const f = fixture(t);
+    f.nodes.get('20:1').children = [{ id: '20:12', name: 'CurrentPrefab', type: 'INSTANCE',
+        componentProperties: { prefab: { type: 'TEXT', value: 'CurrentPrefab' } } }];
+    const path = join(global.Editor.Project.path, 'assets', 'CurrentPrefab.prefab');
+    writeFileSync(path, '[]');
+    writeFileSync(`${path}.meta`, JSON.stringify({ uuid: 'current-prefab-asset' }));
+    const original = global.Editor.Message.request;
+    t.mock.method(global.Editor.Message, 'request', async (channel, method, payload, ...args) => {
+        if (channel === 'scene' && method === 'execute-scene-script' && payload.method === 'inspectPrefabContext') {
+            return { mode: 'prefab', currentUuid: 'current-prefab-asset', ready: false };
+        }
+        return original(channel, method, payload, ...args);
+    });
+    await f.methods.fetchDocument(`https://www.figma.com/design/${FILE}/Fixture`);
+    let assetBuilds = 0;
+    f.hooks.setAssetBuilder(async () => { assetBuilds++; return { assets: new Map(), warnings: [] }; });
+    await assert.rejects(f.hooks.performImport({ settings: { ...DEFAULT_SETTINGS }, overrides: [] }), /自身|循环/);
+    assert.equal(assetBuilds, 0);
+    assert.deepEqual(f.imports, []);
 });
 
 test('main activation changes source preview document and sync preserves enabled order/removes items', async (t) => {

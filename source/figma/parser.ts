@@ -162,6 +162,32 @@ function parseTextStyle(value: unknown): FigmaTextStyle {
     };
 }
 
+/** Only this node's typed component parameter is a Prefab directive. */
+function parsePrefabName(input: UnknownRecord): string | undefined {
+    const values = (properties: unknown, field: 'value' | 'defaultValue'): string[] => {
+        const names: string[] = [];
+        for (const [key, value] of Object.entries(record(properties))) {
+            if (!/^prefab(?:#\d+:\d+)?$/.test(key)) continue;
+            const property = record(value);
+            if (property.type === 'TEXT' && typeof property[field] === 'string') {
+                names.push((property[field] as string).trim());
+            }
+        }
+        return names;
+    };
+    const actual = values(input.componentProperties, 'value');
+    // An explicitly empty instance value disables replacement. Definitions on
+    // an INSTANCE are never a source of defaults, including malformed input.
+    const candidates = actual.length ? actual
+        : input.type === 'COMPONENT' || input.type === 'COMPONENT_SET'
+            ? values(input.componentPropertyDefinitions, 'defaultValue') : [];
+    const unique = [...new Set(candidates)];
+    if (unique.length > 1) {
+        throw new Error(`节点“${stringValue(input.name, stringValue(input.id))}”包含冲突的 prefab TEXT 组件参数，请保留一个明确值。`);
+    }
+    return unique[0] || undefined;
+}
+
 export function parseNode(value: unknown): FigmaNode | null {
     const input = record(value);
     const id = stringValue(input.id);
@@ -195,6 +221,7 @@ export function parseNode(value: unknown): FigmaNode | null {
         isMask: booleanValue(input.isMask, false),
         maskType: stringValue(input.maskType) || undefined,
         componentId: stringValue(input.componentId) || undefined,
+        prefabName: parsePrefabName(input),
         cornerRadius: typeof input.cornerRadius === 'number' ? numberValue(input.cornerRadius) : undefined,
         rectangleCornerRadii: cornerRadii.length === 4 ? cornerRadii : undefined,
         arcData: Object.keys(arcData).length ? {

@@ -347,6 +347,185 @@ FakeNode.deferNodeDestruction = false;
 FakeNode.onAddChild = null;
 FakeNode.onAddComponent = null;
 
+function nestedPrefabFixture() {
+    const environment = fakeCocos();
+    const root = environment.canvas;
+    root._prefab = { fileId: 'attachmentRootFileId', root, asset: { uuid: 'outer-prefab' } };
+    root.getComponent(UITransform).__prefab = { fileId: 'attachmentRootTransform' };
+    let context = { prefabUuid: 'outer-prefab', rootFileId: root._prefab.fileId,
+        existingNodeFileIds: {}, managedNodeFileIds: [root._prefab.fileId],
+        managedComponentFileIds: ['attachmentRootTransform'], managedHelperFileIds: [] };
+    const calls = [];
+    let counter = 0;
+    const find = (node, uuid) => node.uuid === uuid ? node
+        : node.children.map(child => find(child, uuid)).find(Boolean);
+    class AuthoredScript extends Component {}
+    environment.createPrefabNode = async options => {
+        calls.push(options);
+        const node = new FakeNode('__FigmaContent');
+        node._prefab = { root: node, asset: { uuid: options.assetUuid }, fileId: 'sourceRootFileId',
+            instance: { fileId: `attachmentInstance${++counter}` } };
+        const ui = node.addComponent(UITransform);
+        ui.__prefab = { fileId: 'sourceTransformFileId' };
+        ui.setContentSize(72, 48); ui.setAnchorPoint(0.2, 0.8);
+        node.setScale(1.5, 0.75, 1); node.setRotationFromEuler(0, 0, 6);
+        const script = node.addComponent(AuthoredScript);
+        script.__prefab = { fileId: 'sourceScriptFileId' }; script.value = 'authored';
+        const inner = new FakeNode('Authored child');
+        inner._prefab = { root: node, asset: node._prefab.asset, fileId: 'sourceChildFileId' };
+        node.addChild(inner);
+        find(environment.scene, options.parent).addChild(node);
+        return node.uuid;
+    };
+    return { environment, root, calls, AuthoredScript,
+        async import(children, scale = 1) {
+            const spec = makeSpec({ figmaId: 'attachment-root', isRoot: true, children });
+            const result = await importWithPrefabContext(environment, spec, context, scale);
+            context = { ...context, ...result.prefabSync, existingNodeFileIds: result.prefabSync.nodeFileIds };
+            return result;
+        },
+    };
+}
+
+const prefabSpec = (id = 'prefab-slot', uuid = 'source-prefab', overrides = {}) => makeSpec({
+    figmaId: id, name: 'Prefab slot', frame: { x: 10, y: 15, width: 180, height: 120 },
+    prefab: { name: 'Source', uuid, url: `db://assets/${uuid}.prefab` }, ...overrides,
+});
+
+test('linked Prefabs use distinct stable carriers and preserve authored sizes and internals on reimport', async () => {
+    const f = nestedPrefabFixture();
+    const first = await f.import([prefabSpec('slot-one', 'source-prefab', {
+        rotation: 23, visible: false, children: [makeSpec({ figmaId: 'must-not-build' })],
+    }), prefabSpec('slot-two')]);
+    const [one, two] = f.root.children;
+    const instance = one.children[0];
+    assert.equal(instance._prefab.asset.uuid, 'source-prefab');
+    assert.notEqual(instance._prefab.instance.fileId, two.children[0]._prefab.instance.fileId);
+    assert.equal(one.getComponent(UITransform).width, 180);
+    assert.equal(instance.getComponent(UITransform).width, 72);
+    assert.deepEqual(instance.getComponent(UITransform).anchorPoint, { x: 0.2, y: 0.8 });
+    assert.deepEqual(instance.scale, { x: 1.5, y: 0.75, z: 1 });
+    assert.equal(instance.euler.z, 6); assert.equal(one.euler.z, 23); assert.equal(one.active, false);
+    assert.equal(instance.position.x, 0); assert.equal(instance.position.y, 0);
+    assert.equal(instance.children.length, 1);
+    assert.equal(first.nodeMap['must-not-build'], undefined);
+    assert.equal(first.prefabSync.managedNodeFileIds.includes('sourceRootFileId'), false);
+    assert.equal(first.prefabSync.managedComponentFileIds.includes('sourceScriptFileId'), false);
+    assert.equal(first.prefabSync.managedHelperFileIds.includes('sourceRootFileId'), false);
+    assert.equal(Object.keys(first.prefabSync.prefabInstances).length, 2);
+    assert.deepEqual(f.calls[0], { parent: one.uuid, assetUuid: 'source-prefab', type: 'cc.Prefab', unlinkPrefab: false,
+        snapshot: false, nameIncrease: false, autoAdaptToCreate: false });
+    instance.getComponent(f.AuthoredScript).value = 'instance override';
+    instance.getComponent(UITransform).setContentSize(91, 53);
+    one.uuid += '-reloaded'; two.uuid += '-reloaded';
+    const second = await f.import([prefabSpec('slot-one'), prefabSpec('slot-two')]);
+    assert.equal(f.calls.length, 2);
+    assert.equal(one.children[0], instance);
+    assert.equal(instance.getComponent(f.AuthoredScript).value, 'instance override');
+    assert.equal(instance.getComponent(UITransform).width, 91);
+    assert.deepEqual(second.prefabSync.prefabInstances, first.prefabSync.prefabInstances);
+});
+
+test('Prefab switches and removal replace only the exact owned attachment and retain manual siblings', async () => {
+    const f = nestedPrefabFixture();
+    await f.import([prefabSpec()]);
+    const carrier = f.root.children[0]; const old = carrier.children[0];
+    const manual = new FakeNode('Manual child'); carrier.addChild(manual);
+    await f.import([prefabSpec('prefab-slot', 'replacement-prefab')]);
+    const replacement = carrier.children.find(child => child !== manual);
+    assert.equal(old.parent, null); assert.equal(manual.parent, carrier);
+    assert.equal(replacement._prefab.asset.uuid, 'replacement-prefab');
+    const plain = makeSpec({ figmaId: 'prefab-slot', name: 'Plain slot', children: [makeSpec({ figmaId: 'new-child' })] });
+    const result = await f.import([plain]);
+    assert.equal(replacement.parent, null); assert.equal(manual.parent, carrier);
+    assert.equal(result.prefabSync.prefabInstances, undefined);
+    assert.ok(result.nodeMap['new-child']);
+});
+
+test('failed or unlinked Prefab creation retains the previous instance and unknown instances are never adopted', async () => {
+    const f = nestedPrefabFixture(); await f.import([prefabSpec()]);
+    const carrier = f.root.children[0]; const original = carrier.children[0];
+    f.environment.createPrefabNode = async () => { throw new Error('resource unavailable'); };
+    await assert.rejects(f.import([prefabSpec('prefab-slot', 'other-prefab')]), /resource unavailable/);
+    assert.equal(original.parent, carrier);
+    f.environment.createPrefabNode = async () => {
+        const unlinked = new FakeNode('unlinked'); carrier.addChild(unlinked); return unlinked.uuid;
+    };
+    await assert.rejects(f.import([prefabSpec('prefab-slot', 'other-prefab')]), /原生链接/);
+    assert.deepEqual(carrier.children, [original]);
+    const unknown = new FakeNode('Manual Prefab');
+    unknown._prefab = { root: unknown, asset: { uuid: 'manual-prefab' }, fileId: 'manual-root',
+        instance: { fileId: 'manual-instance' } };
+    carrier.addChild(unknown);
+    await assert.rejects(f.import([prefabSpec()]), /来源未知/);
+    assert.equal(unknown.parent, carrier); assert.equal(original.parent, carrier);
+});
+
+test('deleting a Prefab carrier removes its attachment without salvaging it into the parent', async () => {
+    const f = nestedPrefabFixture(); await f.import([prefabSpec()]);
+    const carrier = f.root.children[0]; const instance = carrier.children[0];
+    const manual = new FakeNode('Manual sibling'); carrier.addChild(manual);
+    const result = await f.import([]);
+    assert.equal(carrier.parent, null); assert.equal(instance.parent, null);
+    assert.equal(manual.parent, f.root);
+    assert.equal(f.root.children.includes(instance), false);
+    assert.equal(result.prefabSync.prefabInstances, undefined);
+});
+
+test('switching a generated subtree to a Prefab cleans only managed visuals and descendants', async () => {
+    const f = nestedPrefabFixture();
+    await f.import([makeSpec({ figmaId: 'prefab-slot', kind: 'label', figmaType: 'TEXT', characters: 'Old',
+        children: [makeSpec({ figmaId: 'old-design-child' })] })]);
+    const carrier = f.root.children[0]; const oldChild = carrier.children[0];
+    const manual = new FakeNode('Manual sibling'); carrier.addChild(manual);
+    await f.import([prefabSpec()]);
+    assert.equal(carrier.getComponent(Label), null);
+    assert.equal(oldChild.parent, null); assert.equal(manual.parent, carrier);
+    assert.equal(carrier.children.filter(child => child._prefab?.instance).length, 1);
+});
+
+test('Prefab self-reference is blocked and a damaged persisted attachment fails before creation', async () => {
+    const f = nestedPrefabFixture();
+    await assert.rejects(f.import([prefabSpec('prefab-slot', 'outer-prefab')]), /自身|祖先/);
+    const g = nestedPrefabFixture(); await g.import([prefabSpec()]);
+    g.root.children[0].children[0]._prefab.asset.uuid = 'tampered-prefab';
+    await assert.rejects(g.import([prefabSpec()]), /链接已丢失/);
+    assert.equal(g.calls.length, 1);
+});
+
+test('only explicit prefab Popup resizes its root, including reuse, without scanning other instances', async () => {
+    const f = nestedPrefabFixture();
+    const named = (name, frame) => prefabSpec(`slot-${name}`, `asset-${name.normalize('NFKC')}`, {
+        prefab: { name, uuid: `asset-${name.normalize('NFKC')}`, url: `db://assets/${name}.prefab` },
+        frame: frame ?? { x: 10, y: 15, width: 180, height: 120 },
+        intrinsicSize: frame ? undefined : { width: 80.1234, height: 90.4567 },
+    });
+    const names = ['Popup', 'PopupCell', 'PopupWhatever', 'Ordinary', 'ｐｏｐｕｐ'];
+    await f.import(names.map(name => named(name)), 1.25);
+    const instances = f.root.children.map(carrier => carrier.children[0]);
+    assert.equal(instances[0].getComponent(UITransform).width, 100.15);
+    assert.equal(instances[0].getComponent(UITransform).height, 113.07);
+    for (const instance of instances.slice(1, 4)) assert.equal(instance.getComponent(UITransform).width, 72);
+    assert.equal(instances[4].getComponent(UITransform).width, 100.15);
+    assert.deepEqual(instances[0].getComponent(UITransform).anchorPoint, { x: 0.2, y: 0.8 });
+    assert.deepEqual(instances[0].scale, { x: 1.5, y: 0.75, z: 1 });
+    assert.equal(instances[0].getComponent(f.AuthoredScript).value, 'authored');
+    const manual = new FakeNode('Popup');
+    manual._prefab = { root: manual, asset: { uuid: 'manual-popup' }, fileId: 'manual-popup-root',
+        instance: { fileId: 'manual-popup-instance' } };
+    manual.addComponent(UITransform).setContentSize(155, 133); f.root.addChild(manual);
+    instances[1].getComponent(UITransform).setContentSize(77, 66);
+    const changed = { x: 8, y: 9, width: 333.337, height: 222.222 };
+    await f.import(names.map(name => named(name, changed)), 0.5);
+    assert.equal(f.calls.length, 5);
+    assert.equal(f.root.children[0].children[0], instances[0]);
+    assert.equal(instances[0].getComponent(UITransform).width, 166.67);
+    assert.equal(instances[0].getComponent(UITransform).height, 111.11);
+    assert.equal(instances[4].getComponent(UITransform).width, 166.67);
+    assert.equal(instances[1].getComponent(UITransform).width, 77);
+    assert.equal(manual.getComponent(UITransform).width, 155);
+});
+
 function makeSpec(overrides = {}) {
     return {
         figmaId: overrides.figmaId ?? '15:193',
@@ -378,6 +557,7 @@ function makeSpec(overrides = {}) {
         },
         children: overrides.children ?? [],
         sprite: overrides.sprite,
+        prefab: overrides.prefab,
         aliasFigmaIds: overrides.aliasFigmaIds,
         flattenBoundary: overrides.flattenBoundary,
         overflowDirection: overrides.overflowDirection,
@@ -689,7 +869,7 @@ async function importWithFakeCocos(spec, scale = 1, reviewId) {
     }
 }
 
-async function importWithPrefabContext(environment, spec, prefabContext) {
+async function importWithPrefabContext(environment, spec, prefabContext, scale = 1) {
     const originalLoad = Module._load;
     const originalCce = global.cce;
     const prefabRoot = environment.canvas;
@@ -698,6 +878,7 @@ async function importWithPrefabContext(environment, spec, prefabContext) {
         SceneFacadeManager: {
             queryMode: () => 'prefab',
             queryCurrentSceneUuid: () => environment.reportedPrefabUuid ?? prefabContext.prefabUuid,
+            createNode: environment.createPrefabNode,
         },
         Scene: { rootNode: prefabRoot },
         Prefab: {
@@ -731,7 +912,7 @@ async function importWithPrefabContext(environment, spec, prefabContext) {
             fileKey: 'file-key',
             rootName: 'Prefab',
             rootFrame: spec.frame,
-            scale: 1,
+            scale,
             updateExisting: true,
             existingMap: {},
             roots: [spec],

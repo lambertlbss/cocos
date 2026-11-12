@@ -1,5 +1,6 @@
 import { compareSavedReviewScene, reviewFingerprint, type ReviewComponent, type ReviewNode, type ReviewScene } from './import-review-model';
 import { normalizeCocosUuid } from './roundtrip/uuid';
+import { isInsideNestedPrefab, nativePrefabIdentity, prefabScopedId } from './prefab-instance';
 
 function walk(root: any, visit: (node: any, depth: number) => void, depth = 0): void {
     if (!root) return;
@@ -8,9 +9,12 @@ function walk(root: any, visit: (node: any, depth: number) => void, depth = 0): 
 }
 
 function components(node: any): any[] { return node.components ?? node._components ?? []; }
-function nodeId(node: any): string { return node?._prefab?.fileId || node?.uuid || ''; }
-function componentId(component: any, index: number): string {
-    return component.__prefab?.fileId || component.uuid || `${index}:${component.constructor?.name}`;
+function nodeId(node: any, root: any): string {
+    return prefabScopedId(node, root, node?._prefab?.fileId || node?.uuid || '');
+}
+function componentId(component: any, index: number, root: any): string {
+    return prefabScopedId(component.node, root,
+        component.__prefab?.fileId || component.uuid || `${index}:${component.constructor?.name}`);
 }
 function assetId(asset: any): string | null { return asset?._uuid || asset?.uuid || null; }
 function instanceOf(component: any, Class: any): boolean {
@@ -25,9 +29,10 @@ export function reviewManagedComponentIds(root: any, nodeMap: Record<string, str
     const mapped = new Set(Object.values(nodeMap));
     const ids: string[] = [];
     walk(root, (node) => {
+        if (isInsideNestedPrefab(node, root)) return;
         if (!mapped.has(node.uuid) && !/^__Figma(?:OverflowVisual|TiledMask|TiledSprite)$/.test(node.name)) return;
         components(node).forEach((component, index) => {
-            if (classes.some((Class) => Class && component instanceof Class)) ids.push(componentId(component, index));
+            if (classes.some((Class) => Class && component instanceof Class)) ids.push(componentId(component, index, root));
         });
     });
     return ids;
@@ -49,11 +54,12 @@ export function captureReviewScene(
     const managed = new Set(managedIds);
     const nodes: ReviewNode[] = [];
     walk(root, (node, depth) => {
+        const nested = isInsideNestedPrefab(node, root);
         const ui = node.getComponent(cc.UITransform);
         const rotation = node.eulerAngles ?? node.euler;
         const recorded: ReviewComponent[] = components(node).map((component, index) => {
             const type = cc.js?.getClassName?.(component) || component.constructor?.name || 'Component';
-            const id = componentId(component, index);
+            const id = componentId(component, index, root);
             const properties: ReviewComponent['properties'] = { enabled: component.enabled !== false };
             if (instanceOf(component, cc.Mask)) {
                 // Creator >=3.6 separates Mask rules from its Sprite/Graphics.
@@ -65,7 +71,7 @@ export function captureReviewScene(
                 properties.segments = number(component.segments);
                 const renderer = component.subComp;
                 if (instanceOf(renderer, cc.Sprite)) properties.spriteFrame = assetId(renderer.spriteFrame);
-                return { id, type, managed: managed.has(id), properties };
+                return { id, type, managed: !nested && managed.has(id), properties };
             }
             for (const key of ['string', 'fontSize', 'lineHeight', 'overflow', 'type', 'sizeMode', 'opacity',
                 'horizontal', 'vertical', 'inverted', 'spacingX', 'spacingY', 'paddingLeft', 'paddingRight',
@@ -84,16 +90,18 @@ export function captureReviewScene(
                 recordColor(properties, component, 'fillColor');
                 recordColor(properties, component, 'strokeColor');
             }
-            return { id, type, managed: managed.has(id), properties };
+            return { id, type, managed: !nested && managed.has(id), properties };
         });
+        const prefabLink = nativePrefabIdentity(node);
         nodes.push({
-            id: nodeId(node), uuid: node.uuid, parentId: node === root ? null : nodeId(node.parent),
+            id: nodeId(node, root), uuid: node.uuid, parentId: node === root ? null : nodeId(node.parent, root),
             name: node.name, depth, order: node === root ? 0 : node.parent.children.indexOf(node),
             active: node.active !== false,
             geometry: [node.position?.x, node.position?.y, node.position?.z, ui?.width, ui?.height,
                 rotation?.x, rotation?.y, rotation?.z, node.scale?.x ?? 1, node.scale?.y ?? 1,
                 ui?.anchorPoint?.x ?? 0.5, ui?.anchorPoint?.y ?? 0.5].map((value) => number(value)),
             components: recorded, figmaIds: mapped.get(node.uuid) ?? [],
+            ...(prefabLink ? { prefab: prefabLink } : {}),
         });
     });
     return { rootUuid: root?.uuid ?? '', targetUuid: String(facade?.queryCurrentSceneUuid?.() ?? ''),
@@ -162,7 +170,7 @@ export function prepareReviewRemoval(payload: { id: string; uuids: string[]; det
     walk(session.root, (node) => {
         components(node).forEach((component, index) => {
             const snapshot = snapshotNodes.get(node.uuid);
-            const recorded = snapshot?.components.find((item) => item.id === componentId(component, index));
+            const recorded = snapshot?.components.find((item) => item.id === componentId(component, index, session.root));
             if (component instanceof session.cc.Sprite && recorded?.managed
                 && ids.has(normalizeCocosUuid(assetId(component.spriteFrame) ?? ''))) {
                 allowed.add(component);
@@ -237,7 +245,7 @@ export function refreshReviewAfter(payload: { id: string }): ReviewScene {
         }
         const nodes = new Map<string, any>();
         walk(candidate, (node) => {
-            const id = nodeId(node);
+            const id = nodeId(node, candidate);
             if (nodes.has(id)) throw new Error('保存后节点标识重复，无法安全恢复检查。');
             nodes.set(id, node);
         });

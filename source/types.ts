@@ -29,6 +29,7 @@ export type NodeSemanticRole =
 
 export type ImportPlanReason =
     | 'ignored'
+    | 'prefab-reference'
     | 'root-structure'
     | 'manual-export'
     | 'slice-resource'
@@ -153,6 +154,8 @@ export interface FigmaNode {
     isMask?: boolean;
     maskType?: string;
     componentId?: string;
+    /** 当前节点自身 TEXT 组件参数 prefab 指定的项目 Prefab 名称。 */
+    prefabName?: string;
     clipsContent: boolean;
     cornerRadius?: number;
     rectangleCornerRadii?: number[];
@@ -282,12 +285,20 @@ export interface SpriteAssetSpec {
     renderFrame?: Rect;
 }
 
+export interface PrefabAssetSpec {
+    name: string;
+    uuid: string;
+    url: string;
+}
+
 export interface SceneNodeSpec {
     figmaId: string;
     name: string;
     figmaType: string;
     action: ImportAction;
     kind: NodeKind;
+    /** 普通实例保留原尺寸，精确名称 Popup 使用 Figma 宽高；外层节点管理 Figma 几何。 */
+    prefab?: PrefabAssetSpec;
     frame: Rect;
     parentFrame?: Rect;
     /** 未旋转前的节点尺寸；frame 仍保存页面坐标中的轴对齐包围盒。 */
@@ -348,6 +359,8 @@ export interface PrefabSceneSyncContext {
     managedNodeFileIds: string[];
     managedComponentFileIds: string[];
     managedHelperFileIds: string[];
+    /** 承载节点稳定 fileId -> 嵌套 Prefab 实例身份。 */
+    prefabInstances?: Record<string, { assetUuid: string; instanceFileId: string }>;
 }
 
 export interface PrefabSceneSyncCapture {
@@ -355,6 +368,7 @@ export interface PrefabSceneSyncCapture {
     managedNodeFileIds: string[];
     managedComponentFileIds: string[];
     managedHelperFileIds: string[];
+    prefabInstances?: Record<string, { assetUuid: string; instanceFileId: string }>;
 }
 
 export interface PrefabEditingState {

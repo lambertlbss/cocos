@@ -323,6 +323,72 @@ function sceneFixture(t) {
     return { scene, root, child, sprite, cc, snapshot };
 }
 
+function addReviewPrefab(root, name, instanceFileId) {
+    const nested = root.add(new Node(name));
+    nested._prefab = { root: nested, asset: { uuid: 'nested-source-asset' }, fileId: 'shared-source-root',
+        instance: { fileId: instanceFileId } };
+    const inner = nested.add(new Node(`${name}-inner`));
+    inner._prefab = { root: nested, asset: nested._prefab.asset, fileId: 'shared-source-child' };
+    const sprite = new Sprite(inner); sprite.__prefab = { fileId: 'shared-source-sprite' };
+    inner.components.push(sprite);
+    return { nested, inner, sprite };
+}
+
+test('review namespaces repeated Prefab source fileIds and never claims internal resources', (t) => {
+    const f = sceneFixture(t);
+    const a = addReviewPrefab(f.root, 'instance-one', 'instance-file-one');
+    addReviewPrefab(f.root, 'instance-two', 'instance-file-two');
+    const snapshot = registerSceneReview('nested-review', f.root, f.cc, { outer: f.child.uuid },
+        [f.sprite.uuid, 'shared-source-sprite']);
+    assert.equal(new Set(snapshot.nodes.map(n => n.id)).size, snapshot.nodes.length);
+    const internal = snapshot.nodes.filter(n => n.id.startsWith('prefab-instance/'));
+    assert.equal(internal.length, 4);
+    assert.ok(internal.every(n => n.components.every(component => !component.managed)));
+    assert.deepEqual(compareSavedReviewScene(snapshot, captureReviewScene(f.root, f.cc,
+        { outer: f.child.uuid }, [f.sprite.uuid, 'shared-source-sprite'])).issues, []);
+    refreshReviewAfter({ id: 'nested-review' });
+    assert.throws(() => prepareReviewRemoval({ id: 'nested-review', uuids: ['sprite'], detach: true }), /其他组件或属性引用/);
+    assert.equal(a.sprite.spriteFrame._uuid, 'sprite'); assert.equal(f.sprite.spriteFrame._uuid, 'sprite');
+    a.nested._prefab.asset.uuid = 'lost-or-replaced-asset';
+    assert.throws(() => refreshReviewAfter({ id: 'nested-review' }), /内容已变化/);
+});
+
+test('review rebinds nested identities after save reload and rejects lost instance links', (t) => {
+    const f = sceneFixture(t);
+    f.root._prefab = { fileId: 'outer-root-file' };
+    f.child._prefab = { fileId: 'outer-child-file' };
+    f.sprite.__prefab = { fileId: 'outer-sprite-file' };
+    addReviewPrefab(f.root, 'instance-one', 'instance-file-one');
+    addReviewPrefab(f.root, 'instance-two', 'instance-file-two');
+    registerSceneReview('nested-reload', f.root, f.cc, { outer: f.child.uuid }, ['outer-sprite-file']);
+    const scene = new Node('reloaded-scene'); const root = scene.add(new Node('root'));
+    root._prefab = { fileId: 'outer-root-file' };
+    const child = root.add(new Node('child')); child._prefab = { fileId: 'outer-child-file' };
+    const sprite = new Sprite(child); sprite.__prefab = { fileId: 'outer-sprite-file' }; child.components.push(sprite);
+    const a = addReviewPrefab(root, 'instance-one', 'instance-file-one');
+    addReviewPrefab(root, 'instance-two', 'instance-file-two');
+    const changeRuntimeIds = node => { node.uuid += '-after-save'; node.children.forEach(changeRuntimeIds); };
+    changeRuntimeIds(root);
+    f.cc.director.getScene = () => scene; global.cce.Scene = { rootNode: root };
+    const saved = refreshReviewAfter({ id: 'nested-reload' });
+    assert.equal(saved.nodes.find(n => n.figmaIds.includes('outer')).uuid, child.uuid);
+    delete a.nested._prefab.instance;
+    assert.throws(() => refreshReviewAfter({ id: 'nested-reload' }), /内容已变化/);
+});
+
+test('save review and node diff compare native Prefab links independently of components', () => {
+    const before = { rootUuid: 'root', targetUuid: 'target', mode: 'prefab', nodes: [node('native', {
+        prefab: { assetUuid: 'source-prefab', instanceFileId: 'native-instance' },
+    })] };
+    for (const prefab of [undefined, { assetUuid: 'other-prefab', instanceFileId: 'native-instance' },
+        { assetUuid: 'source-prefab', instanceFileId: 'different-instance' }]) {
+        const after = { ...before, nodes: [{ ...before.nodes[0], prefab }] };
+        assert.match(compareSavedReviewScene(before, after).issues.join(';'), /Prefab 引用/);
+        assert.deepEqual(diffReviewNodes(before.nodes, after.nodes)[0].fields, ['Prefab 引用']);
+    }
+    assert.deepEqual(before.nodes[0].components, []);
+});
+
 test('review refresh uses verified Prefab identity instead of transient facade identity', (t) => {
     const f = sceneFixture(t);
     global.cce.SceneFacadeManager.queryCurrentSceneUuid = () => 'previous-target';

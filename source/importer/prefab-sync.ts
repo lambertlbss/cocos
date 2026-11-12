@@ -1,5 +1,7 @@
 import { createHash } from 'crypto';
 import type { Rect, SceneNodeSpec } from '../types';
+import type { PrefabInstanceAttachment } from '../prefab-instance';
+import { normalizeCocosUuid } from '../roundtrip/uuid';
 
 export const PREFAB_SYNC_SCHEMA = 1 as const;
 export const PREFAB_SYNC_KIND = 'frame-prefab' as const;
@@ -15,6 +17,7 @@ export interface PrefabSyncRecord {
     managedNodeFileIds: string[];
     managedComponentFileIds: string[];
     managedHelperFileIds: string[];
+    prefabInstances?: Record<string, PrefabInstanceAttachment>;
 }
 
 export interface PrefabSyncCapture {
@@ -22,6 +25,7 @@ export interface PrefabSyncCapture {
     managedNodeFileIds: string[];
     managedComponentFileIds: string[];
     managedHelperFileIds: string[];
+    prefabInstances?: Record<string, PrefabInstanceAttachment>;
 }
 
 export interface PrefabRecoveryTargetPlan {
@@ -59,6 +63,28 @@ function sortedNodeMap(entries: Iterable<[string, string]>): Record<string, stri
     return Object.fromEntries([...entries].sort(([a], [b]) => a.localeCompare(b)));
 }
 
+function cleanPrefabInstances(value: unknown, managedNodes: string[]): Record<string, PrefabInstanceAttachment> | undefined {
+    if (value === undefined) return undefined;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Prefab 实例所有权记录无效。');
+    const entries: Array<[string, PrefabInstanceAttachment]> = [];
+    const instanceIds = new Set<string>();
+    for (const [carrier, raw] of Object.entries(value)) {
+        cleanFileId(carrier, 'Prefab carrier fileId');
+        if (!managedNodes.includes(carrier) || !raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            throw new Error('Prefab 实例不属于受管节点。');
+        }
+        const item = raw as Record<string, unknown>;
+        if (typeof item.assetUuid !== 'string' || !/^[A-Za-z0-9+/_=@.-]{1,256}$/.test(item.assetUuid)) {
+            throw new Error('Prefab 实例资源 UUID 无效。');
+        }
+        const instanceFileId = cleanFileId(item.instanceFileId, 'Prefab instance fileId');
+        if (instanceIds.has(instanceFileId)) throw new Error('Prefab 实例 fileId 重复。');
+        instanceIds.add(instanceFileId);
+        entries.push([carrier, { assetUuid: normalizeCocosUuid(item.assetUuid), instanceFileId }]);
+    }
+    return entries.length ? Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))) : undefined;
+}
+
 export function figmaFrameSourceHash(fileKey: string, sourceNodeId: string): string {
     const normalizedFileKey = fileKey.trim();
     const normalizedNodeId = cleanNodeId(sourceNodeId);
@@ -88,7 +114,7 @@ export function collectSceneSpecFigmaIds(specs: SceneNodeSpec[]): string[] {
                     ids.push(cleanNodeId(id));
                 }
             }
-            visit(node.children);
+            if (!node.prefab) visit(node.children);
         }
     };
     visit(specs);
@@ -148,18 +174,21 @@ export function recordPrefabSyncCapture(
     if (!Object.values(nodeFileIds).includes(previous.rootFileId)) {
         throw new Error('Prefab 同步结果缺少原根节点 fileId，已拒绝提交来源记录。');
     }
+    const managedNodeFileIds = sortedUniqueFileIds(capture.managedNodeFileIds, 'managedNodeFileIds');
+    const prefabInstances = cleanPrefabInstances(capture.prefabInstances, managedNodeFileIds);
     return {
         schema: PREFAB_SYNC_SCHEMA,
         kind: PREFAB_SYNC_KIND,
         sourceHash: previous.sourceHash,
         rootFileId: previous.rootFileId,
         nodeFileIds,
-        managedNodeFileIds: sortedUniqueFileIds(capture.managedNodeFileIds, 'managedNodeFileIds'),
+        managedNodeFileIds,
         managedComponentFileIds: sortedUniqueFileIds(
             capture.managedComponentFileIds,
             'managedComponentFileIds',
         ),
         managedHelperFileIds: sortedUniqueFileIds(capture.managedHelperFileIds, 'managedHelperFileIds'),
+        ...(prefabInstances ? { prefabInstances } : {}),
     };
 }
 
@@ -201,6 +230,7 @@ export function readPrefabSyncRecord(meta: unknown): PrefabSyncRecord | null {
     if (!managedNodeFileIds.includes(rootFileId)) {
         throw new Error('Prefab 来源记录未声明根节点所有权。');
     }
+    const prefabInstances = cleanPrefabInstances(value.prefabInstances, managedNodeFileIds);
     return {
         schema: PREFAB_SYNC_SCHEMA,
         kind: PREFAB_SYNC_KIND,
@@ -213,6 +243,7 @@ export function readPrefabSyncRecord(meta: unknown): PrefabSyncRecord | null {
             'managedComponentFileIds',
         ),
         managedHelperFileIds: sortedUniqueFileIds(value.managedHelperFileIds, 'managedHelperFileIds'),
+        ...(prefabInstances ? { prefabInstances } : {}),
     };
 }
 
@@ -272,6 +303,23 @@ export function prefabJsonContainsSyncRecord(
     if (!Array.isArray(parsed)) {
         return false;
     }
+    const entries = parsed as Array<Record<string, any>>;
+    const resolve = (ref: any): Record<string, any> | undefined => Number.isInteger(ref?.__id__)
+        ? entries[ref.__id__] : undefined;
+    const rootIndex = entries[0]?.data?.__id__;
+    const foreignInfos = new Set<Record<string, any>>();
+    for (const item of entries) {
+        if (item?.__type__ === 'cc.PrefabInfo' && (typeof item.asset?.__uuid__ === 'string'
+            || (Number.isInteger(rootIndex) && Number.isInteger(item.root?.__id__) && item.root.__id__ !== rootIndex))) {
+            foreignInfos.add(item);
+        }
+    }
+    for (const item of entries) {
+        if (foreignInfos.has(resolve(resolve(item?.node)?._prefab)!)) {
+            const componentInfo = resolve(item.__prefab);
+            if (componentInfo) foreignInfos.add(componentInfo);
+        }
+    }
     const nodeFileIds = new Set<string>();
     const componentFileIds = new Set<string>();
     for (const item of parsed) {
@@ -279,6 +327,7 @@ export function prefabJsonContainsSyncRecord(
             continue;
         }
         const value = item as Record<string, unknown>;
+        if (foreignInfos.has(value)) continue;
         const fileId = typeof value.fileId === 'string' ? value.fileId : '';
         if (!fileId) {
             continue;
@@ -302,8 +351,23 @@ export function prefabJsonContainsSyncRecord(
         ...record.managedNodeFileIds,
         ...record.managedHelperFileIds,
     ]);
-    return [...expectedNodes].every((fileId) => nodeFileIds.has(fileId))
-        && record.managedComponentFileIds.every((fileId) => componentFileIds.has(fileId));
+    if (![...expectedNodes].every((fileId) => nodeFileIds.has(fileId))
+        || !record.managedComponentFileIds.every((fileId) => componentFileIds.has(fileId))) return false;
+    for (const [carrierId, attachment] of Object.entries(record.prefabInstances ?? {})) {
+        const carriers = entries.filter((node) => node?.__type__ === 'cc.Node'
+            && !foreignInfos.has(resolve(node._prefab)!) && resolve(node._prefab)?.fileId === carrierId);
+        if (carriers.length !== 1 || !Array.isArray(carriers[0]._children)) return false;
+        const matches = carriers[0]._children.filter((ref: unknown) => {
+            const child = resolve(ref);
+            const info = resolve(child?._prefab);
+            const instance = resolve(info?.instance);
+            return info && child && resolve(info.root) === child
+                && normalizeCocosUuid(String(info.asset?.__uuid__ ?? '')) === normalizeCocosUuid(attachment.assetUuid)
+                && instance?.__type__ === 'cc.PrefabInstance' && instance.fileId === attachment.instanceFileId;
+        });
+        if (matches.length !== 1) return false;
+    }
+    return true;
 }
 
 function cleanPrefabName(value: string): string {

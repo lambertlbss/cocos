@@ -83,6 +83,41 @@ function node(value) {
     return parsed;
 }
 
+test('prefab parameters preserve structural boundaries instead of becoming PNG or runtime components', () => {
+    const source = node({ id: 'prefab:analyzer', name: 'img_button', type: 'INSTANCE',
+        componentProperties: { 'prefab#10:20': { type: 'TEXT', value: 'ReusableButton' } },
+        exportSettings: [{ format: 'PNG' }], overflowDirection: 'VERTICAL_SCROLLING',
+        children: [{ id: 'prefab:analyzer:image', type: 'RECTANGLE', name: 'Rectangle 1',
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+            fills: [{ type: 'IMAGE', imageRef: 'must-not-download' }] }] });
+    assert.equal(inferAction(source), 'generate');
+    assert.equal(inferKind(source), 'node');
+    assert.equal(shouldRenderMessySubtree(source, false), false);
+    const tree = analyzeTree([source])[0];
+    assert.equal(tree.action, 'generate');
+    assert.equal(tree.renderSubtree, false);
+    assert.equal(tree.patchCandidate, false);
+    assert.equal(tree.reason, 'prefab-reference');
+    assert.match(tree.warning, /ReusableButton.*原尺寸.*子树/);
+    assert.equal(tree.children.length, 1, 'the panel keeps original descendants available');
+});
+
+test('automatic raster wrappers preserve prefab descendants including hidden references', () => {
+    for (const visible of [true, false]) {
+        const wrapper = node({ id: `prefab:wrapper:${visible}`, name: 'img_wrapper', type: 'FRAME',
+            exportSettings: [{ format: 'PNG' }],
+            children: [{ id: `prefab:child:${visible}`, type: 'INSTANCE', name: 'Rectangle 1', visible,
+                componentProperties: { prefab: { type: 'TEXT', value: 'ReusablePanel' } },
+                absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 } }] });
+        assert.equal(inferAction(wrapper), 'generate');
+        assert.equal(shouldRenderMessySubtree(wrapper, false), false);
+        const tree = analyzeTree([wrapper])[0];
+        assert.equal(tree.action, 'generate');
+        assert.equal(tree.renderSubtree, false);
+        assert.match(tree.warning, /Prefab.*保留节点结构/);
+    }
+});
+
 test('chooses editable Cocos components where fidelity is safe', () => {
     assert.equal(inferAction(node({ type: 'TEXT', characters: 'Text' })), 'generate');
     assert.equal(inferAction(node({

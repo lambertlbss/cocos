@@ -6,7 +6,8 @@ const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } = require(
 const { join, resolve, relative, isAbsolute } = require('node:path');
 const { tmpdir } = require('node:os');
 const { PNG } = require('pngjs');
-const { buildAssets } = require('../dist/main');
+const { buildAssets, makeSpec } = require('../dist/main');
+const { compileImportPlan } = require('../dist/figma/import-planner');
 const { parseNode } = require('../dist/figma/parser');
 const { FigmaClient, CancelledError } = require('../dist/figma/client');
 const { AssetWriter } = require('../dist/importer/assets');
@@ -109,6 +110,68 @@ function fixture(t) {
     return { run, localFolder, outputFolder, exportBytes, fillBytes, localAssets, exports, downloads, writes,
         lookups, existing, bindings, notes, writeAsset, fillRequests: () => fillRequests };
 }
+
+test('prefab references skip their own raster and every nested image, mask, slice and tiled resource', async (t) => {
+    const f = fixture(t);
+    const root = parseNode({ id: 'prefab', name: 'CommonItemIcon', type: 'INSTANCE',
+        componentProperties: { 'prefab#2003:2': { type: 'TEXT', value: 'CommonItemIcon' } },
+        fills: [{ type: 'IMAGE', imageRef: 'unused-root' }],
+        effects: [{ type: 'DROP_SHADOW' }],
+        children: [{ id: 'mask', type: 'GROUP', children: [
+            { id: 'alpha', name: 'mask', type: 'RECTANGLE', isMask: true, maskType: 'ALPHA',
+                fills: [{ type: 'IMAGE', imageRef: 'unused-mask' }] },
+            { id: 'tile', name: 'tile', type: 'RECTANGLE', fills: [{ type: 'IMAGE', imageRef: 'unused-tile', scaleMode: 'TILE' }] },
+            { id: 'nested-ref', name: 'missing', type: 'INSTANCE',
+                componentProperties: { prefab: { type: 'TEXT', value: 'NestedMustNotResolve' } } },
+        ] }] });
+    const result = await f.run([root], renderDecisions([root]));
+    assert.equal(result.assets.size, 0);
+    assert.deepEqual(f.exports, []);
+    assert.deepEqual(f.downloads, []);
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.existing, []);
+    assert.equal(f.fillRequests(), 0);
+});
+
+test('a local same-name ancestor image cannot absorb a prefab reference', async (t) => {
+    const f = fixture(t);
+    const child = parseNode({ id: 'prefab', type: 'INSTANCE', name: 'CommonItemIcon',
+        componentProperties: { prefab: { type: 'TEXT', value: 'CommonItemIcon' } } });
+    const parent = parseNode({ id: 'host', type: 'FRAME', name: 'Host', children: [] });
+    parent.children = [child];
+    writeFileSync(join(f.localFolder, 'Host.png'), bitmap(50));
+    const decisions = new Map([['host', { action: 'generate', kind: 'node', nineSlice: false }]]);
+    const result = await f.run([parent], decisions);
+    assert.equal(decisions.get('host').action, 'generate');
+    assert.equal(result.assets.size, 0);
+    assert.deepEqual(f.existing, []);
+    assert.deepEqual(f.writes, []);
+});
+
+test('prefab SceneSpecs carry only external geometry and a verified reference', () => {
+    const node = parseNode({ id: 'instance', type: 'INSTANCE', name: 'DesignName',
+        componentProperties: { prefab: { type: 'TEXT', value: 'CommonItemIcon' } },
+        absoluteBoundingBox: { x: 12, y: 24, width: 91, height: 73 }, opacity: 0.6,
+        clipsContent: true, layoutMode: 'HORIZONTAL',
+        children: [{ id: 'text', type: 'TEXT', characters: 'must not import' }] });
+    const decisions = renderDecisions([node]);
+    const prefab = { name: 'CommonItemIcon', uuid: 'existing-prefab', url: 'db://assets/CommonItemIcon.prefab' };
+    const spec = makeSpec(node, undefined, decisions, compileImportPlan([node], decisions), session([node]).nodeById,
+        new Map(), new Map(), false, 0, new Map([[node.id, prefab]]));
+    assert.equal(spec.prefab, prefab);
+    assert.equal(spec.action, 'generate');
+    assert.equal(spec.kind, 'node');
+    assert.equal(spec.opacity, 0.6);
+    assert.deepEqual(spec.frame, { x: 12, y: 24, width: 91, height: 73 });
+    assert.deepEqual(spec.children, []);
+    assert.deepEqual(spec.fills, []);
+    assert.equal(spec.clipsContent, false);
+    assert.equal(spec.layout, undefined);
+    assert.equal(spec.sprite, undefined);
+    assert.equal(spec.aliasFigmaIds, undefined);
+    assert.equal(spec.flattenBoundary, true);
+    assert.throws(() => makeSpec(node, undefined, decisions, new Map(), new Map(), new Map(), new Map()), /未通过资源预检/);
+});
 
 for (const identicalPixels of [false, true]) {
     test(`same-name rendered nodes export and write only the first node (unused second pixels identical: ${identicalPixels})`, async (t) => {

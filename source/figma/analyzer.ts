@@ -277,6 +277,7 @@ export function inferCocosLayoutMode(node: FigmaNode): string | undefined {
 }
 
 export function inferKind(node: FigmaNode): NodeKind {
+    if (node.prefabName?.trim()) return 'node';
     if (node.type === 'TEXT') {
         return 'label';
     }
@@ -305,14 +306,22 @@ export function hasIndependentSliceDescendant(node: FigmaNode): boolean {
         || hasIndependentSliceDescendant(child));
 }
 
+/** Prefab references must survive automatic raster boundaries, even hidden. */
+export function hasPrefabDescendant(node: Pick<FigmaNode, 'children'>): boolean {
+    return node.children.some((child) => Boolean(child.prefabName?.trim()) || hasPrefabDescendant(child));
+}
+
 export function shouldMergeResourceNode(node: FigmaNode, isRoot = false): boolean {
     return !isRoot
+        && !node.prefabName?.trim()
+        && !hasPrefabDescendant(node)
         && node.type !== 'TEXT'
         && isMergedResourceName(node.name)
         && !hasIndependentSliceDescendant(node);
 }
 
 export function inferAction(node: FigmaNode, isRoot = false): ImportAction {
+    if (node.prefabName?.trim() || hasPrefabDescendant(node)) return 'generate';
     if (node.type === 'TEXT') {
         // Text remains an editable Cocos Label. Even when Figma reports fills,
         // shadows, export settings, or other paint data, exporting a bitmap
@@ -377,6 +386,7 @@ function isRuntimeRoleBoundary(node: FigmaNode): boolean {
  * exports and slice groups all need to keep their own import boundary.
  */
 function subtreeRequiresStructure(node: FigmaNode): boolean {
+    if (node.prefabName?.trim()) return true;
     if (!isEffectivelyVisible(node)) {
         return false;
     }
@@ -410,6 +420,8 @@ function subtreeHasVisualContent(node: FigmaNode): boolean {
 
 export function shouldRenderMessySubtree(node: FigmaNode, isRoot: boolean): boolean {
     if (isRoot
+        || node.prefabName?.trim()
+        || hasPrefabDescendant(node)
         || !CONTAINER_TYPES.has(node.type)
         || !isStructuredNodeName(node.name)
         || hasManualExport(node)
@@ -433,7 +445,7 @@ export function shouldRenderMessySubtree(node: FigmaNode, isRoot: boolean): bool
 }
 
 export function isPatchCandidate(node: FigmaNode): boolean {
-    return Boolean(analyzeSliceGrid(node));
+    return !node.prefabName?.trim() && !hasPrefabDescendant(node) && Boolean(analyzeSliceGrid(node));
 }
 
 function warningFor(
@@ -448,6 +460,12 @@ function warningFor(
         : 'Figma 图层已隐藏，导入后节点将在 Cocos 中保持 Inactive';
     const withInactive = (warning?: string): string | undefined =>
         [inactive, warning].filter((item): item is string => Boolean(item)).join('；') || undefined;
+    if (node.prefabName?.trim()) {
+        return withInactive(`引用项目 Prefab“${node.prefabName}”，${node.prefabName.replace(/\.prefab$/i, '').normalize('NFKC').toLocaleLowerCase('en-US') === 'popup' ? '按 Figma 调整宽高' : '实例保持原尺寸'}；不导入此节点的原始内容及子树`);
+    }
+    if (hasPrefabDescendant(node)) {
+        return withInactive('内部存在 Prefab 引用，智能模式保留节点结构，不自动合并为图片');
+    }
     if (!node.absoluteBoundingBox) {
         return withInactive('缺少边界信息，将按 0×0 导入');
     }
@@ -491,15 +509,18 @@ function warningFor(
 
 function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
     const frame = node.absoluteBoundingBox;
-    const sliceAnalysis = analyzeSliceGrid(node);
+    const prefabBoundary = Boolean(node.prefabName?.trim()) || hasPrefabDescendant(node);
+    const sliceAnalysis = prefabBoundary ? undefined : analyzeSliceGrid(node);
     const inferredAction = inferAction(node, isRoot);
     const renderManualExportSubtree = inferredAction !== 'ignore'
+        && !prefabBoundary
         && node.type !== 'TEXT'
         && !sliceAnalysis
         && hasManualExport(node);
     const renderMessySubtree = shouldRenderMessySubtree(node, isRoot);
     const mergeResourceSubtree = shouldMergeResourceNode(node, isRoot);
     const renderSubtree = inferredAction !== 'ignore'
+        && !prefabBoundary
         && (Boolean(sliceAnalysis) || renderManualExportSubtree || isNamedSliceGroup(node) || renderMessySubtree || mergeResourceSubtree);
     return {
         id: node.id,
@@ -513,6 +534,7 @@ function toTree(node: FigmaNode, isRoot: boolean): TreeNodeDto {
         renderSubtree,
         patchCandidate: Boolean(sliceAnalysis),
         sliceMode: sliceAnalysis?.mode,
+        reason: node.prefabName?.trim() ? 'prefab-reference' : undefined,
         warning: warningFor(node, renderManualExportSubtree, renderMessySubtree, mergeResourceSubtree, isRoot),
         children: node.children.map((child) => toTree(child, false)),
     };

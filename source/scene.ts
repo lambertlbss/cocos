@@ -19,6 +19,8 @@ import type { MaskTarget } from './mask-policy';
 import { captureReviewScene, registerSceneReview, reviewManagedComponentIds,
     prepareReviewRemoval, finishReviewRemoval, refreshReviewAfter } from './import-review-scene';
 import type { ReviewScene } from './import-review-model';
+import { configurePrefabAttachment, isInsideNestedPrefab, nativePrefabIdentity,
+    ownedPrefabAttachment, rememberPrefabAttachment, removeOwnedPrefabAttachment } from './prefab-instance';
 
 module.paths.push(join(Editor.App.path, 'node_modules'));
 
@@ -241,6 +243,7 @@ function setParentKeepingWorld(node: any, parent: any): void {
 }
 
 function isGeneratedHelperNode(child: any, parent: any, cc: any): boolean {
+    if (nativePrefabIdentity(child)) return false;
     if (child.name === BACKGROUND_NODE_NAME
         || child.name === TILED_MASK_NODE_NAME
         || child.name === TILED_SPRITE_NODE_NAME
@@ -263,6 +266,7 @@ function removeMappedNodeTree(
     cc: any,
 ): number {
     let removed = 1;
+    removeOwnedPrefabAttachment(node);
     for (const child of [...node.children]) {
         if (staleUuids.has(child.uuid) || isGeneratedHelperNode(child, node, cc)) {
             removed += removeMappedNodeTree(child, survivorParent, staleUuids, cc);
@@ -284,7 +288,7 @@ function normalizeSceneSpec(spec: SceneNodeSpec): SceneNodeSpec {
         ...spec,
         action,
         kind,
-        children: isTerminalAction(action) || spec.flattenBoundary === true
+        children: spec.prefab || isTerminalAction(action) || spec.flattenBoundary === true
             ? []
             : children.map((child) => normalizeSceneSpec(child)),
     };
@@ -314,6 +318,7 @@ function existingUuidForSpec(
 }
 
 function flattensDescendants(spec: SceneNodeSpec): boolean {
+    if (spec.prefab) return true;
     if (typeof spec.flattenBoundary === 'boolean') {
         return spec.flattenBoundary;
     }
@@ -336,6 +341,7 @@ function removeCollapsedMappedDescendants(
         figmaId: string;
         removesAllMappedDescendants: boolean;
         aliasFigmaIds: Set<string>;
+        prefabBoundary: boolean;
     }> = [];
     const collectBoundaries = (nodes: SceneNodeSpec[]) => {
         for (const spec of nodes) {
@@ -344,6 +350,7 @@ function removeCollapsedMappedDescendants(
                     figmaId: spec.figmaId,
                     removesAllMappedDescendants: true,
                     aliasFigmaIds: new Set(),
+                    prefabBoundary: Boolean(spec.prefab),
                 });
                 continue;
             }
@@ -353,6 +360,7 @@ function removeCollapsedMappedDescendants(
                     figmaId: spec.figmaId,
                     removesAllMappedDescendants: false,
                     aliasFigmaIds: new Set(aliasFigmaIds),
+                    prefabBoundary: false,
                 });
             }
             collectBoundaries(spec.children);
@@ -371,6 +379,7 @@ function removeCollapsedMappedDescendants(
         return 0;
     }
     const staleNodes = new Map<string, any>();
+    const prefabStaleNodes = new Set<any>();
     for (const [figmaId, uuid] of Object.entries(existingMap)) {
         if (figmaId === '__root__' || retainedUuids.has(uuid)) {
             continue;
@@ -383,6 +392,7 @@ function removeCollapsedMappedDescendants(
             const node = findByUuid(boundary.node, uuid);
             if (node && node !== boundary.node) {
                 staleNodes.set(node.uuid, node);
+                if (boundary.prefabBoundary) prefabStaleNodes.add(node);
                 break;
             }
         }
@@ -391,6 +401,13 @@ function removeCollapsedMappedDescendants(
         return 0;
     }
     const staleUuids = new Set(staleNodes.keys());
+    const generatedTypes = [cc.UITransform, cc.LabelOutline, cc.Mask, cc.Graphics, cc.Sprite, cc.Label,
+        cc.RichText, cc.Layout, cc.ScrollView, cc.Button, cc.UIOpacity];
+    for (const node of prefabStaleNodes) {
+        if (nodeComponents(node).some((component) => !generatedTypes.includes(component.constructor))) {
+            throw new Error(`待替换的 Figma 子节点“${node.name}”含有手工组件，已停止导入 Prefab。`);
+        }
+    }
     let removed = 0;
     for (const node of staleNodes.values()) {
         if (!node.parent || staleUuids.has(node.parent.uuid)) {
@@ -603,7 +620,7 @@ function destroyOwnedHelperSubtree(
 
 function removeGeneratedBackground(node: any, guard?: PrefabOwnershipGuard): void {
     const background = node.getChildByName(BACKGROUND_NODE_NAME);
-    if (!background) {
+    if (!background || nativePrefabIdentity(background)) {
         return;
     }
     destroyOwnedHelperSubtree(background, node, guard);
@@ -619,18 +636,18 @@ function destroyGeneratedTiledSprite(
 
 function removeGeneratedTiledNodes(node: any, guard?: PrefabOwnershipGuard): void {
     const tiledMask = node.getChildByName(TILED_MASK_NODE_NAME);
-    if (tiledMask) {
+    if (tiledMask && !nativePrefabIdentity(tiledMask)) {
         destroyOwnedHelperSubtree(tiledMask, node, guard);
     }
     const tiledSprite = node.getChildByName(TILED_SPRITE_NODE_NAME);
-    if (tiledSprite) {
+    if (tiledSprite && !nativePrefabIdentity(tiledSprite)) {
         destroyGeneratedTiledSprite(tiledSprite, node, guard);
     }
 }
 
 function removeGeneratedOverflowVisual(node: any, guard?: PrefabOwnershipGuard): void {
     const helper = node.getChildByName(OVERFLOW_SPRITE_NODE_NAME);
-    if (helper) {
+    if (helper && !nativePrefabIdentity(helper)) {
         destroyOwnedHelperSubtree(helper, node, guard);
     }
 }
@@ -656,7 +673,7 @@ function removeObsoleteScrollHelpers(
         }
     };
     const legacy = node.getChildByName('__FigmaContent');
-    if (legacy) {
+    if (legacy && !nativePrefabIdentity(legacy)) {
         if (guard) {
             assertOwnedHelperNode(legacy, guard);
         }
@@ -669,7 +686,7 @@ function removeObsoleteScrollHelpers(
     const scroll = node.getComponent(cc.ScrollView);
     const view = node.getChildByName('view');
     const content = view?.getChildByName('content');
-    if (!scroll || !view || !content
+    if (!scroll || !view || nativePrefabIdentity(view) || !content || nativePrefabIdentity(content)
         || (scroll.content !== content && scroll.content != null)) {
         return;
     }
@@ -1589,6 +1606,7 @@ function removeStalePrefabNodes(
         }
     }
     const salvageManualDescendants = (container: any, survivorParent: any) => {
+        removeOwnedPrefabAttachment(container);
         for (const child of [...container.children]) {
             const childFileId = nodePrefabFileId(child);
             if (childFileId
@@ -1640,6 +1658,7 @@ function capturePrefabSync(
     const managedHelperRuntimeUuids = new Set<string>();
     const mappedUuids = new Set(Object.values(nodeMap));
     const managedRuntimeNodes = new Map<string, any>();
+    const prefabInstances: NonNullable<PrefabSceneSyncCapture['prefabInstances']> = {};
 
     for (const [figmaId, uuid] of Object.entries(nodeMap)) {
         if (figmaId === '__root__') {
@@ -1653,6 +1672,11 @@ function capturePrefabSync(
         nodeFileIds[figmaId] = fileId;
         managedNodes.add(fileId);
         managedRuntimeNodes.set(node.uuid, node);
+        const attachment = ownedPrefabAttachment(node);
+        if (attachment) {
+            rememberPrefabAttachment(node, attachment);
+            prefabInstances[fileId] = { ...attachment };
+        }
     }
 
     const managedComponentTypes = new Set([cc.UITransform, ...generatedClasses]);
@@ -1671,6 +1695,7 @@ function capturePrefabSync(
     }
 
     walkNodes(prefabRoot, (node) => {
+        if (isInsideNestedPrefab(node, prefabRoot)) return;
         if (mappedUuids.has(node.uuid) || node === prefabRoot) {
             return;
         }
@@ -1705,6 +1730,7 @@ function capturePrefabSync(
         managedNodeFileIds: [...managedNodes],
         managedComponentFileIds: [...managedComponents],
         managedHelperFileIds: [...managedHelpers],
+        ...(Object.keys(prefabInstances).length ? { prefabInstances } : {}),
     };
 }
 
@@ -1716,6 +1742,7 @@ function refreshPrefabLayouts(
     cc: any,
 ): void {
     const visit = (spec: SceneNodeSpec) => {
+        if (spec.prefab) return;
         const uuid = nodeMap[spec.figmaId];
         const node = uuid ? findByUuid(prefabRoot, uuid) : null;
         if (!node) {
@@ -1810,6 +1837,11 @@ export const methods = {
             }
             prefabRoot = (globalThis as any).cce.Scene.rootNode;
             const fileIdIndex = prefabFileIdIndex(prefabRoot, prefabContext.prefabUuid);
+            for (const [carrierId, attachment] of Object.entries(prefabContext.prefabInstances ?? {})) {
+                const carrier = fileIdIndex.get(carrierId);
+                if (!carrier) throw new Error('Prefab 实例所属的 Figma 节点已丢失，已停止同步。');
+                rememberPrefabAttachment(carrier, attachment);
+            }
             const existingMap: Record<string, string> = {
                 __root__: prefabRoot.uuid,
             };
@@ -2021,6 +2053,36 @@ export const methods = {
             }
             configureGeometry(node, spec, payload.scale, cc);
 
+            if (spec.prefab) {
+                if (prefabContext) ensureNodePrefabInfo(node, prefabRoot, cc);
+                await configurePrefabAttachment(node, spec.prefab, scene);
+                // Only the explicit prefab TEXT value "Popup" opts into root resizing.
+                if (spec.prefab.name.normalize('NFKC').toLocaleLowerCase('en-US') === 'popup') {
+                    const instance = rememberPrefabAttachment(node, ownedPrefabAttachment(node)!);
+                    const popupTransform = instance.getComponent(UITransform);
+                    if (!popupTransform) throw new Error('Popup Prefab 根节点缺少 UITransform，无法设置宽高。');
+                    const size = spec.intrinsicSize ?? spec.frame;
+                    setImportedContentSize(popupTransform, Math.max(0, size.width * payload.scale),
+                        Math.max(0, size.height * payload.scale));
+                }
+                // The carrier belongs to Figma; the linked instance is an opaque child.
+                removeObsoleteScrollHelpers(node, { ...spec, kind: 'node' }, cc, prefabOwnershipGuard);
+                await removeObsoleteLabelOutline(node, cc);
+                if (removeGeneratedComponents(node, generatedClasses, new Set(),
+                    [Graphics, Sprite, Label, RichText], prefabContext ? previousManagedComponents : undefined)) {
+                    await waitForDeferredComponentRemoval();
+                }
+                removeGeneratedBackground(node, prefabOwnershipGuard);
+                removeGeneratedTiledNodes(node, prefabOwnershipGuard);
+                removeGeneratedOverflowVisual(node, prefabOwnershipGuard);
+                configureOpacity(node, spec, cc);
+                completedNodes += 1;
+                emitSceneProgress(payload, completedNodes / totalNodes,
+                    `构建节点 ${completedNodes}/${totalNodes} · ${spec.name}`);
+                return;
+            }
+            if (ownedPrefabAttachment(node)) await configurePrefabAttachment(node, undefined, scene);
+
             if (spec.action !== 'transform') {
                 removeObsoleteScrollHelpers(node, spec, cc, prefabOwnershipGuard);
                 await removeObsoleteLabelOutline(node, cc);
@@ -2197,6 +2259,15 @@ export const methods = {
                 );
             }
             if (!prefabContext) {
+                for (const uuid of staleTransitionUuids) {
+                    const stale = findByUuid(importRoot, uuid);
+                    if (!stale || !ownedPrefabAttachment(stale) || !stale.parent) continue;
+                    if (nodeComponents(stale).some((component) =>
+                        ![UITransform, ...generatedClasses].includes(component.constructor))) {
+                        throw new Error(`待删除的 Prefab 容器“${stale.name}”含有手工组件，已停止同步。`);
+                    }
+                    removeMappedNodeTree(stale, stale.parent, staleTransitionUuids, cc);
+                }
                 mergePreservedMappings(importRoot, payload.existingMap, nodeMap);
             }
         } catch (error) {

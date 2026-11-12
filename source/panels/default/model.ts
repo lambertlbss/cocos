@@ -16,6 +16,7 @@ export interface NodeStrategySummary {
 
 const REASON_LABELS: Record<NonNullable<TreeNodeDto['reason']>, string> = {
     ignored: '节点已忽略',
+    'prefab-reference': '引用项目已有 Prefab',
     'root-structure': '保留根节点结构',
     'manual-export': 'Figma Export 资源边界',
     'slice-resource': '三/九宫资源边界',
@@ -69,6 +70,7 @@ export function rerenderPreservingScroll(
 
 export function smartActionForNode(node: TreeNodeDto): ImportAction {
     const inferred = normalizeImportAction(node.action);
+    if (node.reason === 'prefab-reference' && inferred !== 'ignore') return 'generate';
     if (node.patchCandidate) return normalizeFigmaSliceDecision({ action: inferred, kind: node.kind, nineSlice: false }, true).action;
     const renderSubtree = Boolean(node.renderSubtree) || (node.action as unknown) === 'merge';
     if (isVectorNodeType(node.type) && inferred !== 'ignore') {
@@ -93,6 +95,7 @@ export function defaultNineSliceIds(roots: TreeNodeDto[]): Set<string> {
 }
 
 export function actionOptionsForNode(node: TreeNodeDto): Array<[ImportAction, string]> {
+    if (node.reason === 'prefab-reference') return [['ignore', '忽略'], ['generate', '引用 Prefab']];
     if (node.patchCandidate) return [['ignore', '忽略'], ['render', 'Figma 三/九宫']];
     return [
         ['ignore', '忽略'],
@@ -126,7 +129,8 @@ export function strategySummaryForNode(
     explicit = false,
 ): NodeStrategySummary {
     const details: string[] = [];
-    const reason = node.patchCandidate ? 'slice-resource' : explicit ? 'user-override' : node.reason;
+    const reason = node.reason === 'prefab-reference' ? node.reason
+        : node.patchCandidate ? 'slice-resource' : explicit ? 'user-override' : node.reason;
     if (reason) {
         details.push(REASON_LABELS[reason]);
     }
@@ -147,6 +151,7 @@ export function effectiveKindForNode(
     action: ImportAction,
     nineSlice = false,
 ): NodeKind {
+    if (node.reason === 'prefab-reference' && action !== 'ignore') return 'node';
     const resolvedKind = selectedKind === 'auto'
         ? node.kind === 'auto' ? 'node' : node.kind
         : selectedKind;
@@ -168,6 +173,7 @@ export function resolveEffectiveActions(
     const visit = (node: TreeNodeDto, blockedByAncestor: boolean): void => {
         const requested = normalizeImportAction(preferredActions.get(node.id) ?? smartActionForNode(node));
         let preferred = requested !== 'ignore' && forcedRenderIds.has(node.id) ? 'render' : requested;
+        if (node.reason === 'prefab-reference' && preferred !== 'ignore') preferred = 'generate';
         preferred = normalizeFigmaSliceDecision({ action: preferred, kind: node.kind,
             nineSlice: forcedRenderIds.has(node.id) }, node.patchCandidate).action;
         const descendantHasProtectedBoundary = (child: TreeNodeDto): boolean =>
@@ -175,6 +181,7 @@ export function resolveEffectiveActions(
             || renamedIds.has(child.id)
             || forcedRenderIds.has(child.id)
             || child.patchCandidate
+            || child.reason === 'prefab-reference'
             || child.children.some(descendantHasProtectedBoundary);
         if (preferred === 'render'
             && node.reason === 'prefix-merge'
@@ -190,7 +197,8 @@ export function resolveEffectiveActions(
             suppressed.add(node.id);
         }
         actions.set(node.id, action);
-        const blocksChildren = blockedByAncestor || blocksDescendants(action);
+        const blocksChildren = blockedByAncestor || blocksDescendants(action)
+            || (node.reason === 'prefab-reference' && action !== 'ignore');
         node.children.forEach((child) => visit(child, blocksChildren));
     };
     roots.forEach((node) => visit(node, false));

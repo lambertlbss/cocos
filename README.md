@@ -1,5 +1,16 @@
 # Figma Importer for Cocos Creator
 
+### 1.0.65 · 2026-11-12 通过 prefab 文本参数引用现有组件
+
+- 在 Figma 组件上添加名为 `prefab` 的 TEXT 属性，值填写项目内已有的 Prefab 名称，例如 `CommonItemIcon`。支持 Figma 自动追加的 `prefab#2003:2` 属性键，实例使用当前值，主组件使用属性默认值；普通文字图层、其他属性类型和空值不触发引用。
+- 导入时在项目 `assets` 内递归匹配唯一同名 `.prefab`，使用原生关联实例保留业务脚本、组件及内部节点。该 Figma 节点自身的视觉内容和整棵子树不再下载或生成；智能合并会为内部 Prefab 引用保留结构，显式忽略仍有效。
+- 普通引用保留 Prefab 原尺寸。**仅匹配名称恰为 `Popup` 的参数引用**，把实例根宽高设为 Figma 节点宽高（应用导入倍率）；`Popup…Cell` 等其他名称不触发这一规则。位置、旋转、显隐和透明度由 Figma 定位节点管理，源 Prefab 资源不改写。
+- 为保持重复导入的稳定身份，Figma 节点保留为外层定位节点，内含一个关联 Prefab 实例。重复导入同一引用会复用实例；切换引用或取消参数时仅移除已核实归属的实例。找不到、重名、资源未就绪、自身/嵌套循环引用和引用同批输出目标均在资源写入前报错。
+
+更新后完整重启 Creator，再重新读取设计并导入。此规则只作用于本次导入遇到的参数节点，不批量修改现有 Prefab。
+
+完整 649/649 项测试、Cocos/MCP 构建与分发检查通过；隔离 Creator 3.8.7 已验证关联实例创建、位置/尺寸覆盖、保存与重开，源模板保持。验证范围见 [原生 Prefab 证据](./docs/evidence/prefab-reference-creator387.md)，业务项目最终画面需升级后实际导入验收。
+
 ### 1.0.64 · 2026-10-26 本地引用、字体映射和隐藏图层选项
 
 - 指定本地目录中的同名项目内 SpriteFrame 优先引用原 UUID，三/九宫及平铺也不再绕过该目录另建图片。沿用原资源像素和已有切片参数，强制刷新不会覆盖本地素材；没有本地命中时，新切片仍按 Figma 原边界生成。项目外文件没有可引用 UUID，仍需导入项目。
@@ -268,5 +279,7 @@ npm test
 ```
 
 `npm run build` 会先清理旧 `dist` 和 `mcp-dist`，再编译 Cocos 扩展并生成 Node 18+ 可直接运行的单文件 MCP bundle。发布修改时必须把新的 `dist`、`mcp-dist` 与源码一起提交，保证仓库始终可直接安装和连接。
+
+本机每次更新并验证通过后，执行 `npm run deploy:local` 同步到 `D:\projectAJ\client\trunk\extensions\figma-importer-cocos`。该目录只保留运行文件和许可证，部署用 package.json 去掉开发脚本及 devDependencies；旧内容备份到仓库忽略目录 `node_modules/.local-deploy/`，不放入引擎插件目录。执行 `npm run deploy:local -- -VerifyOnly` 可重新核对文件清单和 SHA-256。更新后完整重启 Creator。
 
 测试覆盖 Figma URL、全页面解析、缺失边界保护、Cocos 节点类型分析、安全 Auto Layout 降级、真实尺寸三/九宫边界、本地同名资源、内部缓存、Token 安全、渐变 SVG、MCP 会话/鉴权以及节点改名合并。

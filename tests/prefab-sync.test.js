@@ -20,6 +20,23 @@ const {
 } = require('../dist/importer/prefab-sync');
 
 const FILE_KEY = 'SensitiveFigmaFileKey123';
+
+test('accepts the sparse native nested instance saved and reopened by Creator 3.8.7', () => {
+    const contents = readFileSync(join(__dirname, 'fixtures/prefab-reference/creator-3.8.7/host.prefab'), 'utf8');
+    const entries = JSON.parse(contents);
+    const info = entries.find(item => item.__type__ === 'cc.PrefabInfo' && item.instance);
+    const instance = entries[info.instance.__id__];
+    const record = createPrefabSyncRecord(figmaFrameSourceHash(FILE_KEY, '1:1'), '1:1',
+        'host-root-file-id', 'host-ui-file-id');
+    record.prefabInstances = { 'host-root-file-id': { assetUuid: info.asset.__uuid__, instanceFileId: instance.fileId } };
+    assert.equal(prefabJsonContainsSyncRecord(contents, record), true);
+    const sizeOverride = instance.propertyOverrides.map(ref => entries[ref.__id__])
+        .find(item => item.propertyPath.includes('_contentSize'));
+    assert.deepEqual(sizeOverride.value, { __type__: 'cc.Size', width: 200, height: 120 });
+    assert.equal(entries[info.root.__id__]._name, undefined, 'Creator serializes linked roots sparsely');
+    info.asset.__uuid__ = 'another-prefab';
+    assert.equal(prefabJsonContainsSyncRecord(JSON.stringify(entries), record), false);
+});
 const ROOT_NODE_ID = '410:4756';
 const CHILD_NODE_ID = '410:4757';
 const ROOT_FILE_ID = 'root-file-id';
@@ -204,6 +221,61 @@ test('verifies that persisted Prefab bytes contain every managed fileId', () => 
     assert.equal(prefabJsonContainsSyncRecord(JSON.stringify(complete), captured), true);
     complete.push({ __type__: 'cc.PrefabInfo', fileId: CHILD_FILE_ID });
     assert.equal(prefabJsonContainsSyncRecord(JSON.stringify(complete), captured), false);
+});
+
+test('schema 1 persists exact Prefab attachments and rejects unowned or duplicated identities', () => {
+    const capture = { nodeFileIds: { [ROOT_NODE_ID]: ROOT_FILE_ID, [CHILD_NODE_ID]: CHILD_FILE_ID },
+        managedNodeFileIds: [ROOT_FILE_ID, CHILD_FILE_ID], managedComponentFileIds: [ROOT_TRANSFORM_FILE_ID],
+        managedHelperFileIds: [], prefabInstances: {
+            [CHILD_FILE_ID]: { assetUuid: 'NESTED-PREFAB-UUID', instanceFileId: 'nested-instance-file' },
+        } };
+    const record = recordPrefabSyncCapture(initialRecord(), capture);
+    assert.deepEqual(readPrefabSyncRecord(mergePrefabSyncRecord({}, record)), record);
+    assert.equal(record.prefabInstances[CHILD_FILE_ID].assetUuid, 'nested-prefab-uuid');
+    assert.equal(recordPrefabSyncCapture(record, { ...capture, prefabInstances: undefined }).prefabInstances, undefined);
+    assert.equal(Object.hasOwn(initialRecord(), 'prefabInstances'), false);
+    for (const prefabInstances of [
+        { 'unowned-carrier': capture.prefabInstances[CHILD_FILE_ID] },
+        { [CHILD_FILE_ID]: { assetUuid: '', instanceFileId: 'nested-instance-file' } },
+        { [CHILD_FILE_ID]: { assetUuid: 'nested-prefab', instanceFileId: 'short' } },
+        { [CHILD_FILE_ID]: capture.prefabInstances[CHILD_FILE_ID], [ROOT_FILE_ID]: capture.prefabInstances[CHILD_FILE_ID] },
+    ]) {
+        assert.throws(() => readPrefabSyncRecord(mergePrefabSyncRecord({}, { ...record, prefabInstances })), /实例|fileId/);
+    }
+});
+
+test('saved Prefab audit namespaces nested source identities and verifies exact carrier links', () => {
+    const data = JSON.parse(createMinimalPrefabJson('Frame', { width: 100, height: 80 }, ROOT_FILE_ID, ROOT_TRANSFORM_FILE_ID));
+    data[1]._children = [];
+    const attachmentMap = {};
+    for (let i = 1; i <= 2; i++) {
+        const carrierFileId = `carrier-file-id-${i}`;
+        const carrierIndex = data.length;
+        const nestedIndex = carrierIndex + 2;
+        data[1]._children.push({ __id__: carrierIndex });
+        data.push(
+            { __type__: 'cc.Node', _prefab: { __id__: carrierIndex + 1 }, _children: [{ __id__: nestedIndex }] },
+            { __type__: 'cc.PrefabInfo', fileId: carrierFileId, root: { __id__: 1 }, asset: { __id__: 0 } },
+            { __type__: 'cc.Node', _prefab: { __id__: nestedIndex + 1 } },
+            { __type__: 'cc.PrefabInfo', fileId: 'shared-source-root', root: { __id__: nestedIndex },
+                asset: { __uuid__: 'nested-asset-uuid' }, instance: { __id__: nestedIndex + 2 } },
+            { __type__: 'cc.PrefabInstance', fileId: `nested-instance-${i}` },
+            { __type__: 'cc.Sprite', node: { __id__: nestedIndex }, __prefab: { __id__: nestedIndex + 4 } },
+            { __type__: 'cc.CompPrefabInfo', fileId: 'shared-source-component' },
+        );
+        attachmentMap[carrierFileId] = { assetUuid: 'nested-asset-uuid', instanceFileId: `nested-instance-${i}` };
+    }
+    const record = { ...initialRecord(), managedNodeFileIds: [ROOT_FILE_ID, ...Object.keys(attachmentMap)],
+        prefabInstances: attachmentMap };
+    assert.equal(prefabJsonContainsSyncRecord(JSON.stringify(data), record), true);
+    const invalid = JSON.parse(JSON.stringify(data));
+    invalid.find(entry => entry.__type__ === 'cc.PrefabInstance').fileId = 'tampered-instance';
+    assert.equal(prefabJsonContainsSyncRecord(JSON.stringify(invalid), record), false);
+    const unlinked = JSON.parse(JSON.stringify(data));
+    delete unlinked.find(entry => entry.asset?.__uuid__).asset;
+    assert.equal(prefabJsonContainsSyncRecord(JSON.stringify(unlinked), record), false);
+    data.push({ __type__: 'cc.PrefabInfo', fileId: 'carrier-file-id-1' });
+    assert.equal(prefabJsonContainsSyncRecord(JSON.stringify(data), record), false);
 });
 
 test('prioritizes pending Prefab identity and clears only a missing recovery target', () => {

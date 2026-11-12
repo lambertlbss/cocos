@@ -7,6 +7,7 @@ import packageJSON from '../package.json';
 import { FigmaClient, CancelledError, clampImageScale } from './figma/client';
 import {
     hasHiddenDescendant,
+    hasPrefabDescendant,
     inferAction,
     inferCocosLayoutMode,
     inferKind,
@@ -22,6 +23,7 @@ import {
     annotateTreeWithImportPlan,
     compileImportPlan,
     normalizeFigmaSliceDecision,
+    normalizePrefabDecision,
     resolveAutomaticMergeDecisions,
 } from './figma/import-planner';
 import { analyzeMaskTint, verifyWhiteAlphaPng } from './figma/mask-tint';
@@ -43,6 +45,7 @@ import {
 import { LocalAssetCache, type CacheEntryKey } from './importer/cache';
 import type { FontAssetOption } from './importer/fonts';
 import { LocalResourceLibrary } from './importer/local-resources';
+import { collectPrefabReferences, resolvePrefabReferences } from './importer/prefab-resources';
 import { gradientPng } from './importer/svg';
 import { writeSlicedPng } from './importer/sliced-png';
 import { hiddenLayerIds } from './import-visibility';
@@ -80,6 +83,7 @@ import {
     type NodeKind,
     type NodeImportPlan,
     type PrefabEditingState,
+    type PrefabAssetSpec,
     type PrefabSceneSyncCapture,
     type PrefabSceneSyncContext,
     type ProgressEvent,
@@ -544,6 +548,7 @@ function defaultDecision(node: FigmaNode): Decision {
 
 function decisionForNode(node: FigmaNode, decisions: Map<string, Decision>): Decision {
     const decision = decisions.get(node.id) ?? defaultDecision(node);
+    if (node.prefabName) return normalizePrefabDecision(decision, node.prefabName);
     if (node.type === 'TEXT' && decision.action !== 'ignore') {
         return { ...decision, action: 'generate', nineSlice: false };
     }
@@ -744,6 +749,7 @@ function collectAssetRequests(
     const visit = (node: FigmaNode, ancestorsVisible: boolean) => {
         if (prepared.has(node.id)) return;
         const decision = decisionForNode(node, decisions);
+        if (node.prefabName) return;
         if (decision.action === 'ignore' || decision.action === 'transform') {
             return;
         }
@@ -862,8 +868,9 @@ export async function buildAssets(
     };
     const prepareMask = async (node: FigmaNode): Promise<void> => {
         const decision = decisionForNode(node, decisions);
+        if (node.prefabName) return;
         if (decision.action === 'ignore' || decision.action === 'transform' || decision.nineSlice) return;
-        const analysis = analyzeMaskTint(node);
+        const analysis = hasPrefabDescendant(node) ? null : analyzeMaskTint(node);
         if (analysis && !subtreeHasExplicitOverride(node, decisions, false)) {
             decisions.set(node.id, { ...decision, action: 'render', kind: 'sprite', nineSlice: false });
             let reason = analysis.reason;
@@ -897,11 +904,12 @@ export async function buildAssets(
     const protectedDescendant = (node: FigmaNode): boolean => node.children.some((child) => {
         const childDecision = decisionForNode(child, decisions);
         if (childDecision.action === 'ignore') return false;
-        return Boolean(child.isMask || child.children.some((part) => part.isMask)
+        return Boolean(child.prefabName || child.isMask || child.children.some((part) => part.isMask)
             || assets.has(child.id) || childDecision.nineSlice || isNamedSliceGroup(child) || isPatchCandidate(child))
             || (childDecision.action !== 'render' && protectedDescendant(child));
     });
     const promoteLocalParents = async (node: FigmaNode): Promise<void> => {
+        if (node.prefabName) return;
         if (assets.has(node.id) || analyzeMaskTint(node)) return;
         const decision = decisionForNode(node, decisions);
         if (decision.action !== 'generate') {
@@ -938,6 +946,7 @@ export async function buildAssets(
         const decision = decisionForNode(node, decisions);
         if (decision.action === 'ignore') return;
         activeIds.add(node.id);
+        if (node.prefabName) return;
         if (isTerminalAction(decision.action) || decision.nineSlice || assets.has(node.id)) return;
         node.children.forEach(activeBoundary);
     };
@@ -1613,12 +1622,26 @@ export function makeSpec(
     fonts: Map<string, string>,
     isRoot = false,
     parentWorldRotation = 0,
+    prefabs: ReadonlyMap<string, PrefabAssetSpec> = new Map(),
 ): SceneNodeSpec | null {
     const decision = decisionForNode(node, decisions);
     if (decision.action === 'ignore') {
         return null;
     }
     const frame = nodeFrame(node);
+    if (node.prefabName) {
+        const prefab = prefabs.get(node.id);
+        if (!prefab) throw new Error(`节点“${node.name}”的 Prefab“${node.prefabName}”未通过资源预检。`);
+        return {
+            figmaId: node.id, name: decision.name ?? node.name, figmaType: node.type,
+            action: 'generate', kind: 'node', frame, parentFrame, intrinsicSize: node.size, isRoot,
+            rotation: node.rotation, worldRotation: parentWorldRotation + node.rotation,
+            opacity: node.opacity, visible: node.visible, clipsContent: false,
+            cornerRadii: [0, 0, 0, 0], fills: [], strokes: [], strokeWeight: 0,
+            relativeTransform: node.relativeTransform, prefab,
+            flattenBoundary: true, planReason: 'prefab-reference', children: [],
+        };
+    }
     const plan = plans.get(node.id);
     const fold = plan?.fold;
     const foldSource = fold ? nodeById.get(fold.sourceNodeId) : undefined;
@@ -1702,6 +1725,7 @@ export function makeSpec(
                     fonts,
                     false,
                     worldRotation,
+                    prefabs,
                 ))
                 .filter((child): child is SceneNodeSpec => child !== null),
     };
@@ -2222,6 +2246,7 @@ async function importLinkedFramePrefab(args: {
             managedNodeFileIds: prepared.record.managedNodeFileIds,
             managedComponentFileIds: prepared.record.managedComponentFileIds,
             managedHelperFileIds: prepared.record.managedHelperFileIds,
+            ...(prepared.record.prefabInstances ? { prefabInstances: prepared.record.prefabInstances } : {}),
         },
     };
     let snapshotStarted = false;
@@ -2288,8 +2313,39 @@ async function importLinkedFramePrefab(args: {
     }
 }
 
+export async function preflightPrefabReferences(
+    document: DocumentSession, decisions: Map<string, Decision>, settings: ImportSettings,
+    signal?: AbortSignal, forbiddenUrls: Iterable<string> = [], forbiddenUuids: Iterable<string> = [],
+): Promise<Map<string, PrefabAssetSpec>> {
+    const resolved = resolveAutomaticMergeDecisions(document.roots, decisions);
+    const references = collectPrefabReferences(document.roots, (node) => decisionForNode(node, resolved),
+        settings.importHiddenLayers !== false);
+    if (!references.length) return new Map();
+    const urls = new Set(forbiddenUrls);
+    const uuids = new Set(forbiddenUuids);
+    if (!document.sourceNodeId) {
+        const editing = await Editor.Message.request('scene', 'execute-scene-script', {
+            name: packageJSON.name, method: 'inspectPrefabContext', args: [{ prefabUuid: '' }],
+        }) as PrefabEditingState;
+        if (editing?.mode === 'prefab' && editing.currentUuid) uuids.add(editing.currentUuid);
+    }
+    if (document.sourceNodeId && document.roots.length === 1) {
+        const root = document.roots[0];
+        const name = decisionForNode(root, resolved).name || root.name || document.fileName;
+        urls.add(`db://assets/${new AssetWriter(settings.prefabFolder).folder}/${sanitizeAssetName(name)}.prefab`);
+        const sourceHash = figmaFrameSourceHash(document.fileKey, document.sourceNodeId);
+        const boundUuid = (await getPrefabBindings())[sourceHash];
+        const pendingUuid = (await getPendingPrefabSyncs())[sourceHash]?.prefabUuid;
+        if (boundUuid) uuids.add(boundUuid);
+        if (pendingUuid) uuids.add(pendingUuid);
+    }
+    return resolvePrefabReferences(references, { projectPath: Editor.Project.path,
+        forbiddenUrls: urls, forbiddenUuids: uuids, queryAsset: queryPrefabAsset, signal });
+}
+
 async function performImport(request: ImportRequest, operationOwner: string | null = null, options: {
     document?: DocumentSession; preserveReviews?: boolean; silentReview?: boolean;
+    prefabs?: ReadonlyMap<string, PrefabAssetSpec>;
 } = {}): Promise<SceneImportResult> {
     const document = options.document ?? activeDocument;
     if (!document) {
@@ -2302,11 +2358,14 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         await saveSettings(importSettings);
         emitProgress({ phase: 'assets', value: 0, message: '分析并准备资源…' });
         const decisions = decisionMap(request.overrides, document.tree);
+        const prefabs = options.prefabs ?? await preflightPrefabReferences(document, decisions, importSettings, controller.signal);
         const reviewDocument = document;
         importReviews.invalidate(options.preserveReviews ? { preserveHistory: true } : undefined);
         const reviewRecorder = new ImportReviewRecorder();
         const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings, reviewRecorder));
         const { assets, warnings } = builtAssets;
+        for (const [id, asset] of prefabs) reviewRecorder.note('reused', document.nodeById.get(id)?.name ?? asset.name,
+            `prefab 文本参数引用现有 Prefab“${asset.name}”，${asset.name.normalize('NFKC').toLocaleLowerCase('en-US') === 'popup' ? '按 Figma 调整宽高' : '保留原尺寸'}，保留内部组件并跳过 Figma 子树`, asset.url);
         if (controller.signal.aborted) throw new CancelledError();
         const attachReview = async (result: SceneImportResult) => {
             result.review = await finalizeImportReview(importReviews, reviewRecorder, reviewDocument,
@@ -2360,6 +2419,8 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
                     assets,
                     fonts,
                     true,
+                    0,
+                    prefabs,
                 );
                 if (spec && multipleRoots) {
                     spec.frame = {
@@ -2660,7 +2721,7 @@ async function importBatch(request: BatchImportRequest): Promise<BatchImportResu
         const decisions = decisionMap(overrides, entry.document.tree);
         if (decisions.get(root.id)?.action === 'ignore') throw new Error('“' + entry.item.name + '”根节点已忽略，请取消该界面勾选或恢复根节点策略。');
         const name = decisions.get(root.id)?.name || root.name;
-        return { ...entry, overrides, name };
+        return { ...entry, overrides, name, prefabs: undefined as Map<string, PrefabAssetSpec> | undefined };
     });
     assertBatchTargets(entries.map((entry) => ({ id: entry.item.id, name: entry.name })));
     const run: BatchRun = {
@@ -2687,6 +2748,10 @@ async function importBatch(request: BatchImportRequest): Promise<BatchImportResu
         // Check every destination before the first image/prefab write.
         const folder = new AssetWriter(settings.prefabFolder).folder;
         const bindings = await getPrefabBindings();
+        const pendingPrefabs = await getPendingPrefabSyncs();
+        const batchPrefabUrls = entries.map((entry) => 'db://assets/' + folder + '/' + sanitizeAssetName(entry.name) + '.prefab');
+        const batchPrefabUuids = entries.flatMap((entry) => [bindings[entry.item.id], pendingPrefabs[entry.item.id]?.prefabUuid])
+            .filter((uuid): uuid is string => Boolean(uuid));
         for (const entry of entries) {
             const url = 'db://assets/' + folder + '/' + sanitizeAssetName(entry.name) + '.prefab';
             const info = await queryPrefabAsset(url);
@@ -2697,6 +2762,11 @@ async function importBatch(request: BatchImportRequest): Promise<BatchImportResu
                 throw new Error('“' + entry.name + '”的 Prefab 路径已被其他来源占用，请改名或调整输出目录。');
             }
         }
+        // Resolve every replacement before any batch member writes resources.
+        // Referencing another output in the same batch is rejected as well:
+        // it could otherwise become cyclic or change while the batch is running.
+        for (const entry of entries) entry.prefabs = await preflightPrefabReferences(entry.document,
+            decisionMap(entry.overrides, entry.document.tree), settings, undefined, batchPrefabUrls, batchPrefabUuids);
         if (run.stopRequested) {
             const result = completedResult();
             lastBatchResult = result;
@@ -2716,7 +2786,7 @@ async function importBatch(request: BatchImportRequest): Promise<BatchImportResu
             try {
                 const result = await performImport({ overrides: entry.overrides,
                     settings: { ...settings, sourceUrl: entry.item.sourceUrl } }, run.id,
-                { document: entry.document, preserveReviews: true, silentReview: true });
+                { document: entry.document, preserveReviews: true, silentReview: true, prefabs: entry.prefabs });
                 Object.assign(row, { status: 'success', prefabUrl: result.prefabUrl,
                     created: result.created, updated: result.updated, warnings: result.warnings,
                     reviewId: result.review?.id });

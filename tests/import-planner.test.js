@@ -9,11 +9,102 @@ const {
     importPlanReasonText,
     resolveAutomaticMergeDecisions,
     normalizeFigmaSliceDecision,
+    normalizePrefabDecision,
     semanticRoleForNode,
 } = require('../dist/figma/import-planner');
 const { parseNode } = require('../dist/figma/parser');
 const { makeSpec, overflowingRenderFrame, subtreeHasExplicitOverride } = require('../dist/main');
 
+test('prefab parameters normalize every non-ignore strategy to a structural instance carrier', () => {
+    for (const action of ['generate', 'render', 'transform']) {
+        const input = { action, kind: 'button', nineSlice: true, explicit: true, name: 'RenamedCarrier' };
+        assert.deepEqual(normalizePrefabDecision(input, 'ReusableButton'), {
+            ...input, action: 'generate', kind: 'node', nineSlice: false,
+        });
+        assert.equal(input.action, action);
+        assert.equal(input.nineSlice, true);
+    }
+    const ignored = { action: 'ignore', kind: 'sprite', nineSlice: true };
+    assert.equal(normalizePrefabDecision(ignored, 'ReusableButton'), ignored);
+    assert.equal(normalizePrefabDecision(ignored, '  '), ignored);
+});
+
+test('plans own prefab parameters before manual render, transform, slicing and visual folds', () => {
+    const source = node({ id: 'prefab:source', type: 'INSTANCE', name: 'img_reference',
+        componentProperties: { 'prefab#1:2': { type: 'TEXT', value: 'ReusableButton' } },
+        exportSettings: [{ format: 'PNG' }],
+        children: [{ id: 'prefab:source:text', type: 'TEXT', characters: 'Do not fold',
+            absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 } }] });
+    for (const action of ['generate', 'render', 'transform']) {
+        const decisions = decisionsFor([source], { [source.id]: { action, nineSlice: true, explicit: true } });
+        const resolved = resolveAutomaticMergeDecisions([source], decisions).get(source.id);
+        assert.equal(resolved.action, 'generate');
+        assert.equal(resolved.kind, 'node');
+        assert.equal(resolved.nineSlice, false);
+        const plan = compileImportPlan([source], decisions).get(source.id);
+        assert.equal(plan.reason, 'prefab-reference');
+        assert.equal(plan.kind, 'node');
+        assert.equal(plan.fold, undefined);
+        assert.match(plan.warning, /ReusableButton.*原尺寸.*子树/);
+    }
+    const ignored = decisionsFor([source], { [source.id]: { action: 'ignore', explicit: false } });
+    assert.equal(compileImportPlan([source], ignored).get(source.id).reason, 'ignored');
+});
+
+test('a prefab parameter takes priority over an actual valid Figma slice grid', () => {
+    const sliced = node({ ...slicedChild('prefab:real-slice', 'img_sliced_reference'),
+        type: 'INSTANCE',
+        componentProperties: { prefab: { type: 'TEXT', value: 'OriginalSizedAsset' } },
+    });
+    const { analyzeSliceGrid } = require('../dist/figma/slicing');
+    assert.ok(analyzeSliceGrid(sliced), 'fixture has real continuous slice geometry');
+    const decisions = decisionsFor([sliced], { [sliced.id]: {
+        action: 'render', kind: 'sprite', nineSlice: true, explicit: true,
+    } });
+    const resolved = resolveAutomaticMergeDecisions([sliced], decisions).get(sliced.id);
+    assert.equal(resolved.action, 'generate');
+    assert.equal(resolved.nineSlice, false);
+    assert.equal(compileImportPlan([sliced], decisions).get(sliced.id).reason, 'prefab-reference');
+});
+
+test('automatic ancestor rendering and folding preserve prefab descendants while explicit render still wins', () => {
+    const reference = { id: 'prefab:nested', type: 'INSTANCE', name: 'Rectangle 1',
+        absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+        componentProperties: { prefab: { type: 'TEXT', value: 'NestedAsset' } } };
+    for (const name of ['img_wrapper', 'txt_wrapper', 'btn_wrapper']) {
+        const parent = node({ id: `prefab:${name}`, name, type: 'FRAME', children: [reference],
+            exportSettings: [{ format: 'PNG' }] });
+        const automatic = decisionsFor([parent], { [parent.id]: { action: 'render', explicit: false } });
+        assert.equal(resolveAutomaticMergeDecisions([parent], automatic).get(parent.id).action, 'generate');
+        const plan = compileImportPlan([parent], automatic).get(parent.id);
+        assert.equal(plan.fold, undefined);
+        assert.equal(plan.reason, 'default-generate');
+        assert.match(plan.warning, /Prefab.*保留节点结构/);
+        const explicit = decisionsFor([parent], { [parent.id]: { action: 'render', explicit: true } });
+        assert.equal(resolveAutomaticMergeDecisions([parent], explicit).get(parent.id).action, 'render');
+    }
+});
+
+test('prefab plan annotations keep the original subtree available for panel configuration', () => {
+    const root = node({ id: 'prefab:panel-root', type: 'INSTANCE',
+        componentProperties: { prefab: { type: 'TEXT', value: 'PanelAsset' } },
+        children: [{ id: 'prefab:panel-child', type: 'TEXT', characters: 'Original' }] });
+    const { analyzeTree } = require('../dist/figma/analyzer');
+    const annotated = annotateTreeWithImportPlan(analyzeTree([root]), compileImportPlan([root], decisionsFor([root])));
+    assert.equal(annotated[0].reason, 'prefab-reference');
+    assert.match(annotated[0].warning, /PanelAsset/);
+    assert.equal(annotated[0].children[0].id, 'prefab:panel-child');
+    assert.equal(root.children.length, 1);
+    const { actionOptionsForNode, effectiveKindForNode, resolveEffectiveActions,
+        strategySummaryForNode } = require('../dist/panels/default/model');
+    assert.deepEqual(actionOptionsForNode(annotated[0]).map(([action]) => action), ['ignore', 'generate']);
+    assert.equal(effectiveKindForNode(annotated[0], 'button', 'render', true), 'node');
+    assert.match(strategySummaryForNode(annotated[0], true).strategy, /Prefab/);
+    const effective = resolveEffectiveActions(annotated, new Map([[root.id, 'transform']]), new Set([root.id]));
+    assert.equal(effective.actions.get(root.id), 'generate');
+    assert.equal(effective.actions.get('prefab:panel-child'), 'ignore');
+    assert.ok(effective.suppressed.has('prefab:panel-child'));
+});
 function node(value) {
     const parsed = parseNode({
         id: '1:1',

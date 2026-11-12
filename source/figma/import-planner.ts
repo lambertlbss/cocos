@@ -92,11 +92,29 @@ export function normalizeFigmaSliceDecision<T extends ImportDecision>(decision: 
     return { ...decision, action: 'render', kind: kindForImportAction(decision.kind, 'render', true), nineSlice: true };
 }
 
+/** An explicit Prefab parameter owns the boundary; ignoring still wins. */
+export function normalizePrefabDecision<T extends ImportDecision>(decision: T, prefabName?: string): T {
+    if (!prefabName?.trim() || decision.action === 'ignore') return decision;
+    return { ...decision, action: 'generate', kind: 'node', nineSlice: false };
+}
+
 function resolvedDecision(
     node: FigmaNode,
     decisions: ReadonlyMap<string, ImportDecision>,
 ): ImportDecision {
-    return normalizeFigmaSliceDecision(decisions.get(node.id) ?? defaultDecision(node), isPatchCandidate(node));
+    const decision = decisions.get(node.id) ?? defaultDecision(node);
+    return node.prefabName?.trim()
+        ? normalizePrefabDecision(decision, node.prefabName)
+        : normalizeFigmaSliceDecision(decision, isPatchCandidate(node));
+}
+
+function subtreeHasPrefabBoundary(node: FigmaNode, decisions: ReadonlyMap<string, ImportDecision>): boolean {
+    const decision = decisions.get(node.id) ?? defaultDecision(node);
+    if (decision.action === 'ignore') return false;
+    if (node.prefabName?.trim()) return true;
+    // A deliberate ancestor terminal strategy owns its entire subtree.
+    if (decision.explicit && (decision.action === 'render' || decision.action === 'transform')) return false;
+    return node.children.some((child) => subtreeHasPrefabBoundary(child, decisions));
 }
 
 function visiblePaints(node: FigmaNode): boolean {
@@ -232,7 +250,12 @@ export function resolveAutomaticMergeDecisions(
     const result = new Map(decisions);
     const visit = (node: FigmaNode, isRoot: boolean): void => {
         const decision = resolvedDecision(node, result);
-        if (node.type !== 'TEXT'
+        if (node.prefabName?.trim()) {
+            result.set(node.id, normalizePrefabDecision(decision, node.prefabName));
+        } else if (!decision.explicit && decision.action !== 'ignore' && decision.action !== 'transform'
+            && node.children.some((child) => subtreeHasPrefabBoundary(child, result))) {
+            result.set(node.id, { ...decision, action: 'generate', nineSlice: false });
+        } else if (node.type !== 'TEXT'
             && isMergedResourceName(node.name)
             && !decision.explicit
             && decision.action !== 'ignore'
@@ -263,6 +286,7 @@ function baseReason(
     decision: ImportDecision,
     isRoot: boolean,
 ): ImportPlanReason {
+    if (decision.action !== 'ignore' && node.prefabName?.trim()) return 'prefab-reference';
     if (decision.action !== 'ignore' && isPatchCandidate(node)) return 'slice-resource';
     if (decision.explicit) return 'user-override';
     if (decision.action === 'ignore') return 'ignored';
@@ -302,6 +326,8 @@ function visualFoldForNode(
     decision: ImportDecision,
     decisions: ReadonlyMap<string, ImportDecision>,
 ): { fold: VisualFoldPlan; kind: NodeKind; reason: ImportPlanReason } | undefined {
+    if (node.prefabName?.trim()
+        || node.children.some((child) => subtreeHasPrefabBoundary(child, decisions))) return undefined;
     const explicitKindRequestsFold = decision.explicit === true && (
         (role === 'text' && (decision.kind === 'label' || decision.kind === 'richText'))
         || (role === 'image' && (decision.kind === 'sprite' || decision.kind === 'button'))
@@ -376,10 +402,14 @@ export function compileImportPlan(
     const visit = (node: FigmaNode, isRoot: boolean) => {
         const decision = resolvedDecision(node, decisions);
         const role = semanticRoleForNode(node, isRoot);
+        const prefabReference = decision.action !== 'ignore' && Boolean(node.prefabName?.trim());
+        const prefabDescendant = node.children.some((child) => subtreeHasPrefabBoundary(child, decisions));
         const children = effectiveChildren(node, decisions);
         const fold = visualFoldForNode(node, role, decision, decisions);
         const emptyTextKind = plannedKindForEmptyTextHost(node, role, decision, children);
         const prefixConflict = !isRoot
+            && !prefabReference
+            && !prefabDescendant
             && node.type !== 'TEXT'
             && isMergedResourceName(node.name)
             && !decision.explicit
@@ -390,15 +420,21 @@ export function compileImportPlan(
             && !isPatchCandidate(node)
             ? prefixMergeConflict(node, decisions)
             : undefined;
-        const reason = fold?.reason ?? prefixConflict
-            ?? (emptyTextKind ? 'editable-text' : baseReason(node, role, decision, isRoot));
+        const reason = prefabDescendant && !decision.explicit && decision.action === 'generate' && !prefabReference
+            ? 'default-generate'
+            : fold?.reason ?? prefixConflict
+                ?? (emptyTextKind ? 'editable-text' : baseReason(node, role, decision, isRoot));
         plans.set(node.id, {
             nodeId: node.id,
             role,
             reason,
-            kind: fold?.kind ?? emptyTextKind,
+            kind: prefabReference ? 'node' : fold?.kind ?? emptyTextKind,
             fold: fold?.fold,
-            warning: !fold && prefixConflict
+            warning: prefabReference
+                ? `引用项目 Prefab“${node.prefabName}”，${node.prefabName!.replace(/\.prefab$/i, '').normalize('NFKC').toLocaleLowerCase('en-US') === 'popup' ? '按 Figma 调整宽高' : '实例保持原尺寸'}；不导入此节点的原始内容及子树`
+                : prefabDescendant && !decision.explicit && decision.action === 'generate'
+                    ? '内部存在 Prefab 引用，智能模式保留节点结构，不自动合并为图片'
+                : !fold && prefixConflict
                 ? importPlanReasonText(prefixConflict)
                 : reason === 'prefix-merge'
                     ? 'icon_/img_ 前缀按 PNG 整层合并，采用当前显隐合成；隐藏子层不生成独立节点'
@@ -432,6 +468,7 @@ export function annotateTreeWithImportPlan(
 export function importPlanReasonText(reason: ImportPlanReason | undefined): string {
     switch (reason) {
         case 'ignored': return '节点策略设为忽略，不导入';
+        case 'prefab-reference': return '引用项目已有 Prefab';
         case 'root-structure': return '保留为 Prefab 根结构';
         case 'manual-export': return '检测到 Figma Export，按整层资源导入';
         case 'slice-resource': return '识别为三/九宫资源';

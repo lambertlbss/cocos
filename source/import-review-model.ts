@@ -19,6 +19,8 @@ export interface ReviewNode {
     geometry: number[];
     components: ReviewComponent[];
     figmaIds: string[];
+    /** A native nested Prefab link, separate from user-visible engine components. */
+    prefab?: { assetUuid: string; instanceFileId: string };
 }
 
 export interface ReviewScene {
@@ -32,6 +34,8 @@ export interface ReviewScene {
 
 const resourceProperties = new Set(['spriteFrame', 'font', 'normalSprite', 'pressedSprite', 'hoverSprite', 'disabledSprite']);
 const geometryNames = ['位置 X', '位置 Y', '位置 Z', '宽度', '高度', '旋转 X', '旋转 Y', '旋转 Z', '缩放 X', '缩放 Y', '锚点 X', '锚点 Y'];
+const prefabLinkKey = (node: ReviewNode) => node.prefab
+    ? JSON.stringify([normalizeCocosUuid(node.prefab.assetUuid), node.prefab.instanceFileId]) : null;
 
 /** Only the import's save boundary may adopt geometry changes (e.g. deferred text/layout sizing).
  * Never infer that an arbitrary changed property is harmless, or match objects by display name.
@@ -67,6 +71,7 @@ export function compareSavedReviewScene(before: ReviewScene, after: ReviewScene)
             if (old[key] !== node[key]) issue(`${label}.${key}：${describe(old[key])} → ${describe(node[key])}`);
         }
         if (!same([...old.figmaIds].sort(), [...node.figmaIds].sort())) issue(`${label}的 Figma 映射改变`);
+        if (prefabLinkKey(old) !== prefabLinkKey(node)) issue(`${label}的 Prefab 引用已改变或丢失`);
         if (old.geometry.length !== node.geometry.length || node.geometry.some((value) => !Number.isFinite(value))) {
             issue(`${label}的几何数据无效`);
         } else old.geometry.forEach((value, i) => {
@@ -154,6 +159,7 @@ export function diffReviewNodes(before: ReviewNode[], after: ReviewNode[]): Revi
         if (old.parentId !== node.parentId) fields.push('父节点');
         if (old.order !== node.order) fields.push('顺序');
         if (old.active !== node.active) fields.push('显隐');
+        if (prefabLinkKey(old) !== prefabLinkKey(node)) fields.push('Prefab 引用');
         if (JSON.stringify(old.geometry) !== JSON.stringify(node.geometry)) fields.push('位置/尺寸/旋转');
         const comparable = (components: ReviewComponent[]) => components.map(({ id, type, properties }) => ({ id, type, properties }));
         if (JSON.stringify(comparable(old.components)) !== JSON.stringify(comparable(node.components))) fields.push('组件/属性/资源引用');
