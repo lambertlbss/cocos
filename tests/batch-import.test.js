@@ -9,6 +9,30 @@ const { parseFigmaSource } = require('../dist/figma/url');
 const source = 'https://www.figma.com/design/FileKey123456/UI?node-id=1-1&t=token';
 const rawFrame = (id, name, children = [], extra = {}) => ({ id, name, type: 'FRAME', children, ...extra });
 
+test('frame sessions retain component origins and detached mother geometry without importing other subtrees', () => {
+    const document = parseDocument({ components: { mother: { key: 'published-key', remote: false } },
+        document: { children: [{ id: 'page', type: 'CANVAS', children: [
+            rawFrame('frame', 'Screen', [{ id: 'instance', type: 'INSTANCE', componentId: 'mother' }]),
+            { id: 'mother', type: 'COMPONENT', size: { x: 100, y: 40 },
+                relativeTransform: [[1, 0, 30], [0, 1, 40]],
+                children: [{ id: 'not-imported', type: 'TEXT', characters: 'Source only' }] },
+        ] }] } }, source, 'FileKey123456');
+    const originalMother = document.nodeById.get('mother');
+    const frame = frameDocument(document, document.nodeById.get('frame'));
+    assert.deepEqual([...frame.nodeById.keys()], ['frame', 'instance']);
+    assert.deepEqual(frame.roots.map((node) => node.id), ['frame']);
+    assert.deepEqual(frame.components, document.components);
+    assert.notEqual(frame.components, document.components);
+    assert.deepEqual(frame.componentNodes.get('mother').size, { width: 100, height: 40 });
+    assert.equal('children' in frame.componentNodes.get('mother'), false);
+    frame.componentNodes.get('mother').size.width = 999;
+    frame.componentNodes.get('mother').relativeTransform[0][0] = 999;
+    frame.components.mother.key = 'changed';
+    assert.equal(originalMother.size.width, 100);
+    assert.equal(originalMother.relativeTransform[0][0], 1);
+    assert.equal(document.components.mother.key, 'published-key');
+});
+
 test('section discovery keeps Figma order and stops at outer frames', () => {
     const section = parseNode({ id: '1:1', name: 'Screens', type: 'SECTION', children: [
         rawFrame('2:1', 'Home', [rawFrame('2:2', 'Button')]),

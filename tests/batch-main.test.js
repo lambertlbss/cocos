@@ -155,6 +155,52 @@ test('main resolves section screens as frame sources and deduplicates direct lin
     assert.equal(items[3].fileKey, OTHER);
 });
 
+test('scene prefab scale warnings reach batch results and review reports alongside resource warnings', async (t) => {
+    const f = fixture(t);
+    await f.methods.resolveBatchSource(link('20:1'));
+    const items = (await f.methods.getBatchState()).items;
+    f.hooks.setAssetBuilder(async () => ({ assets: new Map(), warnings: ['asset warning'] }));
+    f.setImporter(async () => ({ warnings: ['prefab scale warning', 'asset warning'] }));
+    const result = await f.methods.importBatch(f.request(items));
+    assert.equal(result.items[0].status, 'success');
+    assert.deepEqual(result.items[0].warnings.slice(0, 2), ['asset warning', 'prefab scale warning']);
+    assert.equal(result.items[0].warnings.filter(value => value === 'asset warning').length, 1);
+    assert.equal(result.items[0].warnings.filter(value => value === 'prefab scale warning').length, 1);
+    const report = await f.methods.getImportReview(result.items[0].reviewId);
+    assert.deepEqual(report.warnings, result.items[0].warnings);
+});
+
+test('prefab preflight carries independent Figma instance-to-mother multipliers into each SceneSpec', async (t) => {
+    const f = fixture(t);
+    f.nodes.set('30:1', { id: '30:1', type: 'COMPONENT', name: 'Mother', size: { x: 100, y: 50 },
+        absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 50 }, children: [] });
+    f.nodes.get('20:1').children = [
+        { id: '20:11', type: 'INSTANCE', name: 'Large', componentId: '30:1', size: { x: 200, y: 100 },
+            componentProperties: { prefab: { type: 'TEXT', value: 'CommonItemIcon' } } },
+        { id: '20:12', type: 'INSTANCE', name: 'Small', componentId: '30:1', size: { x: 50, y: 25 },
+            componentProperties: { prefab: { type: 'TEXT', value: 'CommonItemIcon' } } },
+    ];
+    const file = join(global.Editor.Project.path, 'assets', 'CommonItemIcon.prefab');
+    writeFileSync(file, '[]'); writeFileSync(`${file}.meta`, JSON.stringify({ uuid: 'source-component' }));
+    const request = global.Editor.Message.request;
+    t.mock.method(global.Editor.Message, 'request', async (channel, method, payload, ...args) => {
+        if (channel === 'asset-db' && method === 'query-asset-info' && payload === 'db://assets/CommonItemIcon.prefab') {
+            return { uuid: 'source-component', url: payload, importer: 'prefab', type: 'cc.Prefab', imported: true, invalid: false };
+        }
+        return request(channel, method, payload, ...args);
+    });
+    await f.methods.resolveBatchSource(link('20:1'));
+    const items = (await f.methods.getBatchState()).items;
+    const result = await f.methods.importBatch(f.request(items));
+    assert.equal(result.items[0].status, 'success');
+    const [large, small] = f.imports[0].roots[0].children;
+    assert.deepEqual(large.prefabScale, { x: 2, y: 2 });
+    assert.deepEqual(small.prefabScale, { x: 0.5, y: 0.5 });
+    assert.equal(large.prefab.uuid, small.prefab.uuid);
+    assert.equal(large.prefab.prefabScale, undefined, 'shared resource identity carries no per-instance multiplier');
+    assert.equal(f.requests.filter(entry => entry.nodeId === '30:1').length, 1);
+});
+
 test('batch preflights prefab references in every screen before the first screen writes assets', async (t) => {
     const f = fixture(t);
     f.nodes.get('20:2').children = [{ id: '20:21', name: 'BoundWidget', type: 'INSTANCE',

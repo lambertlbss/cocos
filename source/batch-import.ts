@@ -1,7 +1,7 @@
 import { analyzeTree } from './figma/analyzer';
 import { parseFigmaSource } from './figma/url';
 import { sanitizeAssetName } from './importer/assets';
-import type { DocumentSession, FigmaNode } from './types';
+import type { DocumentSession, FigmaComponentGeometry, FigmaNode } from './types';
 
 /** Collect screen roots in Figma order, without entering frames or components. */
 export function collectSectionFrames(section: FigmaNode): FigmaNode[] {
@@ -48,6 +48,17 @@ export function frameDocument(document: DocumentSession, frame: FigmaNode): Docu
         node.children.forEach(visit);
     };
     visit(frame);
+    // Retain geometry only: component lookup must not add other screens or a
+    // component's children to the independently imported Frame subtree.
+    const componentNodes = new Map<string, FigmaComponentGeometry>();
+    for (const node of [...(document.componentNodes?.values() ?? []), ...document.nodeById.values()]) {
+        if (node.type !== 'COMPONENT') continue;
+        componentNodes.set(node.id, { id: node.id, type: node.type, rotation: node.rotation,
+            ...(node.size ? { size: { ...node.size } } : {}),
+            ...(node.absoluteBoundingBox ? { absoluteBoundingBox: { ...node.absoluteBoundingBox } } : {}),
+            ...(node.relativeTransform ? { relativeTransform: node.relativeTransform.map((row) => [...row]) } : {}),
+        });
+    }
     return {
         fileKey: document.fileKey,
         fileName: document.fileName,
@@ -57,6 +68,9 @@ export function frameDocument(document: DocumentSession, frame: FigmaNode): Docu
         nodeById,
         tree: analyzeTree([frame]),
         fonts: [...fonts].sort((left, right) => left.localeCompare(right)),
+        ...(document.components ? { components: Object.fromEntries(Object.entries(document.components)
+            .map(([id, metadata]) => [id, { ...metadata }])) } : {}),
+        ...(componentNodes.size ? { componentNodes } : {}),
     };
 }
 

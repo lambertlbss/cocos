@@ -6,3 +6,4 @@
 - Complete the checks appropriate to the change before deploying. Do not deploy failed or incomplete builds. Verify deployment hashes with `npm run deploy:local -- -VerifyOnly`.
 - Deployment may update and remove files only inside the exact extension directory above. Do not modify the Cocos project's assets, settings, user data, or other extensions. Keep backups outside the extension directory; the deployment script does this under ignored `node_modules/.local-deploy/`.
 - Tell the user to fully restart Creator after deploying; do not restart or close their running editor automatically.
+- User sizing requirement (2026-11-13): resize ordinary referenced Prefab instances only through root `Scale`, using the Figma instance/main-component multipliers; never write the referenced instance's UITransform width/height for this scaling. Preserve the separately requested Popup-prefix width/height adaptation rule unless the user changes it explicitly.

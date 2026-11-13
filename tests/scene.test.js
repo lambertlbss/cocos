@@ -356,19 +356,38 @@ function nestedPrefabFixture() {
         existingNodeFileIds: {}, managedNodeFileIds: [root._prefab.fileId],
         managedComponentFileIds: ['attachmentRootTransform'], managedHelperFileIds: [] };
     const calls = [];
+    const sources = new Map();
+    const sourceLoads = [];
+    const sourceFailures = new Set();
+    const defaultLoad = environment.cc.assetManager.loadAny;
+    environment.cc.assetManager.loadAny = (request, callback) => {
+        if (!sources.has(request.uuid)) return defaultLoad(request, callback);
+        sourceLoads.push(request.uuid);
+        if (sourceFailures.has(request.uuid)) return callback(new Error('source lookup failed'));
+        callback(null, { data: sources.get(request.uuid) });
+    };
+    const sourceFor = (uuid) => {
+        if (!sources.has(uuid)) {
+            const ui = { width: 72, height: 48 };
+            sources.set(uuid, { ui, scale: { x: 1.5, y: 0.75, z: 1 },
+                getComponent(Class) { return Class === UITransform ? ui : null; } });
+        }
+        return sources.get(uuid);
+    };
     let counter = 0;
     const find = (node, uuid) => node.uuid === uuid ? node
         : node.children.map(child => find(child, uuid)).find(Boolean);
     class AuthoredScript extends Component {}
     environment.createPrefabNode = async options => {
         calls.push(options);
+        const source = sourceFor(options.assetUuid);
         const node = new FakeNode('__FigmaContent');
         node._prefab = { root: node, asset: { uuid: options.assetUuid }, fileId: 'sourceRootFileId',
             instance: { fileId: `attachmentInstance${++counter}` } };
         const ui = node.addComponent(UITransform);
         ui.__prefab = { fileId: 'sourceTransformFileId' };
-        ui.setContentSize(72, 48); ui.setAnchorPoint(0.2, 0.8);
-        node.setScale(1.5, 0.75, 1); node.setRotationFromEuler(0, 0, 6);
+        ui.setContentSize(source.ui.width, source.ui.height); ui.setAnchorPoint(0.2, 0.8);
+        node.setScale(source.scale.x, source.scale.y, source.scale.z); node.setRotationFromEuler(0, 0, 6);
         const script = node.addComponent(AuthoredScript);
         script.__prefab = { fileId: 'sourceScriptFileId' }; script.value = 'authored';
         const inner = new FakeNode('Authored child');
@@ -377,7 +396,7 @@ function nestedPrefabFixture() {
         find(environment.scene, options.parent).addChild(node);
         return node.uuid;
     };
-    return { environment, root, calls, AuthoredScript,
+    return { environment, root, calls, sources, sourceFor, sourceLoads, sourceFailures, AuthoredScript,
         async import(children, scale = 1) {
             const spec = makeSpec({ figmaId: 'attachment-root', isRoot: true, children });
             const result = await importWithPrefabContext(environment, spec, context, scale);
@@ -389,7 +408,115 @@ function nestedPrefabFixture() {
 
 const prefabSpec = (id = 'prefab-slot', uuid = 'source-prefab', overrides = {}) => makeSpec({
     figmaId: id, name: 'Prefab slot', frame: { x: 10, y: 15, width: 180, height: 120 },
-    prefab: { name: 'Source', uuid, url: `db://assets/${uuid}.prefab` }, ...overrides,
+    prefab: { name: 'Source', uuid, url: `db://assets/${uuid}.prefab` }, prefabScale: { x: 1, y: 1 }, ...overrides,
+});
+
+test('ordinary prefab references multiply source Scale by each Figma mother ratio without fitting engine dimensions or compounding', async () => {
+    const f = nestedPrefabFixture();
+    const source = f.sourceFor('source-prefab');
+    Object.freeze(source.scale); Object.freeze(source.ui);
+    const scaled = (id, ratio) => prefabSpec(id, 'source-prefab', {
+        frame: { x: 10, y: 15, width: 900, height: 700 }, prefabScale: { x: ratio, y: ratio },
+    });
+    const first = await f.import([scaled('one', 2), scaled('two', 0.5)]);
+    const [one, two] = f.root.children.map(carrier => carrier.children[0]);
+    assert.deepEqual(one.scale, { x: 3, y: 1.5, z: 1 });
+    assert.deepEqual(two.scale, { x: 0.75, y: 0.375, z: 1 });
+    assert.equal(one.getComponent(UITransform).width, 72);
+    assert.equal(one.getComponent(UITransform).height, 48);
+    assert.equal(one.getComponent(f.AuthoredScript).value, 'authored');
+    assert.equal(one.children[0].name, 'Authored child');
+    assert.deepEqual(source.scale, { x: 1.5, y: 0.75, z: 1 });
+    assert.deepEqual(source.ui, { width: 72, height: 48 });
+    assert.equal(first.warnings, undefined);
+    assert.deepEqual(f.sourceLoads, ['source-prefab'], 'one source snapshot per import');
+    const repeated = await f.import([scaled('one', 2), scaled('two', 0.5)]);
+    assert.equal(f.calls.length, 2);
+    assert.deepEqual(one.scale, { x: 3, y: 1.5, z: 1 });
+    assert.deepEqual(two.scale, { x: 0.75, y: 0.375, z: 1 });
+    assert.deepEqual(repeated.prefabSync.prefabInstances, first.prefabSync.prefabInstances);
+    await f.import([scaled('one', 3), scaled('two', 1)]);
+    assert.deepEqual(one.scale, { x: 4.5, y: 2.25, z: 1 });
+    assert.deepEqual(two.scale, { x: 1.5, y: 0.75, z: 1 });
+});
+
+test('prefab scaling uses Figma mother ratios and import scale while retaining source mirror, z and anchor', async () => {
+    const f = nestedPrefabFixture();
+    const source = f.sourceFor('mirror-source');
+    source.ui.width = 80; source.ui.height = 40;
+    source.scale.x = -2; source.scale.y = 2; source.scale.z = 3;
+    await f.import([prefabSpec('mirror', 'mirror-source', {
+        frame: { x: 10, y: 20, width: 900, height: 900 }, intrinsicSize: { width: 80, height: 40 }, rotation: 30,
+        prefabScale: { x: 0.5, y: 0.5 },
+    })], 1.5);
+    const carrier = f.root.children[0]; const instance = carrier.children[0];
+    assert.deepEqual(instance.scale, { x: -1.5, y: 1.5, z: 3 });
+    assert.equal(carrier.euler.z, 30); assert.equal(instance.euler.z, 6);
+    assert.deepEqual(instance.getComponent(UITransform).anchorPoint, { x: 0.2, y: 0.8 });
+    assert.deepEqual(source.scale, { x: -2, y: 2, z: 3 });
+});
+
+test('a missing or invalid Figma mother ratio preserves current Scale and reports a warning until it can be resolved', async () => {
+    const f = nestedPrefabFixture();
+    const scaled = (ratio, warning) => prefabSpec('one', 'source-prefab', {
+        prefabScale: ratio, prefabScaleWarning: warning,
+    });
+    await f.import([scaled({ x: 2, y: 2 })]);
+    const instance = f.root.children[0].children[0];
+    const missing = await f.import([scaled(undefined, '找不到 Figma 母组件')]);
+    assert.deepEqual(instance.scale, { x: 3, y: 1.5, z: 1 });
+    assert.equal(instance.getComponent(UITransform).width, 72);
+    assert.match(missing.warnings.join('\n'), /Source.*找不到 Figma 母组件/);
+    const invalid = await f.import([scaled({ x: 0, y: 1 })]);
+    assert.match(invalid.warnings.join('\n'), /倍率.*无效|无效.*倍率/);
+    assert.deepEqual(instance.scale, { x: 3, y: 1.5, z: 1 });
+    const recovered = await f.import([scaled({ x: 0.5, y: 0.5 })]);
+    assert.equal(recovered.warnings, undefined);
+    assert.deepEqual(instance.scale, { x: 0.75, y: 0.375, z: 1 });
+});
+
+test('a source lookup failure preserves the current instance and can retry next import', async () => {
+    const f = nestedPrefabFixture();
+    const spec = prefabSpec('one', 'source-prefab', { prefabScale: { x: 2, y: 2 } });
+    await f.import([spec]);
+    const instance = f.root.children[0].children[0];
+    f.sourceFailures.add('source-prefab');
+    const failed = await f.import([spec]);
+    assert.match(failed.warnings.join('\n'), /无法读取源 Scale.*source lookup failed/);
+    assert.deepEqual(instance.scale, { x: 3, y: 1.5, z: 1 });
+    f.sourceFailures.clear();
+    assert.equal((await f.import([spec])).warnings, undefined);
+    assert.equal(f.calls.length, 1);
+});
+
+test('Figma mother multipliers can differ per axis and do not require the engine source UI size', async () => {
+    const f = nestedPrefabFixture();
+    const source = f.sourceFor('source-prefab');
+    source.getComponent = () => { throw new Error('engine UI dimensions are not the scale baseline'); };
+    const result = await f.import([prefabSpec('one', 'source-prefab', { prefabScale: { x: 2, y: 0.5 } })]);
+    const instance = f.root.children[0].children[0];
+    assert.deepEqual(instance.scale, { x: 3, y: 0.375, z: 1 });
+    assert.equal(instance.getComponent(UITransform).width, 72);
+    assert.equal(instance.getComponent(UITransform).height, 48);
+    assert.equal(result.warnings, undefined);
+});
+
+test('generated Buttons use Zoom Scale 1.15 on creation and reimport without changing buttons inside references', async () => {
+    const f = nestedPrefabFixture();
+    const buttonSpec = makeSpec({ figmaId: 'button', name: 'btn_close', kind: 'button' });
+    const specs = [buttonSpec, prefabSpec('reference')];
+    await f.import(specs);
+    const generated = f.root.children[0]; const button = generated.getComponent(Button);
+    assert.equal(button.zoomScale, 1.15);
+    assert.equal(button.transition, Button.Transition.SCALE);
+    assert.equal(button.duration, 0.1); assert.equal(button.target, generated);
+    const inner = f.root.children[1].children[0].addComponent(Button);
+    inner.zoomScale = 0.9;
+    button.zoomScale = 0.9;
+    await f.import(specs);
+    assert.equal(generated.getComponent(Button), button);
+    assert.equal(button.zoomScale, 1.15);
+    assert.equal(inner.zoomScale, 0.9);
 });
 
 test('linked Prefabs use distinct stable carriers and preserve authored sizes and internals on reimport', async () => {
@@ -493,20 +620,23 @@ test('Prefab self-reference is blocked and a damaged persisted attachment fails 
     assert.equal(g.calls.length, 1);
 });
 
-test('only explicit prefab Popup resizes its root, including reuse, without scanning other instances', async () => {
+test('explicit prefab names with the Popup prefix resize their roots on creation and reuse without scanning other instances', async () => {
     const f = nestedPrefabFixture();
     const named = (name, frame) => prefabSpec(`slot-${name}`, `asset-${name.normalize('NFKC')}`, {
+        name: name === 'Ordinary' ? 'PopupDisplayNameOnly' : `Slot-${name}`,
         prefab: { name, uuid: `asset-${name.normalize('NFKC')}`, url: `db://assets/${name}.prefab` },
         frame: frame ?? { x: 10, y: 15, width: 180, height: 120 },
         intrinsicSize: frame ? undefined : { width: 80.1234, height: 90.4567 },
     });
-    const names = ['Popup', 'PopupCell', 'PopupWhatever', 'Ordinary', 'ｐｏｐｕｐ'];
+    const names = ['Popup', 'PopupCell', 'PopupWhatever', 'PopupInstructionView', 'popupLower', 'ｐｏｐｕｐWide',
+        'Ordinary', 'CommonPopup', 'BeforePopup'];
     await f.import(names.map(name => named(name)), 1.25);
     const instances = f.root.children.map(carrier => carrier.children[0]);
-    assert.equal(instances[0].getComponent(UITransform).width, 100.15);
-    assert.equal(instances[0].getComponent(UITransform).height, 113.07);
-    for (const instance of instances.slice(1, 4)) assert.equal(instance.getComponent(UITransform).width, 72);
-    assert.equal(instances[4].getComponent(UITransform).width, 100.15);
+    for (const instance of instances.slice(0, 6)) {
+        assert.equal(instance.getComponent(UITransform).width, 100.15);
+        assert.equal(instance.getComponent(UITransform).height, 113.07);
+    }
+    for (const instance of instances.slice(6)) assert.equal(instance.getComponent(UITransform).width, 72);
     assert.deepEqual(instances[0].getComponent(UITransform).anchorPoint, { x: 0.2, y: 0.8 });
     assert.deepEqual(instances[0].scale, { x: 1.5, y: 0.75, z: 1 });
     assert.equal(instances[0].getComponent(f.AuthoredScript).value, 'authored');
@@ -514,15 +644,17 @@ test('only explicit prefab Popup resizes its root, including reuse, without scan
     manual._prefab = { root: manual, asset: { uuid: 'manual-popup' }, fileId: 'manual-popup-root',
         instance: { fileId: 'manual-popup-instance' } };
     manual.addComponent(UITransform).setContentSize(155, 133); f.root.addChild(manual);
-    instances[1].getComponent(UITransform).setContentSize(77, 66);
+    instances[6].getComponent(UITransform).setContentSize(77, 66);
     const changed = { x: 8, y: 9, width: 333.337, height: 222.222 };
     await f.import(names.map(name => named(name, changed)), 0.5);
-    assert.equal(f.calls.length, 5);
+    assert.equal(f.calls.length, names.length);
     assert.equal(f.root.children[0].children[0], instances[0]);
-    assert.equal(instances[0].getComponent(UITransform).width, 166.67);
-    assert.equal(instances[0].getComponent(UITransform).height, 111.11);
-    assert.equal(instances[4].getComponent(UITransform).width, 166.67);
-    assert.equal(instances[1].getComponent(UITransform).width, 77);
+    for (const instance of instances.slice(0, 6)) {
+        assert.equal(instance.getComponent(UITransform).width, 166.67);
+        assert.equal(instance.getComponent(UITransform).height, 111.11);
+    }
+    assert.equal(instances[6].getComponent(UITransform).width, 77);
+    for (const instance of instances.slice(7)) assert.equal(instance.getComponent(UITransform).width, 72);
     assert.equal(manual.getComponent(UITransform).width, 155);
 });
 
@@ -558,6 +690,8 @@ function makeSpec(overrides = {}) {
         children: overrides.children ?? [],
         sprite: overrides.sprite,
         prefab: overrides.prefab,
+        prefabScale: overrides.prefabScale,
+        prefabScaleWarning: overrides.prefabScaleWarning,
         aliasFigmaIds: overrides.aliasFigmaIds,
         flattenBoundary: overrides.flattenBoundary,
         overflowDirection: overrides.overflowDirection,

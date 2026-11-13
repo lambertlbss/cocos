@@ -3,6 +3,7 @@ import {
     isTerminalAction,
     kindForImportAction,
     normalizeImportAction,
+    prefabUsesFigmaSize,
 } from './import-actions';
 import type {
     FigmaColor,
@@ -19,6 +20,7 @@ import type { MaskTarget } from './mask-policy';
 import { captureReviewScene, registerSceneReview, reviewManagedComponentIds,
     prepareReviewRemoval, finishReviewRemoval, refreshReviewAfter } from './import-review-scene';
 import type { ReviewScene } from './import-review-model';
+import { planPrefabScale, type PrefabSourceGeometry } from './importer/prefab-scale';
 import { configurePrefabAttachment, isInsideNestedPrefab, nativePrefabIdentity,
     ownedPrefabAttachment, rememberPrefabAttachment, removeOwnedPrefabAttachment } from './prefab-instance';
 
@@ -40,6 +42,7 @@ interface SceneImportPayload {
 }
 
 interface SceneImportResult {
+    warnings?: string[];
     reviewBefore?: ReviewScene;
     reviewAfter?: ReviewScene;
     rootUuid: string;
@@ -980,6 +983,14 @@ function loadAsset(assetManager: any, uuid: string): Promise<any> {
     });
 }
 
+async function prefabSourceGeometry(cc: any, uuid: string): Promise<PrefabSourceGeometry> {
+    const asset = await loadAsset(cc.assetManager, uuid);
+    const root = asset?.data;
+    if (!root?.scale) throw new Error('源 Prefab 根节点缺少可读取的 Scale');
+    // Node.scale exposes an internal Vec3. Copy its numbers; never mutate the shared asset.
+    return { scale: { x: root.scale.x, y: root.scale.y, z: root.scale.z } };
+}
+
 async function configureSprite(
     node: any,
     spec: SceneNodeSpec,
@@ -1398,7 +1409,7 @@ function configureButton(node: any, spec: SceneNodeSpec, cc: any): void {
         const button = node.getComponent(cc.Button) ?? node.addComponent(cc.Button);
         button.target = node;
         button.transition = cc.Button.Transition.SCALE;
-        button.zoomScale = 0.9;
+        button.zoomScale = 1.15;
         button.duration = 0.1;
     }
 }
@@ -1889,6 +1900,8 @@ export const methods = {
         let updated = 0;
         const totalNodes = Math.max(1, countSpecs(roots));
         let completedNodes = 0;
+        const prefabGeometry = new Map<string, Promise<PrefabSourceGeometry>>();
+        const prefabWarnings = new Set<string>();
         const previousManagedComponents = new Set(prefabContext?.managedComponentFileIds ?? []);
         const previousManagedHelpers = new Set(prefabContext?.managedHelperFileIds ?? []);
         const prefabOwnershipGuard: PrefabOwnershipGuard | undefined = prefabContext
@@ -2056,14 +2069,37 @@ export const methods = {
             if (spec.prefab) {
                 if (prefabContext) ensureNodePrefabInfo(node, prefabRoot, cc);
                 await configurePrefabAttachment(node, spec.prefab, scene);
-                // Only the explicit prefab TEXT value "Popup" opts into root resizing.
-                if (spec.prefab.name.normalize('NFKC').toLocaleLowerCase('en-US') === 'popup') {
-                    const instance = rememberPrefabAttachment(node, ownedPrefabAttachment(node)!);
+                const instance = rememberPrefabAttachment(node, ownedPrefabAttachment(node)!);
+                const size = spec.intrinsicSize ?? spec.frame;
+                const targetSize = { width: Math.max(0, size.width * payload.scale),
+                    height: Math.max(0, size.height * payload.scale) };
+                // Resize only this explicit reference when its Prefab name starts with Popup.
+                if (prefabUsesFigmaSize(spec.prefab.name)) {
                     const popupTransform = instance.getComponent(UITransform);
                     if (!popupTransform) throw new Error('Popup Prefab 根节点缺少 UITransform，无法设置宽高。');
-                    const size = spec.intrinsicSize ?? spec.frame;
-                    setImportedContentSize(popupTransform, Math.max(0, size.width * payload.scale),
-                        Math.max(0, size.height * payload.scale));
+                    setImportedContentSize(popupTransform, targetSize.width, targetSize.height);
+                } else if (!spec.prefabScale) {
+                    prefabWarnings.add(`Prefab“${spec.prefab.name}”（${spec.name}）：${spec.prefabScaleWarning ?? '缺少 Figma 母组件缩放基准'}，保留当前 Scale。`);
+                } else {
+                    let geometry: PrefabSourceGeometry | undefined;
+                    try {
+                        let source = prefabGeometry.get(spec.prefab.uuid);
+                        if (!source) {
+                            source = prefabSourceGeometry(cc, spec.prefab.uuid);
+                            prefabGeometry.set(spec.prefab.uuid, source);
+                        }
+                        geometry = await source;
+                    } catch (error) {
+                        prefabWarnings.add(`Prefab“${spec.prefab.name}”（${spec.name}）无法读取源 Scale，保留当前宽高和 Scale：${error instanceof Error ? error.message : String(error)}`);
+                    }
+                    if (geometry) {
+                        const plan = planPrefabScale(geometry, spec.prefabScale, payload.scale);
+                        if (plan.scale) {
+                            instance.setScale(plan.scale.x, plan.scale.y, plan.scale.z);
+                        } else {
+                            prefabWarnings.add(`Prefab“${spec.prefab.name}”（${spec.name}）：${plan.reason} 保留当前宽高和 Scale。`);
+                        }
+                    }
                 }
                 // The carrier belongs to Figma; the linked instance is an opaque child.
                 removeObsoleteScrollHelpers(node, { ...spec, kind: 'node' }, cc, prefabOwnershipGuard);
@@ -2328,6 +2364,7 @@ export const methods = {
             updated,
             temporaryRoot: !prefabContext && directRoot && !reusedImportRoot,
             prefabSync,
+            ...(prefabWarnings.size ? { warnings: [...prefabWarnings] } : {}),
         };
     },
 

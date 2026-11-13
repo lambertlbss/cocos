@@ -17,7 +17,7 @@ import {
     isNamedSliceGroup,
     isPatchCandidate,
 } from './analyzer';
-import { isMergedResourceName, kindForImportAction } from '../import-actions';
+import { isMergedResourceName, kindForImportAction, prefabUsesFigmaSize } from '../import-actions';
 
 const CONTAINER_TYPES = new Set([
     'DOCUMENT',
@@ -431,7 +431,7 @@ export function compileImportPlan(
             kind: prefabReference ? 'node' : fold?.kind ?? emptyTextKind,
             fold: fold?.fold,
             warning: prefabReference
-                ? `引用项目 Prefab“${node.prefabName}”，${node.prefabName!.replace(/\.prefab$/i, '').normalize('NFKC').toLocaleLowerCase('en-US') === 'popup' ? '按 Figma 调整宽高' : '实例保持原尺寸'}；不导入此节点的原始内容及子树`
+                ? `引用项目 Prefab“${node.prefabName}”，${prefabUsesFigmaSize(node.prefabName!) ? '按 Figma 调整宽高' : '按 Figma 实例相对母组件的倍率缩放'}；不导入此节点的原始内容及子树`
                 : prefabDescendant && !decision.explicit && decision.action === 'generate'
                     ? '内部存在 Prefab 引用，智能模式保留节点结构，不自动合并为图片'
                 : !fold && prefixConflict

@@ -2,12 +2,30 @@
 
 > 文档类型：插件架构、实现约束、故障记录与维护手册  
 > 适用版本：Cocos Creator 3.8.7  
-> 当前插件版本：`1.0.65`
+> 当前插件版本：`1.0.67`
 > 当前文档状态：持续维护  
-> 最近审计：2026-11-12
+> 最近审计：2026-11-13
 > 维护原则：后续每次代码修改前先检查本文档，修改后必须更新“变更记录”“已知问题”和相关实现章节。
 
 ## 1. 文档目的
+
+### 2026-11-13 · `1.0.67` Button ZoomScale 1.15 与 Figma 母组件倍率
+
+- 生成或设置的 Button 使用 `SCALE` 过渡、`zoomScale=1.15`，`duration=0.1` 保持。原有祖先 Button 互斥规则继续适用；引用 Prefab 内部 Button 不扫描或改写。
+- 普通带有效 prefab TEXT 参数的 INSTANCE，按 Figma 实例未旋转 size / 真正 main component 的未旋转 size 计算 X/Y 各轴倍率，允许两轴不同。实例 Scale XY = 引擎 Prefab authored Scale XY × 对应 Figma 倍率 × 全局 importScale；Z 及源镜像符号保留，根 UITransform 宽高不改写。主组件定义自身按 `1×1`。
+- 用户再次强调：引擎中普通引用组件的比例大小调整必须写 Scale，禁止用修改被引用实例的宽高代替缩放；该约束已记录到 `AGENTS.md`。Popup 前缀继续按此前专门要求做宽高适配。
+- 母组件可以在当前文件内取得；远程组件通过 component key 查询 `getComponent` 元数据，再按 `meta.file_key/node_id` 读取真正定义。缺失、无权限、零尺寸或源 Scale 无法读取时提示并保持当前 Scale，不猜引擎比例，不以 frame/AABB 或引擎根宽高回退为绝对尺寸 fit。
+- Figma 倍率只存每个 SceneNodeSpec 的独立字段，不修改按名称/UUID 共用的 PrefabAssetSpec。全局 importScale 单独进入最终 Scale 计算，不混入 Figma ratio 数据；源 asset.data 的 UI/Scale 只读并立即复制数值，首次和复用每次从源 Scale 重算，缓存仅限单次导入，不累乘实例上次结果。
+- Popup 前缀引用仍优先按 Figma 未旋转宽高 × importScale 覆盖实例根宽高，不再额外按母组件 ratio 缩放。仅处理本次实际参数引用；失败提示经 main 回传 review 和 batch。
+- 新增独立 Creator 3.8.7 `_lscale` 保存/重开探针，验证 loadAny 源数据隔离及源 Prefab/Meta 前后哈希保持。探针旧 fit 函数只用于生成测试 Scale Vec3，不证明新 REST 母组件解析和各轴倍率已真机端到端验证；见 `docs/evidence/prefab-scale-creator387.md`。
+- 验证与部署：完整 `npm test` 683/683，Cocos/MCP 类型、构建与分发门禁通过；已同步用户指定扩展目录，66 个运行文件 SHA-256 一致。覆盖 Button 首次/重导入 1.15、母组件跨文件元数据、本地上下文、同源独立倍率、重复导入不累乘、各轴倍率与告警回传；更新后完整重启 Creator，重新读取设计再导入。
+
+### 2026-11-13 · `1.0.66` 更正 Popup 参数值前缀的尺寸条件
+
+- 用户更正尺寸条件：`prefab` TEXT 参数值经过空白清理、NFKC 和大小写归一后，以 `popup` 开头的实际引用均按 Figma 未旋转宽高 × 导入倍率调整实例根 UITransform，包含 Popup、PopupCell、PopupWhatever。参数值采用与现有名称匹配一致的规范化，不使用 Figma 节点显示名或脚本继承识别。
+- 仅作用于本次导入中带有效参数、完成预检并实际引用的节点；本版当时其他普通引用保持原尺寸，现已由 1.0.67 增加 Figma 母组件各轴倍率。无参数节点及源 Prefab 资源不改写；源关联、定位节点身份和内部业务组件沿用既有保护。
+- 本次变更修正参数前缀判断及其自动回归。2026-11-12 的 Creator 3.8.7 探针只证明原生实例尺寸覆盖、保存与重开的机制，本次未重新运行真机探针；证据范围见 `docs/evidence/prefab-reference-creator387.md`。
+- 验证：完整 `npm test` 651/651，Cocos/MCP 类型、构建及分发检查通过；场景回归覆盖 Popup 前缀首次创建、重复导入宽高更新、锚点/缩放/内部组件保留，其他引用及无参数实例不改尺寸；解析/规划说明与实际写入共用同一判定函数。
 
 ### 2026-11-12 · `1.0.65` Figma prefab TEXT 属性引用现有 Prefab
 
@@ -15,7 +33,7 @@
 - `prefabName` 是终结边界，除 ignore 外优先于切图、自动类型及切片。规划器/面板保留引用说明和受抑制子树；自动祖先合并、背景折叠、蒙版及本地同名父图不能吞掉引用。显式祖先终结策略仍作用于整棵子树。
 - `prefab-resources.ts` 在任何资源写入前递归索引 assets 下的 .prefab，按规范化名称唯一匹配并核对 AssetDB 类型、导入状态、URL 和 Meta UUID。缺失、同名歧义、身份未就绪均报错；按实际嵌套 PrefabInfo.asset 校验循环，不把脚本中保留的 Prefab 引用误认为立即嵌套。单项和批量统一预检，整批目标禁止互相引用，来源绑定及 pending UUID 同样纳入自引用保护。
 - SceneSpec 仅带外部几何及验证后的 Prefab 引用，不带原始绘制、字体、自动布局或子节点。使用稳定外层定位节点保存 Figma 身份，内部原生实例作为不透明边界。schema1 来源记录增加可选 prefabInstances（carrier fileId → asset UUID/instance fileId）；未知实例不按名字认领，重复引用不接管模板组件，切换/移除仅处理精确归属实例。
-- 用户确认：普通引用保留原尺寸；仅参数匹配 Prefab 名为 `Popup` 时，按 Figma 未旋转宽高×导入倍率调整实例根 UITransform，保留锚点、缩放及内部适配。不是 Popup 前缀规则，也不扫描/批量调整已有组件。源 Prefab 不写入。
+- 尺寸条件已按用户 2026-11-13 的更正更新为 Popup 参数值前缀，详见 1.0.66 条目：命中时按 Figma 未旋转宽高×导入倍率调整实例根 UITransform，保留锚点、缩放及内部适配；本版当时其他普通引用保留原尺寸，现按 1.0.67 的 Figma 母组件各轴倍率规则处理。仅处理实际参数引用，源 Prefab 不写入。
 - 保存审计区分外层身份与嵌套来源身份；review 节点/组件 ID 用 instance 路径命名空间，单独审计 Prefab 链接。内部资源仍参加引用保护且一律不属于插件可清空组件。
 - 验证：完整 `npm test` 649/649，包含 Cocos/MCP 类型、清理构建和分发门禁；真实 Creator 3.8.7 原生创建、宽高/位置覆盖、保存与重开以及定位节点父级路径均通过，源模板保持。实际稀疏序列化已作为夹具验证链接审计。用户业务项目未改写，业务脚本/最终视觉不以最小原生探针代替验收。
 
@@ -431,6 +449,7 @@ Figma Export 中的 format（JPG/PNG/SVG/PDF）、suffix 和 constraint（SCALE/
 - Scene Script 会独立归一旧 `merge/svg` 动作并收口最终 kind，即使 Cocos 热重载期间主进程与 Scene Script 版本短暂不一致，也不会重新生成空 Layout/ScrollView；
 - Cocos 节点名使用 Figma 名称，经过文件系统/节点名安全清理。
 - 每个生成节点都从 Figma `visible` 同步 `Node.active`；隐藏节点导入为 Inactive，重新导入后会继续跟随 Figma 显隐状态，而不是被当作缺失节点删除。
+- 生成或设置的 Button 指向当前节点，采用 `Button.Transition.SCALE`、`zoomScale=1.15` 和 `duration=0.1`。祖先已有 Button 时不自动创建后代 Button；Prefab 参数引用作为不透明边界，其内部业务 Button 不进入此配置流程。
 
 ### 6.5 Frame Prefab 导入生命周期
 
@@ -592,11 +611,15 @@ MCP 不直接调用 `methods[method]`，而是由 `FigmaImporterMcpApi` 显式�
 
 ## 12. 已知问题与诊断手册
 
-### prefab 参数引用的匹配、尺寸和更新边界（1.0.65）
+### prefab 参数引用的匹配、尺寸和更新边界（1.0.67）
 
 - 必须是组件属性 `prefab`（或其 Figma ID 后缀键），类型 TEXT、值非空；普通名为 prefab 的文字图层不触发。取消参数后重新读取设计再导入可恢复普通节点流程。
 - 名称匹配采用 NFKC、大小写不敏感及可选 `.prefab` 后缀；仅排除本次明确输出 URL/来源绑定/pending UUID，不排除整个输出目录。这样源组件与本次同名外层输出可以重复导入，真正多个可用同名来源仍拒绝。
-- 普通引用不改实例根尺寸；仅精确名称 Popup 的引用按 Figma 宽高调整，PopupCell 等名称及无参数节点不受该规则影响。创建选项显式关闭 autoAdaptToCreate（类型声明指按 2D/3D 选择组件），不把该选项当作已验证的尺寸控制证据。没有新增批量调整引擎已有组件的操作。
+- `prefab` TEXT 参数值规范化（空白清理、NFKC、大小写不敏感）后以 popup 开头的实际引用，优先按 Figma 未旋转宽高×全局导入倍率设置实例根宽高，PopupCell、PopupWhatever 同样命中，不再额外叠加母组件 ratio。判断不读取 Figma 节点显示名或脚本继承；无参数节点及源 Prefab 资源不改写。创建选项显式关闭 autoAdaptToCreate（类型声明指按 2D/3D 选择组件），不把该选项当作尺寸控制依据。
+- 普通带参数 INSTANCE 的 `ratioX=instance.size.width/mainComponent.size.width`、`ratioY=instance.size.height/mainComponent.size.height`，两轴允许不同；主组件定义自身用 `1×1`。只用未旋转 size，不用旋转后的页面包围盒。母组件先查当前文档，远程定义按 component key → getComponent 元数据 → `meta.file_key/node_id` 定位，不能把组件集或同名节点当作实际母组件。
+- 各节点 ratio 放在各自 SceneNodeSpec，不写入共享 PrefabAssetSpec；源 Prefab authored Scale 从 `assetManager.loadAny` 返回的 `asset.data` 只读取得并复制 x/y/z。最终 Scale XY=authoredScale XY×ratio XY×importScale，Z 和源镜像保留；普通引用的根 UITransform 宽高不改写，不依赖引擎宽高反推 Figma 倍率。
+- 母组件缺失、无权限、零尺寸、ratio 无效或源 Scale 无法读取时，保持当前 Scale 并提示，不猜倍率、不回退绝对尺寸 fit。首次与复用均重算，缓存只在单次导入内有效，不从上次实例 Scale 累乘；提示回传 main/review/batch。源 UI/Scale 及内部组件不改写。
+- 原生 Scale override 的保存与重开、loadAny 源数据隔离和源文件字节保持已有独立证据，见 `docs/evidence/prefab-scale-creator387.md`；其中旧 fit 函数仅产生测试 Vec3，不能作为新母组件 REST 解析/倍率链路的真机端到端证据。
 - 来源记录丢失、附件 instance ID 改变、手工嵌套实例或旧受管节点包含未知业务组件时拒绝认领/删除；按报告原因处理后重试，不按节点名称猜归属。
 - 原生创建必须提供 `type: cc.Prefab`，否则 Creator 会解除原关联。隔离 Creator 3.8.7 的创建、尺寸覆盖、保存及重开证据见 `docs/evidence/prefab-reference-creator387.md`。用户业务脚本与最终画面仍需在升级后实际导入验收。
 
@@ -923,12 +946,28 @@ npm test
 
 ## 16. 变更记录
 
+### 2026-11-13 · `1.0.67` · Button ZoomScale 1.15 与 Figma 母组件倍率
+
+- 最终验证：完整 `npm test` 683/683，构建和分发检查通过，指定扩展目录 1.0.67 的 66 个运行文件部署哈希一致；源码、测试和内部文档未部署到引擎目录。
+- 生成或设置的 Button 使用 SCALE、ZoomScale 1.15，duration 0.1 保持；不扫描修改引用 Prefab 内部 Button。
+- 普通参数 INSTANCE 的 Figma 实例/真正母组件未旋转 size 各轴比值乘源 authored Scale，再乘全局 importScale。允许 X/Y 倍率不同，保留 Z/镜像，普通实例根宽高不改；主组件定义自身按 `1×1`。
+- 支持当前文件母组件及远程 component key → getComponent 元数据 → `file_key/node_id` 定位。缺失、无权限、零尺寸等情况保持当前 Scale 并提示，不猜引擎比例或回退绝对尺寸 fit；提示进入 main/review/batch。
+- ratio 只存每节点 SceneNodeSpec，禁止改共享 PrefabAssetSpec；全局导入倍率独立参与最终计算。源 UI/Scale 只读并复制数值，缓存仅限单次导入，首次/复用均从源重算不累乘。Popup 前缀仍优先写 Figma 宽高，不额外叠加母组件 ratio。
+- 保留 1.0.66 历史条目。独立 Creator 3.8.7 已验证 `_lscale` 覆盖保存/重开及源 Prefab/Meta 哈希保持，证据见 `docs/evidence/prefab-scale-creator387.md`；旧探针 fit 函数只用于产生测试 Scale，不将该结果称为新 Figma 母组件 REST 算法真机端到端验收。
+
+### 2026-11-13 · `1.0.66` · Popup 参数引用按前缀调整宽高
+
+- 按用户更正，将尺寸触发条件扩展为 `prefab` TEXT 参数值规范化后以 popup 开头，包含 PopupCell、PopupWhatever；NFKC、空白和大小写处理与现有 Prefab 名称匹配一致。
+- 保持作用域为本次实际引用的参数节点；本版当时其他普通引用保持模板尺寸，后由 1.0.67 增加 Figma 母组件各轴倍率。不以节点显示名或脚本继承判断，不修改无参数节点或源 Prefab 文件。重复导入、实例归属及资源剪枝继续使用已有流程。
+- 同步修正 README、MCP 说明、当前边界说明及历史尺寸描述，区分本次条件回归和 2026-11-12 的原生创建/尺寸保存探针。本次未重跑 Creator 真机探针，业务最终画面仍需升级后导入验收。
+- 验证与部署：完整 `npm test` 651/651，Cocos/MCP 类型、构建及分发门禁通过；1.0.66 已同步用户指定扩展目录，64 个运行文件 SHA-256 核对一致。源码、测试及内部文档未部署到引擎目录；更新后完整重启 Creator、重新读取并导入生效。
+
 ### 2026-11-12 · `1.0.65` · prefab TEXT 参数复用原生 Prefab
 
 - 用户指定后续每次更新同时部署 `D:\projectAJ\client\trunk\extensions\figma-importer-cocos`，该目录只留运行部分。新增 `AGENTS.md` 持久维护约定和 `scripts/deploy-local.ps1`（`npm run deploy:local`）：先暂存、备份，再在精确路径内更新/清除旧开发文件，并逐文件 SHA-256 校验；失败尝试恢复备份。当前同步维持 1.0.65，不额外改变运行功能版本。
 - 新增参数解析、资源只读预检、原子树资源剪枝、SceneSpec 引用和面板引用说明；单项/MCP/批量共享同一逻辑。
 - 新增稳定外层定位节点和原生关联实例，schema1 可选附件身份、重复引用命名空间、保存链接审计及引用清理保护；重导/切换/删除不认领未知手工实例。
-- 用户明确的尺寸策略：普通引用保持原尺寸；仅 prefab 值匹配 Popup 时按 Figma 宽高设置实例根，不扩展为 Popup 前缀或脚本继承扫描，不改源 Prefab。
+- 尺寸策略已在 1.0.66 按用户更正为 prefab 参数值的 Popup 前缀：命中时按 Figma 宽高设置实际实例根；本版当时其他普通引用保持原尺寸，现按 1.0.67 的 Figma 母组件各轴倍率规则处理。不按脚本继承判断，不改源 Prefab。
 - 按锁文件完整性恢复了失效 Junction 指向的 esbuild、MCP SDK 和 zod 本地开发依赖，没有升级依赖版本。
 - 真机：独立 Creator 3.8.7 验证了原生 type 参数、定位节点下创建、源关联/实例 ID、根位置与尺寸覆盖的保存和重开，源模板保持。未导入或改写用户业务项目。
 - 最终验证：完整 `npm test` 649/649，Cocos/MCP 类型、构建和分发检查全部通过；`git diff --check` 通过。用户实际画面需替换扩展、完整重启 Creator、重新读取并导入后验收。

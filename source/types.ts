@@ -156,6 +156,9 @@ export interface FigmaNode {
     componentId?: string;
     /** 当前节点自身 TEXT 组件参数 prefab 指定的项目 Prefab 名称。 */
     prefabName?: string;
+    /** Figma 实例相对其真正母组件的各轴倍率，不含导入倍率。 */
+    prefabScale?: { x: number; y: number };
+    prefabScaleWarning?: string;
     clipsContent: boolean;
     cornerRadius?: number;
     rectangleCornerRadii?: number[];
@@ -192,6 +195,10 @@ export interface FigmaNode {
         vertical?: string;
     };
 }
+
+/** Read-only mother-component geometry retained outside an extracted Frame tree. */
+export type FigmaComponentGeometry = Pick<FigmaNode,
+    'id' | 'type' | 'size' | 'absoluteBoundingBox' | 'relativeTransform' | 'rotation'>;
 
 export interface TreeNodeDto {
     id: string;
@@ -231,6 +238,9 @@ export interface DocumentSession {
     nodeById: Map<string, FigmaNode>;
     tree: TreeNodeDto[];
     fonts: string[];
+    /** REST components 元数据；remote 实例必须按发布 key 定位真正母组件。 */
+    components?: Record<string, { key?: string; remote?: boolean }>;
+    componentNodes?: Map<string, FigmaComponentGeometry>;
 }
 
 export interface ImportOverride {
@@ -297,8 +307,10 @@ export interface SceneNodeSpec {
     figmaType: string;
     action: ImportAction;
     kind: NodeKind;
-    /** 普通实例保留原尺寸，精确名称 Popup 使用 Figma 宽高；外层节点管理 Figma 几何。 */
+    /** 普通引用使用 Figma 母组件相对倍率；Popup 前缀引用调整宽高。 */
     prefab?: PrefabAssetSpec;
+    prefabScale?: { x: number; y: number };
+    prefabScaleWarning?: string;
     frame: Rect;
     parentFrame?: Rect;
     /** 未旋转前的节点尺寸；frame 仍保存页面坐标中的轴对齐包围盒。 */

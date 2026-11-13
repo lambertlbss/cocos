@@ -19,6 +19,7 @@ import {
     type TiledPaintSource,
 } from './figma/analyzer';
 import { parseDocument } from './figma/parser';
+import { resolvePrefabComponentScales } from './figma/component-scale';
 import {
     annotateTreeWithImportPlan,
     compileImportPlan,
@@ -33,6 +34,7 @@ import {
     isTerminalAction,
     kindForImportAction,
     normalizeImportAction,
+    prefabUsesFigmaSize,
 } from './import-actions';
 import {
     AssetWriter,
@@ -1639,6 +1641,8 @@ export function makeSpec(
             opacity: node.opacity, visible: node.visible, clipsContent: false,
             cornerRadii: [0, 0, 0, 0], fills: [], strokes: [], strokeWeight: 0,
             relativeTransform: node.relativeTransform, prefab,
+            ...(node.prefabScale ? { prefabScale: { ...node.prefabScale } } : {}),
+            ...(node.prefabScaleWarning ? { prefabScaleWarning: node.prefabScaleWarning } : {}),
             flattenBoundary: true, planReason: 'prefab-reference', children: [],
         };
     }
@@ -2339,8 +2343,11 @@ export async function preflightPrefabReferences(
         if (boundUuid) uuids.add(boundUuid);
         if (pendingUuid) uuids.add(pendingUuid);
     }
-    return resolvePrefabReferences(references, { projectPath: Editor.Project.path,
+    const prefabs = await resolvePrefabReferences(references, { projectPath: Editor.Project.path,
         forbiddenUrls: urls, forbiddenUuids: uuids, queryAsset: queryPrefabAsset, signal });
+    const scaled = references.filter((node) => !prefabUsesFigmaSize(prefabs.get(node.id)!.name));
+    if (scaled.length) await resolvePrefabComponentScales(document, scaled, await client(signal));
+    return prefabs;
 }
 
 async function performImport(request: ImportRequest, operationOwner: string | null = null, options: {
@@ -2365,9 +2372,10 @@ async function performImport(request: ImportRequest, operationOwner: string | nu
         const builtAssets = await diagnosticTask('准备全部资源', undefined, () => buildAssets(document, decisions, importSettings, reviewRecorder));
         const { assets, warnings } = builtAssets;
         for (const [id, asset] of prefabs) reviewRecorder.note('reused', document.nodeById.get(id)?.name ?? asset.name,
-            `prefab 文本参数引用现有 Prefab“${asset.name}”，${asset.name.normalize('NFKC').toLocaleLowerCase('en-US') === 'popup' ? '按 Figma 调整宽高' : '保留原尺寸'}，保留内部组件并跳过 Figma 子树`, asset.url);
+            `prefab 文本参数引用现有 Prefab“${asset.name}”，${prefabUsesFigmaSize(asset.name) ? '按 Figma 调整宽高' : '按 Figma 实例相对母组件的倍率缩放'}，保留内部组件并跳过 Figma 子树`, asset.url);
         if (controller.signal.aborted) throw new CancelledError();
         const attachReview = async (result: SceneImportResult) => {
+            for (const warning of result.warnings ?? []) if (!warnings.includes(warning)) warnings.push(warning);
             result.review = await finalizeImportReview(importReviews, reviewRecorder, reviewDocument,
                 result.reviewBefore, result.reviewAfter, result.prefabUrl, warnings,
                 async () => await Editor.Message.request('scene', 'execute-scene-script', {

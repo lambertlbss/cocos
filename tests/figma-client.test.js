@@ -7,7 +7,17 @@ const {
     imageFillPath,
     imageFillUrlsFromResponse,
     renderedImagePath,
+    FigmaClient,
 } = require('../dist/figma/client');
+
+test('published component lookup uses the official encoded key endpoint and preserves its response envelope', async (t) => {
+    const api = new FigmaClient('unit-test-only');
+    const response = { error: false, meta: { key: 'component/key + 中文', file_key: 'OriginFile', node_id: '20:30' } };
+    const paths = [];
+    t.mock.method(api, 'json', async (path) => { paths.push(path); return response; });
+    assert.equal(await api.getComponent('component/key + 中文'), response);
+    assert.deepEqual(paths, ['/v1/components/component%2Fkey%20%2B%20%E4%B8%AD%E6%96%87']);
+});
 
 test('builds the Figma original image-fill endpoint instead of the node render endpoint', () => {
     assert.equal(

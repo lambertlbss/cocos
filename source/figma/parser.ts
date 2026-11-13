@@ -280,10 +280,24 @@ export function parseDocument(
 ): DocumentSession {
     let roots: FigmaNode[] = [];
     let fileName = stringValue(payload.name, 'Figma Document');
+    const components: NonNullable<DocumentSession['components']> = {};
+    const addComponents = (value: unknown): void => {
+        for (const [id, raw] of Object.entries(record(value))) {
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+            const metadata = record(raw);
+            const entry: NonNullable<DocumentSession['components']>[string] = {};
+            if (typeof metadata.key === 'string' && metadata.key.trim()) entry.key = metadata.key.trim();
+            if (typeof metadata.remote === 'boolean') entry.remote = metadata.remote;
+            Object.defineProperty(components, id, { enumerable: true, configurable: true,
+                writable: true, value: { ...components[id], ...entry } });
+        }
+    };
+    addComponents(payload.components);
 
     const nodes = record(payload.nodes);
     if (requestedNodeId && Object.keys(nodes).length) {
         const entry = record(nodes[requestedNodeId] ?? Object.values(nodes)[0]);
+        addComponents(entry.components);
         const documentNode = parseNode(entry.document);
         if (documentNode) {
             roots = [documentNode];
@@ -309,5 +323,6 @@ export function parseDocument(
         nodeById: collected.nodeById,
         tree: analyzeTree(roots),
         fonts: collected.fonts,
+        ...(Object.keys(components).length ? { components } : {}),
     };
 }

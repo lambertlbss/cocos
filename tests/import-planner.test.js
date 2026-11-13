@@ -15,6 +15,17 @@ const {
 const { parseNode } = require('../dist/figma/parser');
 const { makeSpec, overflowingRenderFrame, subtreeHasExplicitOverride } = require('../dist/main');
 
+test('resolved prefab plans explain Figma sizing for Popup-prefixed references only', () => {
+    for (const [prefabName, resized] of [['Popup', true], ['PopupCell', true], ['PopupStore', true],
+        ['popupReward.prefab', true], ['CommonItemIcon', false], ['CommonPopup', false]]) {
+        const source = node({ id: `size:${prefabName}`, type: 'INSTANCE', name: 'PopupDisplayNameOnly',
+            componentProperties: { 'prefab#2003:2': { type: 'TEXT', value: prefabName } } });
+        const plan = compileImportPlan([source], decisionsFor([source])).get(source.id);
+        assert.equal(plan.reason, 'prefab-reference');
+        assert.match(plan.warning, resized ? /按 Figma 调整宽高/ : /相对母组件.*倍率缩放/, prefabName);
+    }
+});
+
 test('prefab parameters normalize every non-ignore strategy to a structural instance carrier', () => {
     for (const action of ['generate', 'render', 'transform']) {
         const input = { action, kind: 'button', nineSlice: true, explicit: true, name: 'RenamedCarrier' };
@@ -45,7 +56,7 @@ test('plans own prefab parameters before manual render, transform, slicing and v
         assert.equal(plan.reason, 'prefab-reference');
         assert.equal(plan.kind, 'node');
         assert.equal(plan.fold, undefined);
-        assert.match(plan.warning, /ReusableButton.*原尺寸.*子树/);
+        assert.match(plan.warning, /ReusableButton.*母组件.*子树/);
     }
     const ignored = decisionsFor([source], { [source.id]: { action: 'ignore', explicit: false } });
     assert.equal(compileImportPlan([source], ignored).get(source.id).reason, 'ignored');

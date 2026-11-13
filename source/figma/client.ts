@@ -288,6 +288,11 @@ export class FigmaClient {
         return this.json(`/v1/files/${encodeURIComponent(fileKey)}/nodes?ids=${ids}&geometry=paths`);
     }
 
+    /** Published component metadata identifies its actual source file and node. */
+    async getComponent(key: string): Promise<Record<string, unknown>> {
+        return this.json(`/v1/components/${encodeURIComponent(key)}`);
+    }
+
     async getImageUrls(
         fileKey: string,
         nodeIds: string[],

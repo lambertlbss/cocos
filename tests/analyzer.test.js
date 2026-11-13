@@ -19,6 +19,22 @@ const {
     tiledPaintSource,
 } = require('../dist/figma/analyzer');
 
+test('prefab size guidance follows the referenced Popup prefix rather than the design node name', () => {
+    const { parseNode } = require('../dist/figma/parser');
+    for (const name of ['Popup', 'PopupCell', 'PopupInstructionView', 'popupStore', 'ｐｏｐｕｐReward.prefab']) {
+        const reference = parseNode({ id: `prefix:${name}`, type: 'INSTANCE', name: 'OrdinaryDesignNode',
+            componentProperties: { prefab: { type: 'TEXT', value: name } } });
+        const [tree] = analyzeTree([reference]);
+        assert.equal(tree.reason, 'prefab-reference');
+        assert.match(tree.warning, /按 Figma 调整宽高/, name);
+    }
+    for (const name of ['CommonItemIcon', 'CommonPopup', 'MyPopupView']) {
+        const reference = parseNode({ id: `ordinary:${name}`, type: 'INSTANCE', name: 'PopupDisplayNameOnly',
+            componentProperties: { prefab: { type: 'TEXT', value: name } } });
+        assert.match(analyzeTree([reference])[0].warning, /相对母组件.*倍率缩放/, name);
+    }
+});
+
 test('uses original IMAGE paint for plain hidden image nodes and equal-size wrappers', () => {
     const image = node({
         id: 'hidden-image:leaf',
@@ -98,7 +114,7 @@ test('prefab parameters preserve structural boundaries instead of becoming PNG o
     assert.equal(tree.renderSubtree, false);
     assert.equal(tree.patchCandidate, false);
     assert.equal(tree.reason, 'prefab-reference');
-    assert.match(tree.warning, /ReusableButton.*原尺寸.*子树/);
+    assert.match(tree.warning, /ReusableButton.*母组件.*子树/);
     assert.equal(tree.children.length, 1, 'the panel keeps original descendants available');
 });
 

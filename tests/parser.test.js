@@ -4,6 +4,23 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parseDocument, parseNode } = require('../dist/figma/parser');
 
+test('preserves typed component origin metadata from full file and selected node responses', () => {
+    const components = { '20:1': { key: ' local-key ', remote: false, name: 'Local' },
+        '20:2': { key: 'remote-key', remote: true }, invalid: null };
+    const root = { id: '1:1', type: 'FRAME', children: [{ id: '1:2', type: 'INSTANCE', componentId: '20:2' }] };
+    const full = parseDocument({ components, document: { children: [root] } }, 'url', 'File');
+    assert.deepEqual(full.components, { '20:1': { key: 'local-key', remote: false },
+        '20:2': { key: 'remote-key', remote: true } });
+    const selected = parseDocument({ components, nodes: { '1:1': { document: root,
+        components: { '20:2': { remote: true }, '20:3': { key: 'entry-key', remote: false } },
+    } } }, 'url', 'File', '1:1');
+    assert.deepEqual(selected.components, { ...full.components, '20:3': { key: 'entry-key', remote: false } });
+    assert.equal(selected.nodeById.get('1:2').componentId, '20:2');
+    assert.equal(components['20:1'].key, ' local-key ', 'normalization does not mutate the REST payload');
+    selected.components['20:1'].key = 'Changed';
+    assert.equal(full.components['20:1'].key, 'local-key');
+});
+
 test('reads only the current node typed prefab component parameter and trims its value', () => {
     const instance = parseNode({ id: 'prefab:instance', type: 'INSTANCE', name: 'Button',
         componentProperties: { 'prefab#123:456': { type: 'TEXT', value: '  CommonButton  ' } },

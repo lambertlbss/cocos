@@ -1,6 +1,6 @@
 import type { FigmaNode, ImportAction, NodeKind, TreeNodeDto } from '../types';
 import { analyzeSliceGrid } from './slicing';
-import { isMergedResourceName } from '../import-actions';
+import { isMergedResourceName, prefabUsesFigmaSize } from '../import-actions';
 
 const CONTAINER_TYPES = new Set([
     'DOCUMENT',
@@ -461,7 +461,7 @@ function warningFor(
     const withInactive = (warning?: string): string | undefined =>
         [inactive, warning].filter((item): item is string => Boolean(item)).join('；') || undefined;
     if (node.prefabName?.trim()) {
-        return withInactive(`引用项目 Prefab“${node.prefabName}”，${node.prefabName.replace(/\.prefab$/i, '').normalize('NFKC').toLocaleLowerCase('en-US') === 'popup' ? '按 Figma 调整宽高' : '实例保持原尺寸'}；不导入此节点的原始内容及子树`);
+        return withInactive(`引用项目 Prefab“${node.prefabName}”，${prefabUsesFigmaSize(node.prefabName) ? '按 Figma 调整宽高' : '按 Figma 实例相对母组件的倍率缩放'}；不导入此节点的原始内容及子树`);
     }
     if (hasPrefabDescendant(node)) {
         return withInactive('内部存在 Prefab 引用，智能模式保留节点结构，不自动合并为图片');

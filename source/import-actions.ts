@@ -12,6 +12,11 @@ export function isMergedResourceName(name: string): boolean {
     return /^(?:icon|img)_.+/i.test(name.trim().normalize('NFKC'));
 }
 
+/** Apply only to an explicit prefab reference, using its resource name. */
+export function prefabUsesFigmaSize(name: string): boolean {
+    return name.trim().normalize('NFKC').toLocaleLowerCase('en-US').startsWith('popup');
+}
+
 export function normalizeImportAction(value: unknown): ImportAction {
     if (value === 'merge' || value === 'svg') {
         return 'render';

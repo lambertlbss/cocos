@@ -11,7 +11,15 @@ AI 客户端
 
 没有监听 TCP 端口，也不需要让 Figma Importer 面板保持打开。
 
-Figma 节点上的 `prefab` TEXT 组件参数会自动参与现有导入流程，无需新增 MCP 参数。值按项目内唯一 Prefab 名称匹配，引用后跳过原设计子树；普通引用保留原尺寸，仅精确匹配 `Popup` 时按 Figma 调整宽高。缺失、重名和自身嵌套会在写入前报错，节点仍可显式忽略。
+Figma 节点上的 `prefab` TEXT 组件参数会自动参与现有导入流程，无需新增 MCP 参数。值按项目内唯一 Prefab 名称匹配，引用后跳过原设计子树。参数值经过空白清理、NFKC 和大小写归一后以 `popup` 开头时（如 `PopupCell`、`PopupWhatever`），实际引用实例根按 Figma 未旋转宽高 × 全局导入倍率调整，优先于普通引用的母组件倍率，不再额外叠加该倍率。判断依据为本次实际引用节点的参数值，不依据 Figma 显示名或脚本继承；无参数节点和源 Prefab 资源不改写。缺失、重名和自身嵌套会在写入前报错，节点仍可显式忽略。
+
+### 1.0.67：Button ZoomScale 1.15 与 Figma 母组件倍率
+
+普通带 `prefab` 参数的 INSTANCE，以 Figma 实例未旋转宽高除以真正母组件的未旋转宽高，得到允许不同的 X/Y 倍率；引擎实例 Scale XY = 源 Prefab authored Scale XY × 对应 Figma 倍率 × `settings.scale`。主组件定义自身使用 `1×1`。普通引用不改根 UITransform 宽高，镜像符号和 Z 轴 Scale 保留；全局导入倍率与 Figma 倍率分开保存和计算。
+
+母组件优先从当前文件读取；远程组件用 component key 查询元数据，再按返回的 `file_key/node_id` 读取。母组件缺失、无权限、零尺寸或源 Scale 无法读取时，保持当前 Scale 并回传提示到主进程、结果检查和批量结果，不猜引擎宽高比或回退为绝对尺寸 fit。首次和复用都从源 Scale 数值副本重算，单次导入缓存不跨任务沿用，也不累乘实例上次结果。
+
+生成或设置的 Button 使用 `SCALE` 过渡及 `zoomScale=1.15`，`duration=0.1` 保持；不扫描修改引用 Prefab 内部 Button。原生 Scale 保存/重开的隔离证据见 [Creator 3.8.7 Scale 验证](./docs/evidence/prefab-scale-creator387.md)，不将其等同于新 REST 母组件链路的真机端到端验证。
 
 MCP 不调用浏览器，也不使用浏览器自动化。读取设计和预览时，由 Cocos 插件使用已经保存的 Token 直接请求固定的 Figma REST API；因此仍需要能够访问 `api.figma.com` 的 HTTPS 网络，但不需要浏览器权限。全部 MCP 工具都声明为 `openWorldHint=false`，导入工具只保留“会修改本地 Cocos 项目”的明确确认。
 
